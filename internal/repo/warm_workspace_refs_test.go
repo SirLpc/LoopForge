@@ -35,6 +35,28 @@ func TestWarmWorkspaceReleaseRefsBeforeCommit(t *testing.T) {
 	if err = s.RecordWarmWorkspaceRefs(r.ID, l, refs); err == nil {
 		t.Fatal("overwrote committed proof")
 	}
+	if err := s.SettleWarmWorkspace(l, domain.WarmWorkspaceReleased); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequeueWarmWorkspace(l, now); err != nil {
+		t.Fatal(err)
+	}
+	l, ok, err = s.ReserveNextWarmWorkspace("machine", now)
+	if !ok || err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SettleWarmWorkspace(l, domain.WarmWorkspaceReleasing); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordWarmWorkspaceRefs(r.ID, l, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SettleWarmWorkspace(l, domain.WarmWorkspaceReleased); err != nil {
+		t.Fatal(err)
+	}
+	if yes, err := s.WarmWorkspaceRestorable(r.ID); err != nil || !yes {
+		t.Fatalf("lost earlier exact pins: %v %v", yes, err)
+	}
 	got, err := s.WarmWorkspaceRefs(r.ID)
 	if err != nil || len(got) != 1 || got[0].Branch != "work" {
 		t.Fatal(got, err)

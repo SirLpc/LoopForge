@@ -15,7 +15,6 @@ import (
 	"io/fs"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -244,28 +243,9 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 	if err := warmAlternate(filepath.Join(stage, ".git"), filepath.Join(cache, "objects")); err != nil {
 		return ref, err
 	}
-	if _, err = exec.LookPath("git-lfs"); err == nil {
-		paths, err := gitwork.C(local, stage, "lfs", "ls-files", head)
-		if err != nil {
-			return ref, err
-		}
-		if paths != "" {
-			if _, err := gitwork.C(local, stage, "remote", "add", "origin", r.CloneURL); err != nil {
-				return ref, err
-			}
-			config, err := gitwork.C(local, cache, "ls-tree", head, "--", ".lfsconfig")
-			if err != nil {
-				return ref, err
-			}
-			if config != "" {
-				if _, err := gitwork.C(local, stage, "restore", "--source="+head, "--worktree", "--", ".lfsconfig"); err != nil {
-					return ref, err
-				}
-			}
-			if _, err := gitwork.C(auth, stage, "lfs", "fetch", "--include=*", "--exclude=", "origin", head); err != nil {
-				return ref, fmt.Errorf("cannot recover Git LFS objects: %w", err)
-			}
-		}
+	lfs, err := prepareWarmLFS(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, r), head, r)
+	if err != nil {
+		return ref, err
 	}
 	if err := warmRegular(filepath.Join(meta, "index")); err != nil {
 		return ref, err
@@ -348,7 +328,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 				}
 				return filepath.SkipDir
 			}
-			if !warmBlobMatches(local, cache, stage, path, fields[2], fields[0]) {
+			if !warmBlobMatches(local, cache, lfs, path, fields[2], fields[0]) {
 				return fmt.Errorf("commit or restore changes in %s", rel)
 			}
 			return nil
@@ -371,7 +351,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 
 // Read actual bytes independently of index stat hints, excludes, filters,
 // hooks and submodule configuration in the writable checkout.
-func warmBlobMatches(ctx context.Context, cache, stage, path, oid, mode string) bool {
+func warmBlobMatches(ctx context.Context, cache string, lfs warmLFSManifest, path, oid, mode string) bool {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -441,16 +421,8 @@ func warmBlobMatches(ctx context.Context, cache, stage, path, oid, mode string) 
 	if !matches && (hex.EncodeToString(digest.Sum(nil)) != object || st.Size() != length) {
 		return false
 	}
-	// The private stage starts empty. Only this authenticated fetch can put the
-	// actual object here, independently of an existing checkout or LFS cache.
-	file, err := os.Open(filepath.Join(stage, ".git", "lfs", "objects", object[:2], object[2:4], object))
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	remote := sha256.New()
-	sizeRead, err := io.Copy(remote, file)
-	return err == nil && sizeRead == length && hex.EncodeToString(remote.Sum(nil)) == object
+	objectSize, verified := lfs.verified[object]
+	return verified && objectSize == length
 }
 
 // Repeat destructive cleanup proof from the recorded commit after a crash.

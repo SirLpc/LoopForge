@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
@@ -65,7 +66,7 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 			if len(inv.WarmWorkspaceRefs) > 0 && restore == nil {
 				return errors.New("missing recorded repository revision")
 			}
-			if err := prepareWarmProjectCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, repo, restore); err != nil {
+			if err := prepareWarmProjectCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore); err != nil {
 				return err
 			}
 			if err := gitwork.RecordBaseline(targets[slotID], repo.Ref); err != nil {
@@ -191,17 +192,40 @@ func (d *Daemon) openWarmPreview(task domain.RunnerTask) (*os.Root, error) {
 	p := d.warmWorkspacePool
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for id, target := range p.state.Leases[d.taskGateKey(task)].Targets {
-		relative, err := filepath.Rel(source, target)
-		if err != nil || filepath.IsLocal(relative) || warmWorkspacePathsOverlap(source, filepath.Join(target, ".git")) || warmWorkspacePathsOverlap(source, filepath.Join(target, p.slots[id].UnityProjectPath, "Library")) {
-			return nil, errors.New("warm previews cannot archive an entire checkout or its cache")
-		}
-	}
 	pinned, err := openWarmWorkspaceDir(source, false)
 	if err != nil {
 		return nil, err
 	}
 	defer pinned.Close()
+	lineage, err := warmWorkspaceDirLineage(source)
+	if err != nil {
+		return nil, err
+	}
+	actual, err := warmWorkspaceDirIdentity(pinned)
+	if err != nil || lineage[len(lineage)-1] != actual {
+		return nil, errors.New("preview source changed")
+	}
+	for id, target := range p.state.Leases[d.taskGateKey(task)].Targets {
+		checkout, err := warmWorkspaceDirLineage(target)
+		if err != nil {
+			return nil, err
+		}
+		if checkout[len(checkout)-1] != p.state.Slots[id].Identity {
+			return nil, errors.New("warm preview checkout identity changed")
+		}
+		if warmPreviewProtected(lineage, checkout, false) {
+			return nil, errors.New("warm previews cannot archive a checkout")
+		}
+		for _, cache := range []string{filepath.Join(target, ".git"), filepath.Join(target, p.slots[id].UnityProjectPath, "Library")} {
+			protected, err := warmWorkspaceDirLineage(cache)
+			if err != nil && !os.IsNotExist(err) {
+				return nil, err
+			}
+			if warmPreviewProtected(lineage, protected, err == nil) {
+				return nil, errors.New("warm previews cannot archive a protected cache")
+			}
+		}
+	}
 	expected, err := pinned.Stat()
 	if err != nil {
 		return nil, err
@@ -216,6 +240,10 @@ func (d *Daemon) openWarmPreview(task domain.RunnerTask) (*os.Root, error) {
 		return nil, errors.New("preview source changed")
 	}
 	return root, nil
+}
+
+func warmPreviewProtected(source, protected []warmWorkspaceIdentity, coverChildren bool) bool {
+	return slices.Contains(protected, source[len(source)-1]) || coverChildren && slices.Contains(source, protected[len(protected)-1])
 }
 
 func checkoutForWorkspace(ctx context.Context, lease *domain.WarmWorkspaceLease, root string, inv *domain.RunnerInvocation, refresh ...bool) error {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -207,6 +208,117 @@ func TestWarmWorkspaceReleasePreservesUnprovenGeneratedAndLFS(t *testing.T) {
 	})
 }
 
+func TestWarmWorkspaceLFSPrepareRequiresVerifier(t *testing.T) {
+	g := newWarmGitFixture(t)
+	warmGitWrite(t, g.source, "asset", "version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 10\n")
+	g.publish(t)
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if err := prepareWarmCheckout(t.Context(), g.checkout, g.cache, g.repo, nil); err == nil {
+		t.Fatal("prepared a pointer with no verified LFS content")
+	}
+}
+func TestWarmWorkspaceLFSTransfersOnceAcrossReturnsAndSlots(t *testing.T) {
+	realLFS, err := exec.LookPath("git-lfs")
+	if err != nil {
+		t.Skip("requires git-lfs")
+	}
+	g := newWarmGitFixture(t)
+	runGitT(t, g.source, "lfs", "install", "--local")
+	runGitT(t, g.source, "lfs", "track", "*.bin")
+	warmGitWrite(t, g.source, "asset.bin", "imported Unity asset")
+	g.publish(t)
+	second := filepath.Join(t.TempDir(), "slot")
+	runGitT(t, g.source, "clone", g.repo.CloneURL, second)
+	bin := t.TempDir()
+	log := filepath.Join(bin, "fetches")
+	t.Setenv("WARM_TEST_LFS_LOG", log)
+	t.Setenv("WARM_TEST_REAL_LFS", realLFS)
+	if err := os.WriteFile(filepath.Join(bin, "git-lfs"), []byte("#!/bin/sh\nif [ \"$1\" = fetch ]; then echo fetch >> \"$WARM_TEST_LFS_LOG\"; fi\nexec \"$WARM_TEST_REAL_LFS\" \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	const project = "unity-game"
+	prep := func(path, cache string, pin *domain.WarmWorkspaceRef) error {
+		return prepareWarmProjectCheckout(t.Context(), path, cache, ".", project, g.repo, pin)
+	}
+	if err := prep(g.checkout, g.cache, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Git stays authorized and its refs can advance. Further transfers would
+	// fail, making reuse independent of the wrapper's command counter.
+	remoteObjects := filepath.Join(g.repo.CloneURL, "lfs", "objects")
+	if err := os.Rename(remoteObjects, remoteObjects+".held"); err != nil {
+		t.Fatal(err)
+	}
+	verify := func(path, cache string) domain.WarmWorkspaceRef {
+		tree := warmReturnTree{root: filepath.Dir(path), checkout: path, collected: map[string]string{}}
+		proof, err := tree.verify(t.Context(), warmWorkspaceSlot{ProjectID: project, UnityProjectPath: "."}, cache, g.repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return proof
+	}
+	pin := verify(g.checkout, g.cache)
+	if err := prep(g.checkout, g.cache, nil); err != nil {
+		t.Fatal(err)
+	}
+	warmGitWrite(t, g.source, "advanced", "yes")
+	g.publish(t)
+	nextCache := filepath.Join(filepath.Dir(g.cache), "second")
+	if err := prep(second, nextCache, &pin); err != nil {
+		t.Fatal(err)
+	}
+	if runGitT(t, second, "rev-parse", "HEAD") != pin.Commit {
+		t.Fatal("lost pinned commit")
+	}
+	b, err := os.ReadFile(filepath.Join(second, "asset.bin"))
+	if err != nil || string(b) != "imported Unity asset" {
+		t.Fatal("lost LFS bytes", err)
+	}
+	verify(second, nextCache)
+	count, err := os.ReadFile(log)
+	if err != nil || strings.Count(string(count), "fetch") != 1 {
+		t.Fatalf("LFS transfers %q: %v", count, err)
+	}
+	if config := runGitT(t, second, "config", "--local", "--list"); strings.Contains(config, "lfs.storage") {
+		t.Fatal("exposed durable LFS store")
+	}
+	if err := prepareWarmProjectCheckout(t.Context(), second, nextCache, ".", "other-project", g.repo, &pin); err == nil {
+		t.Fatal("borrowed another project's LFS bytes")
+	}
+	cache := warmLFSCache(g.cache, project, g.repo)
+	other := g.repo
+	other.RepositoryID += "x"
+	if warmLFSCache(g.cache, project, other) == cache {
+		t.Fatal("repository isolation missing")
+	}
+	other = g.repo
+	other.CloneURL += "x"
+	if warmLFSCache(g.cache, project, other) == cache {
+		t.Fatal("origin isolation missing")
+	}
+	oid := fmt.Sprintf("%x", sha256.Sum256(b))
+	object := warmLFSObject(filepath.Join(cache, ".git", "lfs"), oid)
+	if err := os.WriteFile(object, []byte(strings.Repeat("x", len(b))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tree := warmReturnTree{root: filepath.Dir(second), checkout: second, collected: map[string]string{}}
+	if _, err := tree.verify(t.Context(), warmWorkspaceSlot{ProjectID: project, UnityProjectPath: "."}, nextCache, g.repo); err == nil {
+		t.Fatal("trusted a corrupted same-size cached asset")
+	}
+	kept, err := os.ReadFile(filepath.Join(second, "asset.bin"))
+	if err != nil || string(kept) != string(b) {
+		t.Fatal("cache damage reached working asset", err)
+	}
+}
 func TestWarmWorkspaceReleaseQualifiedInventory(t *testing.T) {
 	f, p, l, g := warmReturnFixture(t)
 	d := Daemon{cfg: Config{DefaultWorkspaceRoot: f.workspace}, state: daemonState{RunnerID: l.RunnerID}, warmWorkspacePool: p}

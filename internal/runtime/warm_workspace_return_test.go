@@ -20,6 +20,24 @@ func TestWarmWorkspaceReleaseRetainsOnHiddenProcfs(t *testing.T) {
 		t.Fatal("incomplete inventory qualified for release")
 	}
 }
+func TestWarmWorkspaceReleaseChecksThreadPrivateHandles(t *testing.T) {
+	proc := t.TempDir()
+	for _, p := range []string{"12", "12/task/12", "12/task/13"} {
+		base := filepath.Join(proc, p)
+		if err := os.MkdirAll(filepath.Join(base, "fd"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "maps"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("/workspace/owner", filepath.Join(proc, "12/task/13", "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWarmLinuxProcesses(t.Context(), proc, func(s string) bool { return s == "/workspace/owner" }); err == nil {
+		t.Fatal("missed non-leader thread cwd")
+	}
+}
 func TestWarmWorkspaceReleaseDetectsNativeWorkspaceProcess(t *testing.T) {
 	root := t.TempDir()
 	cleanErr := CheckWarmWorkspaceProcesses(t.Context(), root)

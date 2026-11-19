@@ -90,6 +90,14 @@ func TestWarmWorkspaceExactReadyGeneration(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(checkout, "public"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	for _, alias := range []string{"CHECKOUT", "checkout/lIbRaRy"} {
+		if _, err := os.Stat(filepath.Join(d.taskWorkspace(task), alias)); err == nil {
+			preview.PreviewArchive.SourcePath = alias
+			if err := d.checkWarmTask(t.Context(), preview); err == nil {
+				t.Fatalf("physical alias %q archived", alias)
+			}
+		}
+	}
 	preview.PreviewArchive.SourcePath = "checkout/public"
 	if err := d.checkWarmTask(t.Context(), preview); err != nil {
 		t.Fatal(err)
@@ -111,6 +119,20 @@ func TestWarmWorkspaceExactReadyGeneration(t *testing.T) {
 	}
 }
 
+func TestWarmWorkspacePreviewProtectsPhysicalAliases(t *testing.T) {
+	root := warmWorkspaceIdentity{Dev: 1, Ino: 1}
+	checkout := warmWorkspaceIdentity{Dev: 1, Ino: 2}
+	cache := warmWorkspaceIdentity{Dev: 1, Ino: 3}
+	sub := warmWorkspaceIdentity{Dev: 1, Ino: 4}
+	for _, line := range [][]warmWorkspaceIdentity{{root, checkout}, {root, checkout, cache}, {root, checkout, cache, sub}, {root}} {
+		if !warmPreviewProtected(line, []warmWorkspaceIdentity{root, checkout}, false) && !warmPreviewProtected(line, []warmWorkspaceIdentity{root, checkout, cache}, true) {
+			t.Fatal("alias accepted", line)
+		}
+	}
+	if warmPreviewProtected([]warmWorkspaceIdentity{root, checkout, sub}, []warmWorkspaceIdentity{root, checkout}, false) {
+		t.Fatal("dedicated output denied")
+	}
+}
 func TestWarmWorkspaceRestartCannotDisableActivePool(t *testing.T) {
 	f := newWarmPoolFixture(t)
 	p := f.open(t)

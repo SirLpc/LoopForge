@@ -140,6 +140,63 @@ func TestRetryAsyncRestoreSurvivesDisconnectAndReusesBackgroundOperation(t *test
 	}
 }
 
+func TestRetryNeverAdmittedWarmSOP(t *testing.T) {
+	for _, prefer := range []string{"", "respond-async"} {
+		t.Run(prefer, func(t *testing.T) {
+			a, owner, _, outsider, _ := sharedWorkbenchFixture(t)
+			en := engine.New(a.repo, runtime.NewManager(t.TempDir()))
+			en.ConfigureExecution("api", "api", time.Minute, false)
+			a.deps.engine = en
+			run, _ := a.repo.RunState("shared-run")
+			run.Status = "failed"
+			run.WorkflowSnapshot.Nodes = []domain.WorkflowNode{{ID: "work", Type: "script", Script: "true", MaxAttempts: 1}}
+			run.Nodes = map[string]*domain.NodeRun{"work": {NodeID: "work", Status: "failed", Attempt: 1}}
+			run.ExecutionContext.WorkspaceMode = domain.WorkspaceModeWarmPool
+			run.ExecutionContext.ExecutionMode = domain.ExecutionModeRunner
+			run.ExecutionContext.ExecutionRunnerID = "restore-runner"
+			run.WorkflowSnapshot.SandboxProfileID = "docker"
+			run.WorkflowSnapshot.SandboxSnapshot = &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}}
+			if err := a.repo.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.repo.PutRunner(domain.Runner{ID: "restore-runner", Status: domain.RunnerStatusOnline, Runtimes: []domain.RunnerRuntime{{Provider: "terminal", Status: domain.RuntimeStatusOnline}}}); err != nil {
+				t.Fatal(err)
+			}
+			h := &runsHandlers{deps: a.deps}
+			router := gin.New()
+			router.POST("/api/runs/:id/retry", h.run)
+			decision := `{"nodeId":"work","reason":"retry","expected":{"status":"failed","attempt":1,"reworkCount":0}}`
+			denied, rr := workbenchContext(outsider, "POST", "/api/runs/shared-run/retry", bytes.NewBufferString(decision))
+			denied.Request.Header.Set("Prefer", prefer)
+			router.ServeHTTP(rr, denied.Request)
+			if rr.Code < 400 {
+				t.Fatal("unauthorized retry", rr.Code)
+			}
+			if err := a.repo.DB.Table("runs").Where("id = ?", run.ID).Update("workspace_cleaned_at", time.Now().UTC()).Error; err != nil {
+				t.Fatal(err)
+			}
+			history, deniedHistory := workbenchContext(owner, "POST", "/api/runs/shared-run/retry", bytes.NewBufferString(decision))
+			history.Request.Header.Set("Prefer", prefer)
+			router.ServeHTTP(deniedHistory, history.Request)
+			if deniedHistory.Code < 400 {
+				t.Fatal("reused missing historical lease", deniedHistory.Code)
+			}
+			if err := a.repo.DB.Table("runs").Where("id = ?", run.ID).Update("workspace_cleaned_at", nil).Error; err != nil {
+				t.Fatal(err)
+			}
+			req, res := workbenchContext(owner, "POST", "/api/runs/shared-run/retry", bytes.NewBufferString(decision))
+			req.Request.Header.Set("Prefer", prefer)
+			router.ServeHTTP(res, req.Request)
+			if res.Code != 200 {
+				t.Fatal(res.Code, res.Body)
+			}
+			current, _ := a.repo.RunState(run.ID)
+			if current.Status != "running" || current.Nodes["work"].Status != "pending" {
+				t.Fatal(current.Status)
+			}
+		})
+	}
+}
 func TestAsyncWorkspaceRestoreDoesNotAcknowledgeMissingSnapshot(t *testing.T) {
 	a, owner, _, _, _ := sharedWorkbenchFixture(t)
 	a.deps.engine = engine.New(a.repo, runtime.NewManager(t.TempDir()))

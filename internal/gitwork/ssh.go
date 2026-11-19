@@ -363,7 +363,7 @@ func sshCommandEnvironment(ctx context.Context, args []string) (map[string]strin
 	if remote == "" {
 		return nil, func() {}, nil
 	}
-	if len(args) >= 2 && args[0] == "-C" {
+	for len(args) >= 2 && (args[0] == "-C" || args[0] == "-c") {
 		args = args[2:]
 	}
 	if len(args) >= 2 && args[0] == "lfs" && args[1] == "fetch" {

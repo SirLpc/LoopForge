@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -32,12 +31,12 @@ func (p *warmWorkspacePool) gitCache(slot string) string {
 }
 
 func prepareWarmCheckout(ctx context.Context, checkout, cache string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) error {
-	return prepareWarmProjectCheckout(ctx, checkout, cache, ".", repo, restore)
+	return prepareWarmProjectCheckout(ctx, checkout, cache, ".", "", repo, restore)
 }
 
 // The caller holds the exclusive, verified slot. cache belongs to the runner,
 // outside every writable checkout; it is stable across renames of the slot.
-func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) (result error) {
+func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, projectID string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) (result error) {
 	if !filepath.IsAbs(cache) || !filepath.IsAbs(checkout) || filepath.Clean(cache) != cache || warmWorkspacePathsOverlap(checkout, cache) || strings.ContainsAny(cache, "\r\n") {
 		return errors.New("invalid warm Git cache location")
 	}
@@ -186,35 +185,9 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project st
 	if _, err := gitwork.C(local, stage, "update-ref", "--no-deref", "HEAD", target); err != nil {
 		return err
 	}
-	hasLFS := false
-	if _, err := exec.LookPath("git-lfs"); err == nil {
-		files, err := gitwork.C(local, stage, "lfs", "ls-files", target)
-		if err != nil {
-			return err
-		}
-		if files != "" {
-			hasLFS = true
-			if _, err := gitwork.C(local, stage, "config", "lfs.fetchrecentalways", "false"); err != nil {
-				return err
-			}
-			// Resolve .lfsconfig from the target even while the incremental
-			// index still holds the previous baseline.
-			configMode, err := gitwork.C(local, stage, "ls-tree", target, "--", ".lfsconfig")
-			if err != nil {
-				return err
-			}
-			if strings.HasPrefix(configMode, "100") {
-				if _, err := gitwork.C(local, stage, "restore", "--source="+target, "--worktree", "--", ".lfsconfig"); err != nil {
-					return err
-				}
-			} else if err := os.WriteFile(filepath.Join(stage, ".lfsconfig"), nil, 0600); err != nil {
-				return err
-			}
-
-			if _, err := gitwork.C(auth, stage, "lfs", "fetch", "--include=*", "--exclude=", "origin", target); err != nil {
-				return err
-			}
-		}
+	lfs, err := prepareWarmLFS(local, auth, stage, db, warmLFSCache(cache, projectID, repo), target, repo)
+	if err != nil {
+		return err
 	}
 	if branch != "" {
 		if _, err := gitwork.C(local, stage, "update-ref", "refs/heads/"+branch, target); err != nil {
@@ -246,14 +219,7 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project st
 	if err := os.Remove(filepath.Join(cache, warmSeedMarker)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if hasLFS {
-		// read-tree retains unchanged files, including an admin clone prepared
-		// with skip-smudge. Materialize such pointers using the prefetched store.
-		if _, err := gitwork.C(local, checkout, "lfs", "checkout"); err != nil {
-			return err
-		}
-	}
-	return nil
+	return lfs.hydrate(checkout, private)
 }
 
 // A new cache can borrow the admin seed during its first fetch. Promotion

@@ -230,3 +230,20 @@ func (e *Engine) CheckWorkspaceRestoreAccess(ctx context.Context, run domain.Run
 	}
 	return nil
 }
+
+// First SOP execution checks its frozen remotes during normal admission. An
+// exact restore or an owner which already has a lease must use its own proof.
+func (e *Engine) WarmWorkspaceFirstActivation(ctx context.Context, run domain.Run) (bool, error) {
+	if run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool || run.IsWorkspace() || sharesWorkspace(run) || !run.WorkspaceCleanedAt.IsZero() {
+		return false, nil
+	}
+	if err := e.authorizeWarmActor(run, workspaceRestoreActor(ctx)); err != nil {
+		return false, err
+	}
+	_, _, found, err := e.repo.WarmWorkspaceAllocation(run.ID)
+	if err != nil || found {
+		return false, err
+	}
+	refs, err := e.repo.WarmWorkspaceRefs(run.ID)
+	return err == nil && len(refs) == 0, err
+}

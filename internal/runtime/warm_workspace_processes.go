@@ -110,14 +110,30 @@ func checkWarmLinuxProcesses(ctx context.Context, proc string, owns func(string)
 			return err
 		}
 		base := filepath.Join(proc, dir.Name())
-		if err := checkWarmProcessHandles(base, owns); err != nil {
+		threads, err := os.ReadDir(filepath.Join(base, "task"))
+		if err != nil {
 			if _, statErr := os.Stat(base); os.IsNotExist(statErr) {
 				continue
 			}
-			if errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("workspace retained: cannot enumerate threads for process %s: %w", dir.Name(), err)
+		}
+		if len(threads) == 0 {
+			if _, statErr := os.Stat(base); os.IsNotExist(statErr) {
 				continue
 			}
-			return fmt.Errorf("workspace retained: verify host process %s handles: %w", dir.Name(), err)
+			return fmt.Errorf("workspace retained: empty thread inventory for live process %s", dir.Name())
+		}
+		for _, thread := range threads {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			task := filepath.Join(base, "task", thread.Name())
+			if err := checkWarmProcessHandles(task, owns); err != nil {
+				if _, statErr := os.Stat(task); os.IsNotExist(statErr) {
+					continue
+				}
+				return fmt.Errorf("workspace retained: verify host process %s thread %s handles: %w", dir.Name(), thread.Name(), err)
+			}
 		}
 	}
 	return nil
@@ -165,8 +181,5 @@ func checkWarmProcessHandles(base string, owns func(string) bool) error {
 	}
 	err = scanner.Err()
 	mapped.Close()
-	if err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
+	return err
 }

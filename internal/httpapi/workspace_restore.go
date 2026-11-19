@@ -58,8 +58,19 @@ func (h *runsHandlers) prepareRunActivationWorkspace(c *gin.Context, id string) 
 	if user, ok := h.requestUser(c.Request, true); ok {
 		ctx = engine.WithWorkspaceRestoreActor(ctx, user.ID)
 	}
+	run, hasRun := h.repo.RunState(id)
+	if hasRun {
+		first, err := h.engine.WarmWorkspaceFirstActivation(ctx, run)
+		if err != nil {
+			respondWorkspaceError(c, err)
+			return true
+		}
+		if first {
+			return false
+		}
+	}
 	if !strings.Contains(c.GetHeader("Prefer"), "respond-async") {
-		if run, ok := h.repo.RunState(id); ok {
+		if hasRun {
 			if err := h.engine.CheckWorkspaceRestoreAccess(ctx, run); err != nil {
 				respondWorkspaceError(c, err)
 				return true
