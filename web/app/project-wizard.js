@@ -239,7 +239,7 @@ function projectWizardBasicHTML(w){
     +pwField('项目说明',`<textarea class="pw-input" id="pwDescription" name="description" rows="3" placeholder="可选，这个项目负责什么？Agent 会把它作为上下文。">${escapeHTML(d.description||'')}</textarea>`,{for:'pwDescription'}));
   const owner=Number(state.currentUser?.id)?'':pwField('项目 Owner',userCombobox('ownerId',d.ownerId,'请选择项目 Owner'),{required:true,hint:'项目的默认责任人，创建后可在项目成员中调整。'});
   const defaults=pwCard('默认设置','新建需求时自动带上的流程',pwPill('已预选','ok'),
-    `${pwField('默认 SOP',pwSelect(projectDefaultSOPField(d)),{required:true})}${owner}`);
+    `${pwField('默认 SOP',pwSelect(projectDefaultSOPField(d)),{required:true})}${pwField('工作区模式',pwSelect(projectWorkspaceModeField(d)))}${owner}`);
   return projectWizardHeadHTML(w,'基本信息','只需填写项目名称即可创建，其余都有默认值。')+`<div class="pw-pane">${identity}${defaults}</div>`;
 }
 function projectWizardRepoHint(url){
@@ -365,7 +365,7 @@ function syncProjectWizardField(t){
     const pill=$('#projectWizard')?.querySelector('[data-pw-people-pill]');if(pill)pill.outerHTML=projectWizardPeoplePill(d);
     return true;
   }
-  if(!['name','description','workflowId','tapdWorkspaceId','tapdIterationId'].includes(name))return false;
+  if(!['name','description','workflowId','workspaceMode','tapdWorkspaceId','tapdIterationId'].includes(name))return false;
   d[name]=t.value;
   if(name==='name'){const pill=$('#projectWizard')?.querySelector('[data-pw-name-pill]');if(pill)pill.outerHTML=projectWizardNamePill(t.value)}
   return true;

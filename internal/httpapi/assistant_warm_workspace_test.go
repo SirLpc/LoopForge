@@ -48,6 +48,20 @@ func warmChatFixture(t *testing.T) (*assistantHandlers, *AgentToolSession, domai
 
 func TestWarmWorkspaceConversationQueuesAndResumes(t *testing.T) {
 	h, s, g, req := warmChatFixture(t)
+	now := time.Now()
+	slots := []domain.WarmWorkspaceSlot{
+		{ID: "slot", ProjectID: s.ProjectID, RepositoryID: "code", State: "available"},
+		{ID: "other", ProjectID: s.ProjectID, RepositoryID: "code", State: "available"},
+	}
+	if err := h.repo.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.repo.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: "other-sop", RunnerID: "machine", ProjectID: s.ProjectID, RepositoryIDs: []string{"code"}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := h.repo.ReserveNextWarmWorkspace("machine", now); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
 	if err := h.repo.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: "sop", RunnerID: "machine", ProjectID: s.ProjectID, RepositoryIDs: []string{"code"}}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +91,7 @@ func TestWarmWorkspaceConversationQueuesAndResumes(t *testing.T) {
 	}
 	ageGeneration(t, h, g.SessionID)
 	visible, _ := h.currentGeneration(g.UserID, g.SessionID)
-	if visible.Status != "running" || len(visible.Events) == 0 || !strings.Contains(string(visible.Events[len(visible.Events)-1].Data), "workspace.pool_waiting") {
+	if !visible.WarmWorkspaceWaiting || visible.Status != "running" || len(visible.Events) == 0 || !strings.Contains(string(visible.Events[len(visible.Events)-1].Data), "workspace.pool_waiting") {
 		t.Fatalf("pending generation was lost on reconnect: %+v", visible)
 	}
 	stored, _ := h.repo.AssistantSession(g.UserID, g.SessionID)
@@ -88,10 +102,17 @@ func TestWarmWorkspaceConversationQueuesAndResumes(t *testing.T) {
 	restarted := &assistantHandlers{deps: h.deps}
 	called := make(chan string, 1)
 	restarted.generate = func(ctx context.Context, prompt string, u domain.User) (string, error) {
+		active, _ := h.repo.PeekAssistantGeneration(g.UserID, g.SessionID)
+		if active.WarmWorkspaceWaiting {
+			t.Error("resumed model still reports a warm queue")
+		}
 		called <- prompt
 		return `{"message":"done","drafts":[]}`, nil
 	}
 	h.engine.WorkspaceCheckpointTransport = func(ctx context.Context, r domain.Run, q domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		if domain.IsWorkspaceCheckpointTransferOperation(q.Operation) {
+			t.Errorf("warm conversation requested whole workspace transfer %s", q.Operation)
+		}
 		phase := map[string]string{"warm_prepare": "placed", "warm_checkout": "ready", "warm_verify_access": "authorized"}[q.Operation]
 		return domain.RunnerWorkspaceResponse{Payload: []byte(`{"phase":"` + phase + `"}`)}, nil
 	}

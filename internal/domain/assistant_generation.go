@@ -7,6 +7,9 @@ import (
 
 // A generation occupies one private or shared conversation slot, independently of any browser.
 type AssistantGeneration struct {
+	// Projected from the durable queue, independent of the bounded activity tail.
+	WarmWorkspaceWaiting bool `json:"warmWorkspaceWaiting,omitempty"`
+
 	StartedAt        time.Time                  `json:"startedAt,omitempty"`
 	Trigger          string                     `json:"trigger,omitempty"`
 	TriggerID        string                     `json:"triggerId,omitempty"`

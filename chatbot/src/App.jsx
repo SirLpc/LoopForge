@@ -271,6 +271,7 @@ function LiveMessage({ live, generation, finished = false, local = false, readOn
           startedAt={generation?.startedAt}
           finishedAt={generation?.updatedAt}
           live={!finished}
+          workspaceWaiting={generation?.warmWorkspaceWaiting}
           interrupted={finished}
         />
       ) : (
@@ -280,6 +281,7 @@ function LiveMessage({ live, generation, finished = false, local = false, readOn
             startedAt={generation?.startedAt}
             finishedAt={generation?.updatedAt}
             live={!finished}
+            workspaceWaiting={generation?.warmWorkspaceWaiting}
             interrupted={finished}
           />
         </div>

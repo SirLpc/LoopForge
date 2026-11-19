@@ -250,6 +250,9 @@ func (r *RunsRepo) runSummariesFor(filter domain.AnalyticsFilter, issueID string
 		// null 而非 []（nil slice 语义）。
 		return nil, nil, nil
 	}
+	if err := r.runners.populateWarmWorkspaceWaiting(out); err != nil {
+		return nil, nil, err
+	}
 	return out, timingEvents, nil
 }
 
@@ -380,7 +383,11 @@ func (r *RunsRepo) RunView(id string) (domain.Run, bool) {
 			}
 		}
 	}
-	return run, true
+	views := []domain.Run{run}
+	if err := r.runners.populateWarmWorkspaceWaiting(views); err != nil {
+		return domain.Run{}, false
+	}
+	return views[0], true
 }
 
 // RunStreamView matches the SSE contract, which delivers only the latest 80

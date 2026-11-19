@@ -174,6 +174,7 @@ func (r *AssistantRepo) ClaimWarmContinuation(p WaitingAssistantGeneration, bind
 			return err
 		}
 		payload.WarmWait = nil
+		row.WarmWaitRunID = ""
 		row.Payload = mustJSON(payload)
 		g = decodeGeneration(row)
 		if err := tx.Model(&row).Updates(map[string]any{"warm_wait_run_id": "", "payload": row.Payload, "updated_at": r.generationClock()}).Error; err != nil {

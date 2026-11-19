@@ -64,6 +64,7 @@ func decodeGeneration(row assistantGenerationRow) domain.AssistantGeneration {
 	_ = json.Unmarshal(row.Payload, &g)
 	g.UserID = row.UserID
 	g.Status = row.Status
+	g.WarmWorkspaceWaiting = row.Status == "running" && !row.CancelRequested && row.WarmWaitRunID != ""
 	g.CancelRequested = row.CancelRequested
 	g.UpdatedAt = row.UpdatedAt
 	return g

@@ -59,6 +59,7 @@ type Daemon struct {
 	workspaceTerminals   runtime.TerminalPool
 	checkpointTransfers  runtime.CheckpointTransfers
 	warmWorkspacePool    *warmWorkspacePool
+	warmHostVisible      atomic.Bool
 	workspaceGates       sync.Map // run ID -> *sync.RWMutex; fences manual writes locally
 }
 
@@ -362,6 +363,7 @@ func (d *Daemon) reregister(ctx context.Context) error {
 // ---------- runtime discovery ----------
 
 func (d *Daemon) refreshRuntimes(ctx context.Context) {
+	d.refreshWarmHostVisibility(ctx)
 	var runtimes []domain.RunnerRuntime
 	if d.cfg.ManagedCLIRoot == "" {
 		runtimes = DetectRuntimes(ctx, d.cfg.ExtraBinaries)
@@ -418,7 +420,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 	// heartbeat interval while the worker resumes its runs.
 	for ctx.Err() == nil {
 		req := HeartbeatRequest{
-			WarmSlots:    d.warmWorkspacePool.inventory(),
+			WarmSlots:    d.warmWorkspaceInventory(runtime.DockerReady),
 			Status:       "idle",
 			RunningTasks: int(atomic.LoadInt32(&d.running)),
 			Version:      runnerVersion,
@@ -1452,7 +1454,7 @@ func (d *Daemon) defaultWorkspace(taskID string) string {
 }
 
 // runnerVersion is reported at registration; it matches the module build.
-var runnerVersion = domain.RunnerVersionGitHTTP
+var runnerVersion = domain.RunnerVersionWarmWorkspace
 
 // Version returns the runner build version reported at registration.
 func Version() string { return runnerVersion }

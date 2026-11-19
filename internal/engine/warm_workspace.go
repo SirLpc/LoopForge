@@ -177,6 +177,7 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 	restoreToken := ConversationWorkspaceToken(ctx, run.ID)
 	restoringTerminal := restoreToken != "" && domain.TerminalRunStatus(run.Status)
 	announced := false
+	preparing := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return empty, err
@@ -221,6 +222,12 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 				})
 			}
 		case domain.WarmWorkspaceReserved:
+			if !preparing {
+				preparing = true
+				e.updateRun(owner.ID, func(r *domain.Run) {
+					e.event(r, "", "workspace.pool_preparing", "已分配预热工作区，正在准备检出")
+				})
+			}
 			runner, online := e.repo.Runner(runnerID)
 			if !online || runner.Status != domain.RunnerStatusOnline {
 				break

@@ -19,10 +19,19 @@ import (
 // host editor or terminal intact and keep its checkout assigned. Enumerating
 // open handles avoids walking the Unity Library to find their owners.
 func CheckWarmWorkspaceProcesses(ctx context.Context, root string) error {
-	owns := func(name string) bool {
+	return checkWarmHostProcesses(ctx, func(name string) bool {
 		name = strings.TrimSuffix(name, " (deleted)")
 		return name == root || strings.HasPrefix(name, root+string(filepath.Separator))
-	}
+	})
+}
+
+// CheckWarmHostVisibility verifies the same host-wide process and handle
+// coverage required at return, without treating any active checkout as busy.
+func CheckWarmHostVisibility(ctx context.Context) error {
+	return checkWarmHostProcesses(ctx, func(string) bool { return false })
+}
+
+func checkWarmHostProcesses(ctx context.Context, owns func(string) bool) error {
 	switch runtime.GOOS {
 	case "linux":
 		// Linux reserves PROC_PID_INIT_INO for the initial PID namespace. A

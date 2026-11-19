@@ -150,7 +150,7 @@ export function mergeActivity(previous = [], events = []) {
       closeThinking(at);
       if (steps.at(-1)?.kind !== "status" || steps.at(-1)?.text !== event.text)
         steps.push({
-          id: `status-${sequence ?? steps.length}`,
+          id: event.id === "workspace.pool_waiting" ? event.id : `status-${sequence ?? steps.length}`,
           kind: "status",
           text: event.text,
           startedAt: at,

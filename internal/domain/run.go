@@ -25,6 +25,7 @@ type Run struct {
 	// preview finalizer still needs the run directory. Zero means no hold.
 	WorkspaceCleanupNotBefore time.Time         `json:"workspaceCleanupNotBefore,omitempty"`
 	Status                    string            `json:"status"`
+	WarmWorkspaceWaiting      bool              `json:"warmWorkspaceWaiting,omitempty"`
 	AdmissionState            string            `json:"admissionState,omitempty"`
 	QueueEnteredAt            time.Time         `json:"queueEnteredAt,omitempty"`
 	ConcurrencyExempt         bool              `json:"concurrencyExempt,omitempty"`

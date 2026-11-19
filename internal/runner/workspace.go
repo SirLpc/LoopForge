@@ -114,7 +114,10 @@ func (d *Daemon) handleRunnerWorkspaceBrowser(ctx context.Context, request domai
 	return runnerWorkspacePayload(state)
 }
 
-func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerWorkspaceRequest) domain.RunnerWorkspaceResponse {
+func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerWorkspaceRequest) (response domain.RunnerWorkspaceResponse) {
+	if domain.IsWarmWorkspaceOperation(request.Operation) || request.WarmWorkspaceLease != nil {
+		defer func() { response = d.publicWarmResponse(response) }()
+	}
 	d.updateMu.RLock()
 	defer d.updateMu.RUnlock()
 	if d.updateReady.Load() {

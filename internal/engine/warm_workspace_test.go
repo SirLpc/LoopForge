@@ -24,6 +24,12 @@ func TestWarmWorkspaceSOPWaitsBeforeDispatch(t *testing.T) {
 	}
 	e.WorkspaceCheckpointTransport = func(ctx context.Context, r domain.Run, req domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
 		phase := "placed"
+		if req.Operation == domain.RunnerWorkspaceOperationWarmPrepare {
+			stored, _ := e.repo.Run(r.ID)
+			if !slices.ContainsFunc(stored.Events, func(event domain.RunEvent) bool { return event.Type == "workspace.pool_preparing" }) {
+				t.Error("slot reservation must wake live views before preparation starts")
+			}
+		}
 		if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
 			phase = "ready"
 		}

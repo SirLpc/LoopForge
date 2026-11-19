@@ -16,7 +16,7 @@ function load(context, names) {
 }
 async function flush() { for (let i=0; i<12; i++) await Promise.resolve(); }
 async function main() {
-  const statuses = load({}, ['runStatus','runDisplayStatus','runDisplayStatusClass','runControlSignature','runControlToast']);
+  const statuses = load({}, ['runStatus','runWarmWorkspaceWaiting','runDisplayStatus','runDisplayStatusClass','runControlSignature','runControlToast']);
   assert.equal(statuses.runStatus('queued'), '排队中');
   assert.equal(statuses.runDisplayStatusClass({status:'queued'}), 'queued');
   assert.match(statuses.runControlToast({status:'queued'},'continued'), /排队/);
@@ -44,7 +44,7 @@ async function main() {
 
   const calls=[],messages=[],run={id:'run/1',status:'waiting',pauseRequested:true};
   const control={state:{selectedRun:run.id,activeRun:run,data:{runs:[run],issues:[]},issueDetailData:{run}},api:async(path,opts)=>{calls.push([path,opts?.method||'GET']);return{id:run.id,status:'queued',pauseRequested:false,admissionState:'queued'};},toast:m=>messages.push(m),readHumanContext:()=>'',refreshIssues:async()=>{},refreshRuns:async()=>{},startLiveRun:id=>calls.push(['stream',id]),stopLiveRun:()=>{},renderRunDetail:()=>{},renderRuns:()=>{},renderIssueDetailTab:()=>{}};
-  load(control,['cachedRun','queuedRunActionBlocked','patchCachedRun','paintRunControl','runStatus','runDisplayStatus','runControlToast','sortRunsDescending','syncRunControlState','resumePausedRun']);
+  load(control,['cachedRun','queuedRunActionBlocked','patchCachedRun','paintRunControl','runStatus','runWarmWorkspaceWaiting','runDisplayStatus','runControlToast','sortRunsDescending','syncRunControlState','resumePausedRun']);
   control.$=()=>null;
   vm.runInContext('const runActivationRequests=new Map();',control);
   load(control,['paintRunActivationProgress','requestRunActivation']);

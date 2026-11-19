@@ -70,6 +70,24 @@ vi.mock("mermaid", () => ({
 import App from "../src/App.jsx";
 
 describe("App", () => {
+  test("can stop a warm queue before any model output", () => {
+    const previous = { ...chat };
+    Object.assign(chat, {
+      activeId: "warm-chat", busy: true, generation: { id: "warm-turn", status: "running", warmWorkspaceWaiting: true },
+      session: { id: "warm-chat", messages: [{ role: "user", content: "打开项目" }] },
+      live: { answer: "", activity: [{ id: "workspace.pool_waiting", kind: "status", text: "等待预热工作区" }] },
+    });
+    const view = render(<App />);
+    try {
+      expect(screen.getByRole("status")).toHaveTextContent("等待预热工作区");
+      fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+      expect(chat.stop).toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      Object.assign(chat, previous);
+    }
+  });
+
   test("pauses without showing an intermediate stopping state", () => {
     const previous = { ...chat };
     Object.assign(chat, { activeId: "stopping-chat", busy: true, stopping: true,

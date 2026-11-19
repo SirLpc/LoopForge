@@ -117,6 +117,7 @@ function assertFooterLayout(step){
   assert.match(basic,/role="dialog" aria-modal="true"/);
   assert.match(basic,/第 1 步，共 4 步/);
   assert.match(basic,/name="name"/);
+  assert.match(basic,/name="workspaceMode"[^]*?value="checkout" selected/);
   assert.match(basic,/name="workflowId"[^]*value="generic-backend-delivery" selected/);
   for(const bad of ['name="id"','name="key"',"自定义","标识与 Key","data-pa-ident"])assert.ok(!basic.includes(bad),"step 1 has no "+bad);
   assert.ok(!basic.includes('name="ownerId"'),"signed-in users own the project without a picker");
@@ -155,12 +156,14 @@ function assertFooterLayout(step){
   assert.match(html(),/创建失败[^<]*项目标识已存在/);
   requests.length=0;
 
+  assert.equal(ctx.syncProjectWizardField({name:"workspaceMode",value:"warm_pool"}),true);
   // Create: id/key are generated from the name; one POST, then step 2.
   await ctx.projectWizardNext();
   assert.equal(requests.length,1);
   assert.equal(requests[0].method,"POST");assert.equal(requests[0].url,"/api/projects");
   assert.equal(requests[0].body.id,"web-console");
   assert.equal(requests[0].body.key,"WC");
+  assert.equal(requests[0].body.workspaceMode,"warm_pool");
   assert.equal(requests[0].body.ownerId,1);
   assert.equal(requests[0].body.workflowId,"generic-backend-delivery");
   assert.ok(!("businessDomainId" in requests[0].body));

@@ -232,6 +232,14 @@ assert.equal(ctx.projectDraftDirty({...draft,tapdClear:true},base),true);
   assert.equal(ctx.state.projectFilter,"agentflow","creating a project does not switch the workbench project");
   assert.ok(!("repoRows" in requests[0].body));
 
+  for (const mode of ["warm_pool", "checkout"]) {
+    const fields = {id:"fresh-project",key:"FP",name:"Fresh Project",workflowId:"wf",workspaceMode:mode};
+    await ctx.saveProjectAdmin({preventDefault(){},currentTarget:f(fields)});
+    assert.equal(requests.at(-1).method,"PUT");
+    assert.equal(requests.at(-1).body.workspaceMode,mode);
+    assert.equal(ctx.state.data.projects.find(p=>p.id===fields.id).workspaceMode,mode);
+  }
+
   // Repository drawer: saving with "default" on writes the repo, then the project, and keeps the open draft intact.
   requests.length=0;
   ctx.state.projectAdminDetailId="web-console";ctx.state.projectDraftFor="web-console";

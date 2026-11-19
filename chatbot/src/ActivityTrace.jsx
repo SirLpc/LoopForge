@@ -293,6 +293,7 @@ export function ReplyTimeline({
   startedAt,
   finishedAt,
   live = false,
+  workspaceWaiting = false,
   interrupted = false,
 }) {
   return (
@@ -302,6 +303,7 @@ export function ReplyTimeline({
         startedAt={startedAt}
         finishedAt={finishedAt}
         live={live}
+        workspaceWaiting={workspaceWaiting}
         interrupted={interrupted}
         narration={traceBlocks(steps, { live })}
       />
@@ -318,6 +320,7 @@ export default function ActivityTrace({
   startedAt,
   finishedAt,
   live = false,
+  workspaceWaiting = false,
   interrupted = false,
   narration = null,
 }) {
@@ -343,21 +346,25 @@ export default function ActivityTrace({
     <span className="reply-divider" role="separator" aria-label="回复正文分隔线" />
   );
   if (live) {
-    const status = steps.filter((step) => step.kind === "status").at(-1)?.text;
+    const status = steps.filter((step) => step.kind === "status").at(-1);
     return (
       <div className="reply-timing execution-trace is-live">
         <div className="execution-summary-row">
-          <span className="live-elapsed">正在处理{elapsed}</span>
+          {workspaceWaiting ? (
+            <span className="live-elapsed" role="status">等待预热工作区</span>
+          ) : (
+            <span className="live-elapsed">正在处理{elapsed}</span>
+          )}
         </div>
         {divider}
         <div className="execution-body" aria-label="执行过程">
           {blocks.length ? (
             <Narration blocks={blocks} live interrupted={interrupted} />
-          ) : (
+          ) : workspaceWaiting ? null : (
             <span className="execution-current" data-kind="status">
               <LoaderCircle size={15} strokeWidth={1.7} aria-hidden="true" />
               <span className="execution-current-text">
-                {status || "正在处理…"}
+                {status?.id === "workspace.pool_waiting" ? "正在处理…" : status?.text || "正在处理…"}
               </span>
             </span>
           )}
