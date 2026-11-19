@@ -120,6 +120,12 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 	if d.updateReady.Load() {
 		return domain.RunnerWorkspaceResponse{Status: http.StatusConflict, Error: "Runner 即将重启，请稍后重试"}
 	}
+	if domain.IsWarmWorkspaceOperation(request.Operation) {
+		return d.warmWorkspaceControl(ctx, request)
+	}
+	if request.WarmWorkspaceLease != nil {
+		return runnerWorkspaceError(errors.New("unexpected warm workspace lease"))
+	}
 	if request.Operation == "conversation_process" {
 		return d.conversationProcess(ctx, request)
 	}

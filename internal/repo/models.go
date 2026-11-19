@@ -525,6 +525,9 @@ type definitionRevisionRow struct {
 func (definitionRevisionRow) TableName() string { return "definition_revisions" }
 
 type runnerRow struct {
+	WarmSlots      []domain.WarmWorkspaceSlot `gorm:"column:warm_slots;serializer:json;type:json"`
+	WarmGeneration uint64                     `gorm:"column:warm_generation;not null;default:0"`
+
 	ID               string     `gorm:"column:id;primaryKey;size:64"`
 	Name             string     `gorm:"column:name;size:255"`
 	Status           string     `gorm:"column:status;index:idx_runners_status;size:32"`
@@ -757,7 +760,7 @@ func allModels() []any {
 		runAdmissionLockRow{}, runRow{}, runNodeRow{}, runEventRow{}, runTelemetryRow{}, runLogRow{}, runArtifactRow{}, runEvalRow{},
 		runPreviewRow{}, previewSessionRow{}, previewBlobRow{}, WorkspaceCheckpoint{}, workspaceCheckpointChunk{},
 		mrDeliveryStateRow{}, definitionRevisionRow{},
-		runnerRow{}, runnerTaskRow{}, runnerTaskEventRow{}, userRunnerPrefRow{},
+		runnerRow{}, warmWorkspaceRow{}, runnerTaskRow{}, runnerTaskEventRow{}, userRunnerPrefRow{},
 		assistantSessionRow{}, assistantTaskRow{}, assistantGenerationRow{}, assistantSessionReadRow{}, assistantPreferenceRow{}, assistantDiagnosticsRow{},
 		chatRoomRow{}, chatMessageRow{},
 		requirementSpaceRow{}, spaceMemberRow{}, spaceArtifactRow{}, spaceArtifactRevisionRow{}, spaceThreadRow{},

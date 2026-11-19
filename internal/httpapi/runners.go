@@ -708,6 +708,8 @@ func (h *runnersHandlers) runnerHeartbeat(c *gin.Context) {
 		return
 	}
 	var input struct {
+		WarmSlots []domain.WarmWorkspaceSlot `json:"warmSlots"`
+
 		Status       string                 `json:"status"`
 		RunningTasks int                    `json:"runningTasks"`
 		Version      string                 `json:"version"`
@@ -718,7 +720,7 @@ func (h *runnersHandlers) runnerHeartbeat(c *gin.Context) {
 	}
 	now := time.Now().UTC()
 	expires := now.Add(runnerSessionTTL)
-	if err := h.repo.RunnerHeartbeat(runner.ID, input.Runtimes, strings.TrimSpace(input.Version), now, expires); err != nil {
+	if err := h.repo.RunnerHeartbeat(runner.ID, input.Runtimes, strings.TrimSpace(input.Version), now, expires, input.WarmSlots); err != nil {
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

@@ -29,3 +29,43 @@ type WarmWorkspaceRef struct {
 	Branch       string `json:"branch,omitempty"`
 	Commit       string `json:"commit"`
 }
+
+type WarmWorkspaceState string
+
+const (
+	WarmWorkspaceQueued    WarmWorkspaceState = "queued"
+	WarmWorkspaceReserved  WarmWorkspaceState = "reserved"
+	WarmWorkspaceReady     WarmWorkspaceState = "ready"
+	WarmWorkspaceReleasing WarmWorkspaceState = "releasing"
+	WarmWorkspaceReleased  WarmWorkspaceState = "released"
+	WarmWorkspaceCanceled  WarmWorkspaceState = "canceled"
+	WarmWorkspaceBlocked   WarmWorkspaceState = "blocked"
+)
+
+type WarmWorkspaceSlot struct {
+	ID           string `json:"id"`
+	ProjectID    string `json:"projectId"`
+	RepositoryID string `json:"repositoryId"`
+	State        string `json:"state"`
+}
+
+const RunnerVersionWarmWorkspace = "0.12.0"
+
+func (r Runner) SupportsWarmWorkspace() bool {
+	return versionAtLeast(r.RunnerVersion, RunnerVersionWarmWorkspace)
+}
+
+const (
+	RunnerWorkspaceOperationWarmPrepare       = "warm_prepare"
+	RunnerWorkspaceOperationWarmStatus        = "warm_status"
+	RunnerWorkspaceOperationWarmReleaseCheck  = "warm_release_check"
+	RunnerWorkspaceOperationWarmReleaseCommit = "warm_release_commit"
+)
+
+func IsWarmWorkspaceOperation(op string) bool {
+	switch op {
+	case RunnerWorkspaceOperationWarmPrepare, RunnerWorkspaceOperationWarmStatus, RunnerWorkspaceOperationWarmReleaseCheck, RunnerWorkspaceOperationWarmReleaseCommit:
+		return true
+	}
+	return false
+}

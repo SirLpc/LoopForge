@@ -407,6 +407,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 	// heartbeat interval while the worker resumes its runs.
 	for ctx.Err() == nil {
 		req := HeartbeatRequest{
+			WarmSlots:    d.warmWorkspacePool.inventory(),
 			Status:       "idle",
 			RunningTasks: int(atomic.LoadInt32(&d.running)),
 			Version:      runnerVersion,

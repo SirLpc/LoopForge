@@ -153,6 +153,9 @@ const RunnerVersionExistingWorkBranch = "0.7.0"
 const RunnerVersionCreateNewWorkBranch = "0.9.1"
 
 type Runner struct {
+	// WarmWorkspaceSlots carries the heartbeat inventory for server-side machine selection.
+	WarmWorkspaceSlots []WarmWorkspaceSlot `json:"-"`
+
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
 	OS             string   `json:"os"`

@@ -234,7 +234,7 @@ func (r *RunnersRepo) runnerRow(id string) (domain.Runner, bool) {
 func runnerFromRow(row runnerRow) domain.Runner {
 	v := domain.Runner{
 		ID: row.ID, Name: row.Name, Status: row.Status, OS: row.OS, Arch: row.Arch,
-		RunnerVersion: row.RunnerVersion, MaxConcurrency: row.MaxConcurrency,
+		RunnerVersion: row.RunnerVersion, MaxConcurrency: row.MaxConcurrency, WarmWorkspaceSlots: row.WarmSlots,
 		SessionTokenHash: row.SessionTokenHash,
 	}
 	if row.OwnerUserID != nil {
@@ -298,7 +298,7 @@ func (r *RunnersRepo) RunnerSessionByHash(hash string) (domain.Runner, bool) {
 // RunnerHeartbeat records liveness and the latest runtime inventory. The
 // server-side disabled flag survives: a CLI disabled from the 执行器 page
 // stays disabled even though the daemon keeps reporting it online.
-func (r *RunnersRepo) RunnerHeartbeat(id string, runtimes []domain.RunnerRuntime, version string, now, sessionExpiresAt time.Time) error {
+func (r *RunnersRepo) RunnerHeartbeat(id string, runtimes []domain.RunnerRuntime, version string, now, sessionExpiresAt time.Time, inventory ...[]domain.WarmWorkspaceSlot) error {
 	current, ok := r.runnerRow(id)
 	disabled := map[string]bool{}
 	authModes := map[string]string{}
@@ -333,6 +333,12 @@ func (r *RunnersRepo) RunnerHeartbeat(id string, runtimes []domain.RunnerRuntime
 	updates := map[string]any{
 		"status": domain.RunnerStatusOnline, "last_seen_at": now, "runtimes": string(raw),
 		"session_expires_at": sessionExpiresAt, "updated_at": now,
+	}
+	if len(inventory) > 0 {
+		if err := validateWarmInventory(inventory[0]); err != nil {
+			return err
+		}
+		updates["warm_slots"] = string(jsonBytes(inventory[0]))
 	}
 	if version = strings.TrimSpace(version); version != "" {
 		updates["runner_version"] = version

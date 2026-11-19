@@ -59,10 +59,11 @@ type runnerControlMessage struct {
 type runnerWorkspaceForwarder func(context.Context, string, domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error)
 
 type runnerControlHub struct {
-	mu      sync.Mutex
-	conns   map[string]*runnerControlConn
-	pending map[string]chan domain.RunnerWorkspaceResponse
-	nextID  uint64
+	authorizeWarm func(string, *domain.RunnerWorkspaceRequest) error
+	mu            sync.Mutex
+	conns         map[string]*runnerControlConn
+	pending       map[string]chan domain.RunnerWorkspaceResponse
+	nextID        uint64
 	// registered is closed and replaced whenever a runner (re)connects.
 	registered chan struct{}
 	// dropped records when each runner's socket last went away.
@@ -125,9 +126,23 @@ func (h *runnerControlHub) request(ctx context.Context, runnerID string, request
 	if runnerID == "" {
 		return domain.RunnerWorkspaceResponse{}, errRunnerWorkspaceUnavailable
 	}
+	warm := domain.IsWarmWorkspaceOperation(request.Operation) || request.WarmWorkspaceLease != nil
+	if warm {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+	}
 	var waitUntil time.Time
 	for attempt := 0; attempt < 4; attempt++ {
 		conn, relay, err := h.connFor(ctx, runnerID, mayRelay, expectReconnect, &waitUntil)
+		if warm && (relay != nil || err == nil) {
+			if h.authorizeWarm == nil {
+				return domain.RunnerWorkspaceResponse{}, errors.New("warm workspace authorization unavailable")
+			}
+			if authErr := h.authorizeWarm(runnerID, &request); authErr != nil {
+				return domain.RunnerWorkspaceResponse{}, authErr
+			}
+		}
 		if relay != nil {
 			return relay(ctx, runnerID, request)
 		}

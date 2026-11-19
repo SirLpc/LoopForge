@@ -151,6 +151,8 @@ func (c *Client) Register(ctx context.Context, bootstrapToken string, req Regist
 }
 
 type HeartbeatRequest struct {
+	WarmSlots []domain.WarmWorkspaceSlot `json:"warmSlots,omitempty"`
+
 	Status       string                 `json:"status"`
 	RunningTasks int                    `json:"runningTasks"`
 	Version      string                 `json:"version,omitempty"`
