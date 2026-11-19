@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"agentflow/internal/domain"
@@ -21,7 +23,7 @@ import (
 var warmCommitID = regexp.MustCompile("^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 func (p *warmWorkspacePool) gitCacheRoot() string {
-	return filepath.Join(p.journalDir.Name(), p.journalName+".git")
+	return p.gitRoot
 }
 
 func (p *warmWorkspacePool) gitCache(slot string) string {
@@ -35,7 +37,7 @@ func prepareWarmCheckout(ctx context.Context, checkout, cache string, repo domai
 
 // The caller holds the exclusive, verified slot. cache belongs to the runner,
 // outside every writable checkout; it is stable across renames of the slot.
-func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) error {
+func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) (result error) {
 	if !filepath.IsAbs(cache) || !filepath.IsAbs(checkout) || filepath.Clean(cache) != cache || warmWorkspacePathsOverlap(checkout, cache) || strings.ContainsAny(cache, "\r\n") {
 		return errors.New("invalid warm Git cache location")
 	}
@@ -54,6 +56,27 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project st
 	if (repo.RequireExistingWorkBranch || repo.CreateNewWorkBranch) && (repo.WorkBranch == "" || repo.RequireExistingWorkBranch == repo.CreateNewWorkBranch) {
 		return errors.New("invalid work branch mode")
 	}
+	// Older preparations staged exchanges beside the checkout. Ownership
+	// of a crash remnant cannot be established from its name, so keep it
+	// for inspection and prevent the owner from opening this workspace.
+	siblings, err := os.ReadDir(filepath.Dir(checkout))
+	if err != nil {
+		return err
+	}
+	for _, sibling := range siblings {
+		suffix, ok := strings.CutPrefix(sibling.Name(), ".warm-git-")
+		if !ok || !sibling.IsDir() || sibling.Name() == filepath.Base(checkout) {
+			continue
+		}
+		if _, err := strconv.ParseUint(suffix, 10, 32); err == nil {
+			if _, err := os.Lstat(filepath.Join(filepath.Dir(checkout), sibling.Name(), ".git")); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			return errors.New("previous warm Git exchange in the owner workspace requires inspection")
+		}
+	}
 	old := filepath.Join(checkout, ".git")
 	dir, err := openWarmWorkspaceDir(old, false)
 	if err != nil {
@@ -71,11 +94,17 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project st
 	defer cancel()
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
-	private, err := os.MkdirTemp(filepath.Dir(cache), ".prepare-")
+	// The slot fence serializes preparations. A crashed exchange may have
+	// left previous lease metadata here; reclaim only this private slot stage.
+	private := cache + ".prepare"
+	if err := os.RemoveAll(private); err != nil {
+		return err
+	}
+	err = os.Mkdir(private, 0700)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(private)
+	defer func() { result = errors.Join(result, os.RemoveAll(private)) }()
 	originConfig := filepath.Join(old, "config")
 	if err := warmRegular(originConfig); err != nil {
 		return err
@@ -105,22 +134,30 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project st
 			}
 		}
 	}
+	if restore != nil {
+		if err := authorizeWarmRestore(local, auth, private, db, repo, restore.Commit); err != nil {
+			return err
+		}
+	}
 	target, branch, err := warmCheckoutTarget(local, db, repo, restore)
 	if err != nil {
 		return err
 	}
 	library := filepath.Join(project, "Library")
 	for _, rev := range []string{head, target} {
+		if err := validateWarmLFSConfig(local, db, rev, repo.CloneURL); err != nil {
+			return err
+		}
 		if err := warmTreeProtectsLibrary(local, db, rev, library); err != nil {
 			return err
 		}
 	}
 	// Stage metadata on the checkout filesystem so publishing it is a rename.
-	stage, err := os.MkdirTemp(filepath.Dir(checkout), ".warm-git-")
+	stage := filepath.Join(private, "worktree")
+	err = os.Mkdir(stage, 0700)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage)
 	if _, err := gitwork.C(local, stage, "init", "--template=", warmObjectFormat(head)); err != nil {
 		return err
 	}
@@ -200,10 +237,13 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project st
 			return err
 		}
 	}
-	if _, err := work("read-tree", "-m", "-u", head, target); err != nil {
+	if _, err := work("-c", "filter.lfs.smudge=git-lfs smudge --skip -- %f", "read-tree", "-m", "-u", head, target); err != nil {
 		return err
 	}
 	if err := exchangeWarmGitDirs(old, meta); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(cache, warmSeedMarker)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if hasLFS {
@@ -223,6 +263,7 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 	db := cache
 	_, err := os.Lstat(cache)
 	fresh := errors.Is(err, os.ErrNotExist)
+	verifySeed := fresh
 	if fresh {
 		db = filepath.Join(private, "cache")
 		if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(head), db); err != nil {
@@ -243,28 +284,10 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		}
 		// Offer the seed commit for negotiation but retain only objects reachable
 		// from refs the authenticated remote actually advertised.
-		// Compare the seed index in trusted metadata. Never let the original
-		// repository config, hooks or index extensions choose the Git directory.
-		index := filepath.Join(old, "index")
-		if err := warmRegular(index); err != nil {
+		if err := verifyWarmSeedIndex(local, db, private, checkout, head); err != nil {
 			return "", err
 		}
-		raw, err := os.ReadFile(index)
-		if err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(filepath.Join(db, "index"), raw, 0600); err != nil {
-			return "", err
-		}
-		if _, err := gitwork.C(local, db, "--work-tree="+checkout, "diff-index", "--quiet", "--cached", head, "--"); err != nil {
-			return "", fmt.Errorf("warm seed has staged work: %w", err)
-		}
-		// Reject dirty operator work before making a credentialed request.
-		// The independent index built below verifies bytes again before promotion.
-		if _, err := gitwork.C(local, db, "--work-tree="+checkout, "-c", "filter.lfs.clean=git-lfs clean -- %f", "-c", "lfs.storage="+filepath.Join(private, "seed-lfs"), "diff-files", "--quiet", "--no-ext-diff", "--ignore-submodules=all", "--"); err != nil {
-			return "", fmt.Errorf("warm seed contains working tree edits: %w", err)
-		}
-		if err := os.Remove(filepath.Join(db, "index")); err != nil {
+		if err := recordWarmSeedIdentity(old, db); err != nil {
 			return "", err
 		}
 		if _, err := gitwork.C(local, db, "config", "core.alternateRefsCommand", "/bin/true"); err != nil {
@@ -290,9 +313,31 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		if err != nil || remote != repo.CloneURL {
 			return "", errors.New("warm Git cache origin mismatch")
 		}
+		verifySeed, err = pendingWarmSeed(old, db)
+		if err != nil {
+			return "", err
+		}
+		if verifySeed {
+			check := filepath.Join(private, "seed-index")
+			if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(head), check); err != nil {
+				return "", err
+			}
+			if err := warmAlternate(check, filepath.Join(db, "objects")); err != nil {
+				return "", err
+			}
+			if err := verifyWarmSeedIndex(local, check, private, checkout, head); err != nil {
+				return "", err
+			}
+		}
+
 	}
 	if _, err := gitwork.C(auth, db, "fetch", "--no-auto-gc", "--prune", "--no-tags", "origin", "+HEAD:refs/warm/default", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"); err != nil {
 		return "", err
+	}
+	if verifySeed {
+		if err := verifyWarmSeedRefs(local, old, db); err != nil {
+			return "", err
+		}
 	}
 	if fresh {
 		if _, err := gitwork.C(local, db, "update-ref", "-d", "refs/seed/head"); err != nil {
@@ -524,7 +569,7 @@ func warmCheckoutTarget(ctx context.Context, db string, repo domain.RunnerReposi
 		}
 	}
 	if restore != nil {
-		if commit, ok := gitwork.RevParse(ctx, db, ref); ok {
+		if commit, ok := gitwork.RevParse(ctx, db, ref); ok && commit == ref {
 			return commit, branch, nil
 		}
 		return "", "", errors.New("restore commit missing from verified cache")
@@ -559,4 +604,80 @@ func warmCheckoutTarget(ctx context.Context, db string, repo domain.RunnerReposi
 		return commit, branch, nil
 	}
 	return "", "", errors.New("requested ref missing from frozen remote")
+}
+
+// Check repository-controlled LFS endpoints in Git's object database, before
+// either the old or incoming worktree can participate in a filter invocation.
+func validateWarmLFSConfig(ctx context.Context, db, rev, origin string) error {
+	mode, err := gitwork.C(ctx, db, "ls-tree", rev, "--", ".lfsconfig")
+	if err != nil || mode == "" {
+		return err
+	}
+	if !strings.HasPrefix(mode, "100") {
+		return errors.New("warm checkout requires a regular .lfsconfig")
+	}
+	settings, err := gitwork.C(ctx, db, "config", "--no-includes", "-z", "--blob", rev+":.lfsconfig", "--list")
+	if err != nil {
+		return err
+	}
+	for _, field := range strings.Split(settings, "\x00") {
+		key, value, _ := strings.Cut(field, "\n")
+		if key == "lfs.gitprotocol" && value != "" {
+			return errors.New("warm checkout cannot override the frozen Git LFS transport")
+		}
+		if key != "lfs.url" && key != "lfs.pushurl" && !(strings.HasPrefix(key, "remote.") && (strings.HasSuffix(key, ".lfsurl") || strings.HasSuffix(key, ".lfspushurl"))) {
+			continue
+		}
+		if !sameWarmLFSAuthority(origin, value) {
+			return errors.New("Git LFS endpoint is outside the frozen repository authority")
+		}
+	}
+	return nil
+}
+
+func sameWarmLFSAuthority(origin, endpoint string) bool {
+	base, err := url.Parse(origin)
+	if err != nil || (base.Scheme != "https" && base.Scheme != "http") {
+		return false
+	}
+	target, err := url.Parse(endpoint)
+	if err != nil || target.Scheme != base.Scheme || target.User != nil || target.Hostname() == "" || !strings.EqualFold(base.Hostname(), target.Hostname()) {
+		return false
+	}
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if u.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	return port(base) == port(target)
+}
+
+// A cached object alone cannot prove authorization after a force-push. If
+// no currently advertised head or tag reaches the pin, an empty object store
+// makes the server decide whether this actor may fetch that exact revision.
+func authorizeWarmRestore(local, auth context.Context, private, db string, repo domain.RunnerRepository, pin string) error {
+	if _, ok := gitwork.RevParse(local, db, pin); ok {
+		refs, err := gitwork.C(local, db, "for-each-ref", "--contains", pin, "--format=%(refname)", "refs/remotes/origin", "refs/tags", "refs/warm/default")
+		if err != nil {
+			return err
+		}
+		if refs != "" {
+			return nil
+		}
+	}
+	proof := filepath.Join(private, "restore")
+	if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(pin), proof); err != nil {
+		return err
+	}
+	if _, err := gitwork.C(auth, proof, "fetch", "--no-tags", repo.CloneURL, pin+":refs/warm/pin"); err != nil {
+		return fmt.Errorf("authorize exact warm restore commit: %w", err)
+	}
+	if _, err := gitwork.C(local, db, "fetch", "--no-auto-gc", "--no-tags", proof, "+refs/warm/pin:refs/warm/restore"); err != nil {
+		return err
+	}
+	return nil
 }

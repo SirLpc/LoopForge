@@ -2,10 +2,13 @@ package runner
 
 import (
 	"agentflow/internal/domain"
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -265,5 +268,205 @@ func TestWarmCheckoutLFSDelivery(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(f.source, "asset.bin"))
 	if err != nil || string(data) != "after" {
 		t.Fatalf("published LFS asset=%q err=%v", data, err)
+	}
+}
+
+func TestWarmCheckoutPrivateExchange(t *testing.T) {
+	f := newWarmGitFixture(t)
+	owner := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(owner, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(owner, "project")
+	if err := os.Rename(f.checkout, checkout); err != nil {
+		t.Fatal(err)
+	}
+	f.checkout = checkout
+	trace := filepath.Join(t.TempDir(), "git-events")
+	t.Setenv("GIT_TRACE2_EVENT", trace)
+	f.prepare(t, nil)
+	// Recreate the private residue a process could leave after its exchange.
+	residue := filepath.Join(f.cache+".prepare", "worktree", ".git", "config")
+	warmGitWrite(t, filepath.Dir(residue), "config", "previous lease settings")
+	f.prepare(t, nil)
+	if _, err := os.Lstat(residue); !os.IsNotExist(err) {
+		t.Fatalf("stale private exchange was not reclaimed: %v", err)
+	}
+	raw, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		var event struct{ Worktree string }
+		if len(line) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(event.Worktree, owner+"/") && event.Worktree != checkout {
+			t.Fatalf("metadata exchange staged inside owner workspace: %s", event.Worktree)
+		}
+	}
+}
+
+func TestWarmCheckoutPreservesSeedMetadata(t *testing.T) {
+	for _, kind := range []string{"branch", "packed tag", "stash", "merge"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newWarmGitFixture(t)
+			old := warmGitStat(t, filepath.Join(f.checkout, ".git"))
+			switch kind {
+			case "branch":
+				runGitT(t, f.checkout, "branch", "operator-backup")
+			case "packed tag":
+				runGitT(t, f.checkout, "tag", "operator-tag")
+				runGitT(t, f.checkout, "pack-refs", "--all")
+			case "stash":
+				warmGitWrite(t, f.checkout, "README.md", "operator edits")
+				runGitT(t, f.checkout, "-c", "user.name=t", "-c", "user.email=t@example.org", "stash", "push")
+			case "merge":
+				warmGitWrite(t, f.checkout, ".git/MERGE_HEAD", runGitT(t, f.checkout, "rev-parse", "HEAD")+"\n")
+			}
+			if err := prepareWarmCheckout(t.Context(), f.checkout, f.cache, f.repo, nil); err == nil {
+				t.Fatal("seed metadata discarded")
+			}
+			if !os.SameFile(old, warmGitStat(t, filepath.Join(f.checkout, ".git"))) {
+				t.Fatal("seed metadata replaced")
+			}
+		})
+	}
+}
+
+func TestWarmCheckoutLFSEndpointPolicy(t *testing.T) {
+	const origin = "https://git.example.invalid/team/project.git"
+	f := newWarmGitFixture(t)
+	for _, tc := range []struct {
+		key, value string
+		ok         bool
+	}{
+		{"lfs.url", "https://git.example.invalid/team/lfs", true},
+		{"lfs.url", "file:///nonexistent-fixture/lfs", false},
+		{"remote.origin.lfsurl", "ssh://git@another.example.invalid/team/project", false},
+		{"lfs.gitprotocol", "file", false},
+	} {
+		runGitT(t, f.source, "config", "-f", ".lfsconfig", tc.key, tc.value)
+		runGitT(t, f.source, "add", ".lfsconfig")
+		runGitT(t, f.source, "commit", "-qm", "LFS settings")
+		err := validateWarmLFSConfig(t.Context(), f.source, "HEAD", origin)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s = %q: %v", tc.key, tc.value, err)
+		}
+		if err := os.Remove(filepath.Join(f.source, ".lfsconfig")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestWarmCheckoutPinnedRestoreAcrossSlots(t *testing.T) {
+	f := newWarmGitFixture(t)
+	f.prepare(t, nil)
+	base := runGitT(t, f.source, "rev-parse", "HEAD")
+	second := f
+	second.checkout = filepath.Join(t.TempDir(), "slot")
+	second.cache = filepath.Join(t.TempDir(), "cache")
+	// Initialize slot two before the short-lived remote head exists.
+	runGitT(t, f.source, "clone", "--no-local", f.repo.CloneURL, second.checkout)
+	second.prepare(t, nil)
+	warmGitWrite(t, f.source, "temporary.txt", "published")
+	pin := f.publish(t)
+	f.prepare(t, nil)
+	runGitT(t, f.source, "push", "--force", "origin", base+":refs/heads/master")
+	restore := &domain.WarmWorkspaceRef{RepositoryID: f.repo.RepositoryID, Commit: pin}
+	second.prepare(t, restore)
+	if got := runGitT(t, second.checkout, "rev-parse", "HEAD"); got != pin {
+		t.Fatalf("restored %s", got)
+	}
+	// The server now has only the rewritten branch and no historical object.
+	replacement := filepath.Join(t.TempDir(), "remote.git")
+	runGitT(t, f.source, "clone", "--bare", "--no-local", f.repo.CloneURL, replacement)
+	remote := f.repo.CloneURL
+	if err := os.Rename(remote, remote+".retired"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, remote); err != nil {
+		t.Fatal(err)
+	}
+	for _, slot := range []warmGitFixture{f, second} {
+		if err := prepareWarmCheckout(t.Context(), slot.checkout, slot.cache, slot.repo, restore); err == nil {
+			t.Fatal("cached unreachable pin authorized after remote object was removed")
+		}
+	}
+}
+
+func TestWarmCheckoutPrivateCacheOnWorkspaceDevice(t *testing.T) {
+	other := os.Getenv("AGENTFLOW_WARM_TEST_OTHER_FS")
+	if other == "" {
+		t.Skip("set AGENTFLOW_WARM_TEST_OTHER_FS to a temporary directory on another filesystem")
+	}
+	journal, err := os.MkdirTemp(other, "loopforge-warm-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(journal) })
+	f := newWarmPoolFixture(t)
+	f.journal = filepath.Join(journal, "journal")
+	pool := f.open(t)
+	if filepath.Dir(pool.gitCacheRoot()) != f.workspace {
+		t.Fatalf("private staging is not on the workspace volume: %s", pool.gitCacheRoot())
+	}
+	gitFixture := newWarmGitFixture(t)
+	gitFixture.cache = pool.gitCache("a")
+	gitFixture.prepare(t, nil)
+}
+
+func TestWarmCheckoutRejectsUnsafeLFSTreeBeforeMaterialization(t *testing.T) {
+	f := newWarmGitFixture(t)
+	head := runGitT(t, f.checkout, "rev-parse", "HEAD")
+	warmGitWrite(t, f.source, ".lfsconfig", "[lfs]\nurl = file:///nonexistent-fixture/lfs\n")
+	f.publish(t)
+	if err := prepareWarmCheckout(t.Context(), f.checkout, f.cache, f.repo, nil); err == nil {
+		t.Fatal("unapproved endpoint accepted")
+	}
+	if got := runGitT(t, f.checkout, "rev-parse", "HEAD"); got != head {
+		t.Fatal("checkout was changed before LFS endpoint rejection")
+	}
+}
+
+func TestWarmCheckoutRevalidatesSeedAfterCachePromotion(t *testing.T) {
+	f := newWarmGitFixture(t)
+	head := runGitT(t, f.checkout, "rev-parse", "HEAD")
+	parent := filepath.Dir(f.cache)
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	private, err := os.MkdirTemp(parent, "prepare-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := warmObjectCache(t.Context(), t.Context(), private, f.cache, f.checkout, head, f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(db, f.cache); err != nil {
+		t.Fatal(err)
+	}
+	// This is the durable state if initial cache promotion completed before
+	// metadata exchange. The operator can have added work while it was offline.
+	runGitT(t, f.checkout, "branch", "pending-operator-branch")
+	if err := prepareWarmCheckout(t.Context(), f.checkout, f.cache, f.repo, nil); err == nil {
+		t.Fatal("pending operator seed skipped validation on retry")
+	}
+}
+
+func TestWarmCheckoutStopsOnLegacyExchangeResidue(t *testing.T) {
+	f := newWarmGitFixture(t)
+	f.prepare(t, nil)
+	legacy := filepath.Join(filepath.Dir(f.checkout), ".warm-git-12345678")
+	warmGitWrite(t, legacy, ".git/config", "previous lease settings")
+	if err := prepareWarmCheckout(t.Context(), f.checkout, f.cache, f.repo, nil); err == nil {
+		t.Fatal("owner workspace with previous metadata admitted")
+	}
+	if _, err := os.Stat(filepath.Join(legacy, ".git/config")); err != nil {
+		t.Fatal("ambiguous legacy directory must be retained for inspection")
 	}
 }

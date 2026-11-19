@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"maps"
@@ -28,6 +29,7 @@ type warmWorkspacePool struct {
 	mu                 sync.Mutex
 	slots              map[string]warmWorkspaceSlot
 	workspaceRoot      string
+	gitRoot            string
 	journalDir         *os.File
 	journalName        string
 	journalSyncPending bool
@@ -69,11 +71,24 @@ func openWarmWorkspacePool(configPath, workspaceRoot, statePath string) (*warmWo
 		_ = pool.close()
 		return nil, err
 	}
-	cacheRoot := pool.gitCacheRoot()
+	journalID, err := warmWorkspaceDirIdentity(pool.journalDir)
+	if err != nil {
+		pool.close()
+		return nil, err
+	}
+	cacheRoot := filepath.Join(pool.journalDir.Name(), pool.journalName+".git")
 	if warmWorkspacePathsOverlap(cacheRoot, workspaceRoot) {
 		pool.close()
 		return nil, errors.New("warm Git cache overlaps the runner workspace root")
 	}
+	if journalID.Dev != workspaceID.Dev {
+		// Atomic metadata exchanges require the slot's filesystem. Keep this
+		// runner-only root outside all run directories, covered by the same
+		// native sandbox masks as a cache next to the journal.
+		digest := sha256.Sum256([]byte(statePath))
+		cacheRoot = filepath.Join(workspaceRoot, fmt.Sprintf(".warm-git-private-%x", digest))
+	}
+	pool.gitRoot = cacheRoot
 	cacheDir, err := openWarmWorkspaceDir(cacheRoot, true)
 	if err != nil {
 		pool.close()
