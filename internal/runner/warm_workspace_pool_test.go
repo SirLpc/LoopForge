@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -301,8 +302,8 @@ func warmPoolDifferentDevice(t *testing.T, first, second string) bool {
 	return a.Dev != b.Dev
 }
 
-func TestWarmWorkspacePoolRechecksUnityPathBeforeReservation(t *testing.T) {
-	f := newWarmPoolFixture(t)
+func (f warmPoolFixture) writeUnitySlot(t *testing.T) {
+	t.Helper()
 	data, err := json.Marshal(map[string]any{"slots": []map[string]string{{
 		"id": "a", "projectId": "project", "repositoryId": "a", "path": f.homeA, "unityProjectPath": "Unity",
 	}}})
@@ -312,6 +313,11 @@ func TestWarmWorkspacePoolRechecksUnityPathBeforeReservation(t *testing.T) {
 	if err := os.WriteFile(f.config, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestWarmWorkspacePoolRechecksUnityPathBeforeReservation(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	f.writeUnitySlot(t)
 	projectPath := filepath.Join(f.homeA, "Unity")
 	warmPoolMkdir(t, projectPath)
 	pool := f.open(t)
@@ -330,5 +336,161 @@ func TestWarmWorkspacePoolRechecksUnityPathBeforeReservation(t *testing.T) {
 	}
 	if err := pool.reserve(lease); err == nil {
 		t.Fatal("a slot with a symlinked Unity project became available after restart")
+	}
+}
+
+func TestWarmWorkspacePoolChecksPlacedUnityAfterRestart(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	f.writeUnitySlot(t)
+	warmPoolMkdir(t, filepath.Join(f.homeA, "Unity"))
+	pool := f.open(t)
+	lease := domain.WarmWorkspaceLease{
+		OwnerRunID: "owner", RunnerID: "runner", Generation: 1, Slots: map[string]string{"a": "a"},
+	}
+	targets := map[string]string{"a": "project"}
+	if err := pool.reserve(lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.place(t.Context(), lease, targets); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.close(); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(f.workspace, "runs", "owner", "workspace", "project", "Unity")
+	if err := os.Remove(project); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.homeB, project); err != nil {
+		t.Fatal(err)
+	}
+	pool = f.open(t)
+	if err := pool.reserve(lease); err == nil {
+		t.Error("reservation retry accepted a placed slot with a symlinked Unity directory")
+	}
+	if err := pool.place(t.Context(), lease, targets); err == nil {
+		t.Error("placement retry accepted a placed slot with a symlinked Unity directory")
+	}
+}
+
+func TestWarmWorkspacePoolReturnsSlotsWithUnrelatedTarget(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	pool := f.open(t)
+	lease := domain.WarmWorkspaceLease{
+		OwnerRunID: "owner", RunnerID: "runner", Generation: 1,
+		Slots: map[string]string{"a": "a", "b": "b"},
+	}
+	if err := pool.reserve(lease); err != nil {
+		t.Fatal(err)
+	}
+	beforeA, beforeB := warmPoolStat(t, f.homeA), warmPoolStat(t, f.homeB)
+	root := filepath.Join(f.workspace, "runs", "owner", "workspace")
+	targetA, targetB := filepath.Join(root, "one"), filepath.Join(root, "two")
+	warmPoolMkdir(t, targetB)
+	obstacle := warmPoolStat(t, targetB)
+	if err := pool.place(t.Context(), lease, map[string]string{"a": targetA, "b": targetB}); err == nil {
+		t.Fatal("placement succeeded with an occupied target")
+	}
+	if err := os.Rename(f.homeA, targetA); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.close(); err != nil {
+		t.Fatal(err)
+	}
+	pool = f.open(t)
+	if err := pool.returnSlots(t.Context(), lease); err != nil {
+		t.Fatalf("return after partial placement and restart: %v", err)
+	}
+	warmPoolRequireSame(t, beforeA, f.homeA)
+	warmPoolRequireSame(t, beforeB, f.homeB)
+	warmPoolRequireSame(t, obstacle, targetB)
+	lease.OwnerRunID, lease.Generation = "next", 2
+	if err := pool.reserve(lease); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWarmWorkspacePoolRejectsCaseAliasOverlap(t *testing.T) {
+	cases := map[string]func(*testing.T, *warmPoolFixture){
+		"relative to slot": func(t *testing.T, f *warmPoolFixture) {
+			child := filepath.Join(filepath.Dir(f.homeA), "ONE", "nested")
+			warmPoolMkdir(t, child)
+			f.writeSlots(t, f.homeA, child)
+		},
+		"relative to workspace": func(t *testing.T, f *warmPoolFixture) {
+			child := filepath.Join(f.root, "WORK", "nested")
+			warmPoolMkdir(t, child)
+			f.writeSlots(t, child)
+		},
+		"relative to state": func(t *testing.T, f *warmPoolFixture) {
+			warmPoolMkdir(t, filepath.Dir(f.journal))
+			child := filepath.Join(f.root, "STATE", "nested")
+			warmPoolMkdir(t, child)
+			f.writeSlots(t, child)
+		},
+		"containing workspace": func(t *testing.T, f *warmPoolFixture) {
+			f.workspace = filepath.Join(filepath.Dir(f.homeA), "ONE", "nested")
+			f.writeSlots(t, f.homeA)
+		},
+	}
+	for name, arrange := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newWarmPoolFixture(t)
+			alias := filepath.Join(filepath.Dir(f.homeA), "ONE")
+			info, err := os.Stat(alias)
+			if err != nil || !os.SameFile(info, warmPoolStat(t, f.homeA)) {
+				t.Skip("case-insensitive filesystem required")
+			}
+			arrange(t, &f)
+			pool, err := openWarmWorkspacePool(f.config, f.workspace, f.journal)
+			if err == nil {
+				_ = pool.close()
+				t.Fatal("physically overlapping registration accepted")
+			}
+		})
+	}
+}
+
+func TestWarmWorkspacePoolChecksPhysicalAncestry(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	pool := f.open(t)
+	records := pool.state.clone().Slots
+	child := filepath.Join(f.homeA, "nested")
+	warmPoolMkdir(t, child)
+	record := records["b"]
+	// Supply the real slot identity under a nested registration. This bypasses
+	// lexical config validation and exercises the filesystem ancestry check.
+	record.Path = child
+	records["b"] = record
+	if err := validateWarmWorkspaceTopology(records, f.workspace, filepath.Dir(f.journal)); err == nil {
+		t.Fatal("registration underneath a slot inode accepted")
+	}
+	record.Path = filepath.Join(f.workspace, "nested")
+	warmPoolMkdir(t, record.Path)
+	records["b"] = record
+	if err := validateWarmWorkspaceTopology(records, f.workspace, filepath.Dir(f.journal)); err == nil {
+		t.Fatal("registration underneath the workspace inode accepted")
+	}
+}
+
+func TestWarmWorkspacePoolSyncsExistingTargetAncestors(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	owner := filepath.Join(f.workspace, "runs", "owner")
+	checkoutParent := filepath.Join(owner, "workspace", "nested")
+	warmPoolMkdir(t, checkoutParent)
+	var synced []string
+	err := syncWarmWorkspaceTargetParents(f.workspace, filepath.Join(checkoutParent, "checkout"), func(dir *os.File) error {
+		if err := dir.Sync(); err != nil {
+			return err
+		}
+		synced = append(synced, dir.Name())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{f.workspace, filepath.Join(f.workspace, "runs"), owner, filepath.Dir(checkoutParent), checkoutParent}
+	if !slices.Equal(synced, want) {
+		t.Fatalf("recovery synced %v, want %v", synced, want)
 	}
 }

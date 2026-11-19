@@ -323,8 +323,12 @@ func (p *warmWorkspacePool) inspectLease(allocation warmWorkspaceAllocation) (ma
 		} else if allocation.Phase == warmWorkspacePlaced {
 			known = position.atTarget && !position.atHome
 		}
-		if known && position.atHome && p.checkUnityProject(p.slots[id]) != nil {
-			known = false
+		if known {
+			checkout := allocation.Targets[id]
+			if position.atHome {
+				checkout = p.slots[id].Path
+			}
+			known = p.checkUnityProject(p.slots[id], checkout) == nil
 		}
 		if !known || record.NeedsInspection {
 			inspectionErr = errors.Join(inspectionErr, fmt.Errorf("warm workspace slot %q needs inspection", id))
@@ -352,7 +356,7 @@ func (p *warmWorkspacePool) move(ctx context.Context, allocation warmWorkspaceAl
 		if position.homeErr != nil || position.targetErr != nil {
 			return fmt.Errorf("inspect warm workspace locations for slot %q: %w", id, errors.Join(position.homeErr, position.targetErr))
 		}
-		if position.homeExists && position.targetExists {
+		if position.homeExists && position.targetExists && !(returning && position.atHome) {
 			return fmt.Errorf("warm workspace location for slot %q is occupied", id)
 		}
 		if !returning && !position.atTarget {
@@ -401,7 +405,8 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 			return err
 		}
 		if target := allocation.Targets[id]; target != "" {
-			if err := syncWarmWorkspaceParent(target); err != nil && !(returning && errors.Is(err, os.ErrNotExist)) {
+			if err := syncWarmWorkspaceTargetParents(p.workspaceRoot, target, (*os.File).Sync); err != nil &&
+				!(returning && errors.Is(err, os.ErrNotExist)) {
 				return err
 			}
 		}
@@ -417,7 +422,7 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 func warmWorkspaceMoveComplete(allocation warmWorkspaceAllocation, positions map[string]warmWorkspacePosition) bool {
 	for _, position := range positions {
 		if allocation.Phase == warmWorkspaceReturning {
-			if !position.atHome || position.targetExists || position.targetErr != nil {
+			if !position.atHome || position.targetErr != nil {
 				return false
 			}
 		} else if !position.atTarget || position.homeExists || position.homeErr != nil {
@@ -489,20 +494,44 @@ func warmWorkspaceDirIdentity(dir *os.File) (warmWorkspaceIdentity, error) {
 }
 
 func openWarmWorkspaceDir(path string, create bool) (*os.File, error) {
-	parent, err := os.Open(string(filepath.Separator))
+	root, err := os.Open(string(filepath.Separator))
 	if err != nil {
 		return nil, err
 	}
-	for _, component := range strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator)) {
-		if component == "" {
+	relative := strings.TrimPrefix(path, string(filepath.Separator))
+	dir, err := walkWarmWorkspaceDirs(root, relative, create, nil)
+	if err != nil {
+		return nil, &os.PathError{Op: "open directory", Path: path, Err: err}
+	}
+	return dir, nil
+}
+
+// walkWarmWorkspaceDirs takes ownership of parent. It visits parent before
+// following any components and returns the open leaf on success.
+func walkWarmWorkspaceDirs(parent *os.File, relative string, create bool, visit func(*os.File) error) (*os.File, error) {
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." {
 			continue
 		}
+		if visit != nil {
+			if err := visit(parent); err != nil {
+				parent.Close()
+				return nil, err
+			}
+		}
 		fd, err := openWarmWorkspaceChildDir(parent, component, create)
+		name := filepath.Join(parent.Name(), component)
 		parent.Close()
 		if err != nil {
-			return nil, &os.PathError{Op: "open directory", Path: path, Err: err}
+			return nil, err
 		}
-		parent = os.NewFile(uintptr(fd), path)
+		parent = os.NewFile(uintptr(fd), name)
+	}
+	if visit != nil {
+		if err := visit(parent); err != nil {
+			parent.Close()
+			return nil, err
+		}
 	}
 	return parent, nil
 }
@@ -511,16 +540,40 @@ func openWarmWorkspaceChildDir(parent *os.File, name string, create bool) (int, 
 	const flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 	dir := int(parent.Fd())
 	fd, err := unix.Openat(dir, name, flags, 0)
-	if !create || !errors.Is(err, os.ErrNotExist) {
-		return fd, err
+	if create && errors.Is(err, os.ErrNotExist) {
+		if err := unix.Mkdirat(dir, name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return -1, err
+		}
+		fd, err = unix.Openat(dir, name, flags, 0)
 	}
-	if err := unix.Mkdirat(dir, name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return -1, err
+	if err == nil && create {
+		// A previous attempt might have made the child visible before syncing
+		// the parent. Confirm the link even when this call did not create it.
+		if err := parent.Sync(); err != nil {
+			_ = unix.Close(fd)
+			return -1, err
+		}
 	}
-	if err := parent.Sync(); err != nil {
-		return -1, err
+	return fd, err
+}
+
+func syncWarmWorkspaceTargetParents(workspaceRoot, target string, sync func(*os.File) error) error {
+	parentPath := filepath.Dir(target)
+	relative, err := filepath.Rel(workspaceRoot, parentPath)
+	if err != nil || !filepath.IsLocal(relative) {
+		return fmt.Errorf("warm workspace destination escapes workspace root: %s", target)
 	}
-	return unix.Openat(dir, name, flags, 0)
+	root, err := openWarmWorkspaceDir(workspaceRoot, false)
+	if err != nil {
+		return err
+	}
+	// Recovery can see every ancestor created by an interrupted attempt.
+	// Sync the entire workspace chain before finalizing the move.
+	parent, err := walkWarmWorkspaceDirs(root, relative, false, sync)
+	if err != nil {
+		return fmt.Errorf("sync warm workspace destination parents: %w", err)
+	}
+	return parent.Close()
 }
 
 func moveWarmWorkspaceDir(home, target string, record warmWorkspaceSlotRecord, returning bool) error {

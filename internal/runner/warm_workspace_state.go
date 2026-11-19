@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"agentflow/internal/domain"
 	"golang.org/x/sys/unix"
@@ -105,10 +106,8 @@ func (p *warmWorkspacePool) openJournal(dir string, workspaceID warmWorkspaceIde
 			return err
 		}
 	}
-	if fresh || len(p.slots) != len(p.state.Slots) {
-		if err := p.registerSlots(); err != nil {
-			return err
-		}
+	if err := p.registerSlots(dir); err != nil {
+		return err
 	}
 	return p.recover()
 }
@@ -202,12 +201,8 @@ func (p *warmWorkspacePool) validateJournal(workspaceID warmWorkspaceIdentity) e
 	return nil
 }
 
-func (p *warmWorkspacePool) registerSlots() error {
+func (p *warmWorkspacePool) registerSlots(stateDir string) error {
 	next := p.state.clone()
-	identities := make(map[warmWorkspaceIdentity]string)
-	for id, record := range next.Slots {
-		identities[record.Identity] = id
-	}
 	for id, slot := range p.slots {
 		if _, exists := next.Slots[id]; exists {
 			continue
@@ -216,13 +211,74 @@ func (p *warmWorkspacePool) registerSlots() error {
 		if err != nil {
 			return fmt.Errorf("register warm workspace slot %q: %w", id, err)
 		}
-		if other, exists := identities[record.Identity]; exists {
-			return fmt.Errorf("warm workspace slots %q and %q share a directory inode", other, id)
-		}
-		identities[record.Identity] = id
 		next.Slots[id] = record
 	}
+	if err := validateWarmWorkspaceTopology(next.Slots, p.workspaceRoot, stateDir); err != nil {
+		return err
+	}
+	if len(next.Slots) == len(p.state.Slots) {
+		return nil
+	}
 	return p.save(next)
+}
+
+func validateWarmWorkspaceTopology(records map[string]warmWorkspaceSlotRecord, protectedPaths ...string) error {
+	slotRoots := make(map[warmWorkspaceIdentity]string, len(records))
+	for id, record := range records {
+		if other, exists := slotRoots[record.Identity]; exists {
+			return fmt.Errorf("warm workspace slots %q and %q share a directory inode", other, id)
+		}
+		slotRoots[record.Identity] = id
+	}
+	protectedRoots := make(map[warmWorkspaceIdentity]string, len(protectedPaths))
+	for _, path := range protectedPaths {
+		lineage, err := warmWorkspaceDirLineage(path)
+		if err != nil {
+			return err
+		}
+		for _, ancestor := range lineage {
+			if slotID, exists := slotRoots[ancestor]; exists {
+				return fmt.Errorf("warm workspace slot %q overlaps protected directory %s", slotID, path)
+			}
+		}
+		protectedRoots[lineage[len(lineage)-1]] = path
+	}
+	// Compare identities along each directory path. Case aliases on a
+	// case-insensitive volume can evade lexical comparisons.
+	for id, record := range records {
+		// Old allocations can leave their home empty or inaccessible. Inspect
+		// the reachable prefix here and let recovery check the leased inode.
+		lineage, _ := warmWorkspaceDirLineage(filepath.Dir(record.Path))
+		for _, ancestor := range lineage {
+			if other, exists := slotRoots[ancestor]; exists {
+				return fmt.Errorf("overlapping paths for warm workspace slots %q and %q", other, id)
+			}
+			if path, exists := protectedRoots[ancestor]; exists {
+				return fmt.Errorf("warm workspace slot %q overlaps protected directory %s", id, path)
+			}
+		}
+	}
+	return nil
+}
+
+func warmWorkspaceDirLineage(path string) ([]warmWorkspaceIdentity, error) {
+	root, err := os.Open(string(filepath.Separator))
+	if err != nil {
+		return nil, err
+	}
+	var lineage []warmWorkspaceIdentity
+	dir, err := walkWarmWorkspaceDirs(root, strings.TrimPrefix(path, string(filepath.Separator)), false, func(dir *os.File) error {
+		identity, err := warmWorkspaceDirIdentity(dir)
+		if err != nil {
+			return err
+		}
+		lineage = append(lineage, identity)
+		return nil
+	})
+	if dir != nil {
+		dir.Close()
+	}
+	return lineage, err
 }
 
 func (p *warmWorkspacePool) registerSlot(slot warmWorkspaceSlot) (warmWorkspaceSlotRecord, error) {
@@ -246,7 +302,7 @@ func (p *warmWorkspacePool) registerSlot(slot warmWorkspaceSlot) (warmWorkspaceS
 	if identity.Dev != p.state.Workspace.Dev || parentID.Dev != p.state.Workspace.Dev {
 		return record, errors.New("slot and workspace root must be on the same filesystem")
 	}
-	if err := p.checkUnityProject(slot); err != nil {
+	if err := p.checkUnityProject(slot, slot.Path); err != nil {
 		return record, err
 	}
 	return warmWorkspaceSlotRecord{
@@ -255,11 +311,11 @@ func (p *warmWorkspacePool) registerSlot(slot warmWorkspaceSlot) (warmWorkspaceS
 	}, nil
 }
 
-func (p *warmWorkspacePool) checkUnityProject(slot warmWorkspaceSlot) error {
+func (p *warmWorkspacePool) checkUnityProject(slot warmWorkspaceSlot, checkout string) error {
 	if slot.UnityProjectPath == "." {
 		return nil
 	}
-	project, err := openWarmWorkspaceDir(filepath.Join(slot.Path, slot.UnityProjectPath), false)
+	project, err := openWarmWorkspaceDir(filepath.Join(checkout, slot.UnityProjectPath), false)
 	if err != nil {
 		return fmt.Errorf("open Unity project directory: %w", err)
 	}
@@ -279,7 +335,7 @@ func (p *warmWorkspacePool) recover() error {
 	next := p.state.clone()
 	for id, record := range p.state.Slots {
 		if !active[id] && !record.NeedsInspection &&
-			(!p.inspectSlot(id, "").atHome || p.checkUnityProject(p.slots[id]) != nil) {
+			(!p.inspectSlot(id, "").atHome || p.checkUnityProject(p.slots[id], record.Path) != nil) {
 			record.NeedsInspection = true
 			next.Slots[id] = record
 		}
