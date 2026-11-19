@@ -1,9 +1,15 @@
 package repo
 
 import (
+	"fmt"
+	"os"
 	"testing"
+	"time"
 
 	"agentflow/internal/domain"
+
+	"github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
 )
 
 func TestProjectWorkspaceModeRoundTrip(t *testing.T) {
@@ -53,5 +59,80 @@ func TestProjectWorkspaceModeRoundTrip(t *testing.T) {
 	stored, ok = s.Project(id)
 	if !ok || stored.WorkspaceMode != domain.WorkspaceModeWarmPool || stored.Name != "Renamed" {
 		t.Fatalf("project after update without workspace mode = %+v, found = %v", stored, ok)
+	}
+}
+
+// The omitted write pauses before its first INSERT. On the old path, it
+// had already observed a missing row under READ COMMITTED at that point.
+func TestMySQLProjectWorkspaceModeConcurrentCreate(t *testing.T) {
+	dsn := os.Getenv("AGENTFLOW_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("AGENTFLOW_TEST_MYSQL_DSN is not set")
+	}
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal("invalid test MySQL DSN")
+	}
+	if config.Params == nil {
+		config.Params = make(map[string]string)
+	}
+	config.Params["transaction_isolation"] = "'READ-COMMITTED'"
+
+	open := func() *Store {
+		t.Helper()
+		store, err := Open(config.FormatDSN())
+		if err != nil {
+			t.Fatalf("open test MySQL store failed (%T); DSN omitted", err)
+		}
+		t.Cleanup(store.Close)
+		return store
+	}
+	omittedStore, explicitStore := open(), open()
+	id := fmt.Sprintf("workspace-mode-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		if err := explicitStore.DB.Where("id = ?", id).Delete(&projectRow{}).Error; err != nil {
+			t.Errorf("delete test project: %v", err)
+		}
+	})
+
+	beforeInsert := make(chan struct{})
+	continueInsert := make(chan struct{})
+	defer close(continueInsert)
+	if err := omittedStore.DB.Callback().Create().Before("gorm:create").Register("pause_project_insert", func(tx *gorm.DB) {
+		if tx.Statement.Table == "projects" {
+			close(beforeInsert)
+			<-continueInsert
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	omittedDone := make(chan error, 1)
+	go func() {
+		omittedDone <- omittedStore.PutProject(domain.Project{ID: id, Name: "Omitted mode"})
+	}()
+	select {
+	case <-beforeInsert:
+	case err := <-omittedDone:
+		t.Fatalf("omitted write completed before INSERT: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("omitted write did not reach INSERT")
+	}
+	if err := explicitStore.PutProject(domain.Project{
+		ID: id, Name: "Explicit mode", WorkspaceMode: domain.WorkspaceModeWarmPool,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	continueInsert <- struct{}{}
+	select {
+	case err := <-omittedDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("omitted write did not complete")
+	}
+	stored, ok := explicitStore.Project(id)
+	if !ok || stored.Name != "Omitted mode" || stored.WorkspaceMode != domain.WorkspaceModeWarmPool {
+		t.Fatalf("project after competing creates = %+v, found = %v", stored, ok)
 	}
 }

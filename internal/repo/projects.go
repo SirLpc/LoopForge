@@ -183,30 +183,33 @@ func (r *ProjectsRepo) writeProject(v domain.Project) error {
 	if v.OwnerID > 0 {
 		owner = v.OwnerID
 	}
+	// Only SetProjectBusinessDomain owns the assignment.
+	payload.BusinessDomainID = ""
+	values := map[string]any{
+		"id": v.ID, "business_domain_id": payload.BusinessDomainID, "project_key": v.Key, "name": v.Name, "owner_user_id": owner,
+		"payload": mustJSON(payload), "created_at": timePtr(v.CreatedAt), "updated_at": timePtr(v.UpdatedAt),
+	}
 	return r.DB.Transaction(func(tx *gorm.DB) error {
-		var current projectRow
-		err := r.locking(tx).Where("id = ?", v.ID).Take(&current).Error
-		if err != nil && err != gorm.ErrRecordNotFound {
+		// Establish the row before reading it. A locking read of a missing ID
+		// under READ COMMITTED cannot serialize concurrent creators.
+		if err := tx.Model(&projectRow{}).Clauses(clause.OnConflict{DoNothing: true}).Create(values).Error; err != nil {
 			return err
 		}
-		// An omitted mode keeps the value from the row locked for this write.
-		if payload.WorkspaceMode == "" {
-			payload.WorkspaceMode = domain.WorkspaceModeCheckout
-			if err == nil {
-				previous, err := decodeProjectPayload(current.Payload)
-				if err != nil {
-					return err
-				}
-				payload.WorkspaceMode = previous.WorkspaceMode
-			}
+		var current projectRow
+		if err := r.locking(tx).Where("id = ?", v.ID).Take(&current).Error; err != nil {
+			return err
 		}
-		// Only SetProjectBusinessDomain owns the assignment, even for stale project payloads.
-		v.BusinessDomainID = current.BusinessDomainID
+		if payload.WorkspaceMode == "" {
+			previous, err := decodeProjectPayload(current.Payload)
+			if err != nil {
+				return err
+			}
+			payload.WorkspaceMode = previous.WorkspaceMode
+		}
 		payload.BusinessDomainID = current.BusinessDomainID
-		if err := upsert(tx, "projects", map[string]any{
-			"id": v.ID, "business_domain_id": v.BusinessDomainID, "project_key": v.Key, "name": v.Name, "owner_user_id": owner,
-			"payload": mustJSON(payload), "created_at": timePtr(v.CreatedAt), "updated_at": timePtr(v.UpdatedAt),
-		}); err != nil {
+		values["business_domain_id"] = current.BusinessDomainID
+		values["payload"] = mustJSON(payload)
+		if err := tx.Model(&projectRow{}).Where("id = ?", v.ID).Updates(values).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("project_id = ?", v.ID).Delete(&projectMemberRow{}).Error; err != nil {
