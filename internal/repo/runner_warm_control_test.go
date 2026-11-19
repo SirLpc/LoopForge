@@ -15,8 +15,9 @@ func TestWarmWorkspaceControlUsesTrustedOwner(t *testing.T) {
 	if !ok || err != nil {
 		t.Fatal(err)
 	}
+	run := domain.Run{ID: "owner", ExecutionContext: domain.TelemetryContext{ProjectID: "project"}, Repositories: []domain.RepositoryContext{{RepositoryID: "a"}}}
 	req := domain.RunnerWorkspaceRequest{Operation: domain.RunnerWorkspaceOperationWarmPrepare, RunID: "owner", WarmWorkspaceLease: &l}
-	if err := s.AuthorizeWarmWorkspaceControl("machine", &req); err != nil {
+	if err := s.AuthorizeWarmWorkspaceControl("machine", run, &req); err != nil {
 		t.Fatal(err)
 	}
 	for _, change := range []func(*domain.WarmWorkspaceLease){
@@ -28,7 +29,7 @@ func TestWarmWorkspaceControlUsesTrustedOwner(t *testing.T) {
 		bad := l
 		change(&bad)
 		req.WarmWorkspaceLease = &bad
-		if err := s.AuthorizeWarmWorkspaceControl("machine", &req); err == nil {
+		if err := s.AuthorizeWarmWorkspaceControl("machine", run, &req); err == nil {
 			t.Fatalf("authorized %+v", bad)
 		}
 	}
@@ -36,14 +37,14 @@ func TestWarmWorkspaceControlUsesTrustedOwner(t *testing.T) {
 	if err := s.SettleWarmWorkspace(l, domain.WarmWorkspaceReady); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AuthorizeWarmWorkspaceControl("machine", &req); err == nil {
+	if err := s.AuthorizeWarmWorkspaceControl("machine", run, &req); err == nil {
 		t.Fatal("reopened ready lease")
 	}
 	req.Operation = domain.RunnerWorkspaceOperationWarmStatus
 	if err := s.RunnerHeartbeat("machine", nil, "0.11.0", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AuthorizeWarmWorkspaceControl("machine", &req); err == nil {
+	if err := s.AuthorizeWarmWorkspaceControl("machine", run, &req); err == nil {
 		t.Fatal("authorized old runner")
 	}
 }

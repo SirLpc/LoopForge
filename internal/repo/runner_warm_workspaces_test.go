@@ -116,6 +116,26 @@ func TestWarmWorkspaceQueueMySQLConcurrentCancel(t *testing.T) {
 	if err := stores[0].SettleWarmWorkspace(l, domain.WarmWorkspaceReleased); err != nil {
 		t.Fatal(err)
 	}
+	// Two control instances observe the same released generation and race
+	// to reacquire. Only one may advance the queue epoch.
+	reacquire := make(chan error, 2)
+	for _, store := range stores {
+		go func() { reacquire <- store.RequeueWarmWorkspace(l, now) }()
+	}
+	successes := 0
+	for range stores {
+		if err := <-reacquire; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent requeues succeeded %d times", successes)
+	}
+	pending, state, ok, err := stores[1].WarmWorkspaceAllocation(l.OwnerRunID)
+	if err != nil || !ok || state != domain.WarmWorkspaceQueued || pending.Epoch != l.Epoch+1 {
+		t.Fatalf("reacquired epoch %+v %s %v", pending, state, err)
+	}
+
 }
 
 func TestWarmWorkspaceQueueInventoryAndGenerationSurviveReconnect(t *testing.T) {
@@ -148,5 +168,64 @@ func TestWarmWorkspaceQueueInventoryAndGenerationSurviveReconnect(t *testing.T) 
 	slots := []domain.WarmWorkspaceSlot{{ID: "same", ProjectID: "project", RepositoryID: "a", State: "available"}, {ID: "same", ProjectID: "project", RepositoryID: "b", State: "available"}}
 	if err := s.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err == nil {
 		t.Fatal("accepted duplicate physical slot")
+	}
+}
+
+func TestWarmWorkspaceQueueReacquire(t *testing.T) {
+	s := newTestRunner(t)
+	now := warmQueueRunner(t, s, "machine")
+	warmDemand(t, s, now, "machine", "owner", "a")
+	first, ok, err := s.ReserveNextWarmWorkspace("machine", now)
+	if !ok || err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CancelWarmWorkspace("owner", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SettleWarmWorkspace(first, domain.WarmWorkspaceReleased); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequeueWarmWorkspace(first, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequeueWarmWorkspace(first, now); err == nil {
+		t.Fatal("stale reacquire succeeded")
+	}
+	if err := s.CancelWarmWorkspace("owner", now); err != nil {
+		t.Fatal(err)
+	}
+	next, ok, err := s.ReserveNextWarmWorkspace("machine", now)
+	if err != nil || !ok || next.Generation <= first.Generation || next.Epoch <= first.Epoch {
+		t.Fatalf("new assignment %+v %v", next, err)
+	}
+	if err := s.SettleWarmWorkspace(first, domain.WarmWorkspaceReady); err == nil {
+		t.Fatal("old generation changed new assignment")
+	}
+	warmDemand(t, s, now, "machine", "canceled", "b")
+	if err := s.CancelWarmWorkspace("canceled", now); err != nil {
+		t.Fatal(err)
+	}
+	canceled, _, _, err := s.WarmWorkspaceAllocation("canceled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequeueWarmWorkspace(canceled, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequeueWarmWorkspace(canceled, now); err == nil {
+		t.Fatal("stale canceled demand resurrected")
+	}
+}
+func TestWarmWorkspaceQueueUsesNewRunnerJournalFloor(t *testing.T) {
+	s := newTestRunner(t)
+	now := warmQueueRunner(t, s, "new")
+	slots := []domain.WarmWorkspaceSlot{{ID: "a", ProjectID: "project", RepositoryID: "a", State: "available", Generation: 7}, {ID: "b", ProjectID: "project", RepositoryID: "b", State: "reserved", Generation: 10}}
+	if err := s.RunnerHeartbeat("new", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err != nil {
+		t.Fatal(err)
+	}
+	warmDemand(t, s, now, "new", "next", "a")
+	next, ok, err := s.ReserveNextWarmWorkspace("new", now)
+	if err != nil || !ok || next.Generation <= 10 {
+		t.Fatalf("reservation used old journal generation %+v %v", next, err)
 	}
 }

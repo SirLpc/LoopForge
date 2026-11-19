@@ -29,7 +29,7 @@ func (p *warmWorkspacePool) inventory() []domain.WarmWorkspaceSlot {
 		} else if !p.state.Slots[id].NeedsInspection && p.inspectSlot(id, "").atHome {
 			state = "available"
 		}
-		inventory = append(inventory, domain.WarmWorkspaceSlot{ID: id, ProjectID: slot.ProjectID, RepositoryID: slot.RepositoryID, State: state})
+		inventory = append(inventory, domain.WarmWorkspaceSlot{ID: id, ProjectID: slot.ProjectID, RepositoryID: slot.RepositoryID, State: state, Generation: p.state.Slots[id].Generation})
 	}
 	return inventory
 }
@@ -44,6 +44,11 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	// control call may report placement, never readiness from placement alone.
 	switch req.Operation {
 	case domain.RunnerWorkspaceOperationWarmPrepare:
+		gate := d.requestGate(req)
+		if !gate.TryLock() {
+			return workspaceBusyResponse("workspace is still in use")
+		}
+		defer gate.Unlock()
 		dirs := map[string]string{}
 		for _, r := range req.Repositories {
 			dirs[r.RepositoryID] = r.WorkspaceDir

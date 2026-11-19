@@ -17,6 +17,7 @@ type WarmWorkspaceDemand struct {
 
 // WarmWorkspaceLease assigns runner-local slots to a workspace owner.
 type WarmWorkspaceLease struct {
+	Epoch      uint64            `json:"epoch,omitempty"`
 	OwnerRunID string            `json:"ownerRunId"`
 	RunnerID   string            `json:"runnerId"`
 	Generation uint64            `json:"generation"`
@@ -43,6 +44,7 @@ const (
 )
 
 type WarmWorkspaceSlot struct {
+	Generation   uint64 `json:"generation,omitempty"`
 	ID           string `json:"id"`
 	ProjectID    string `json:"projectId"`
 	RepositoryID string `json:"repositoryId"`
