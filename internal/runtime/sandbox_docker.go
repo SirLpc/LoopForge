@@ -701,6 +701,9 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 			}
 		}
 		if !recreate && !mounts.legacyMasks {
+			if err := s.verifyWarmDocker(ctx); err != nil {
+				return err
+			}
 			if err := exec.CommandContext(ctx, "docker", "start", name).Run(); err == nil {
 				if err := waitDockerWorkspaceReady(ctx, name); err == nil {
 					s.started = true
@@ -755,7 +758,11 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		return err
 	}
 	args = append(args, objectArgs...)
-	stateArgs, err := dockerAgentStateMountRequirements(s.requirements)
+	stateRequirements := s.requirements
+	if len(stateRequirements.GitObjectDirs) > 0 {
+		stateRequirements.CLIStates = nil
+	}
+	stateArgs, err := dockerAgentStateMountRequirements(stateRequirements)
 	if err != nil {
 		return err
 	}
@@ -786,6 +793,9 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		dropEphemeralDockerImage(s.builtImage)
 		s.builtImage = ""
 		return fmt.Errorf("docker create: %w: %s", err, out)
+	}
+	if err := s.verifyWarmDocker(ctx); err != nil {
+		return err
 	}
 	if out, err := exec.CommandContext(ctx, "docker", "start", name).CombinedOutput(); err != nil {
 		_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()

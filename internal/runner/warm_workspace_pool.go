@@ -205,7 +205,7 @@ func (p *warmWorkspacePool) validateLease(lease domain.WarmWorkspaceLease) error
 }
 
 func sameWarmWorkspaceLease(a, b domain.WarmWorkspaceLease) bool {
-	return a.OwnerRunID == b.OwnerRunID && a.RunnerID == b.RunnerID &&
+	return a.Epoch == b.Epoch && a.OwnerRunID == b.OwnerRunID && a.RunnerID == b.RunnerID &&
 		a.Generation == b.Generation && maps.Equal(a.Slots, b.Slots)
 }
 

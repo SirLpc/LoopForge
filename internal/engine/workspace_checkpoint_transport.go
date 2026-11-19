@@ -52,7 +52,7 @@ func workspaceOperationLabel(operation string) string {
 }
 
 func (e *Engine) requestWorkspaceCheckpoint(ctx context.Context, run domain.Run, request domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
-	if domain.IsWarmWorkspaceOperation(request.Operation) || request.WarmWorkspaceLease != nil {
+	if domain.IsWarmWorkspaceOperation(request.Operation) {
 		owner, ok := e.repo.RunState(run.ID)
 		if !ok {
 			return domain.RunnerWorkspaceResponse{}, errors.New("warm workspace owner disappeared")
@@ -64,8 +64,17 @@ func (e *Engine) requestWorkspaceCheckpoint(ctx context.Context, run domain.Run,
 		}
 		run = owner
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
+		timeout := 8 * time.Second
+		if request.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
+			timeout = 30 * time.Minute
+		}
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
+	}
+	if !domain.IsWarmWorkspaceOperation(request.Operation) {
+		if err := e.guardWarmRequest(run, &request); err != nil {
+			return domain.RunnerWorkspaceResponse{}, err
+		}
 	}
 	e.mu.Lock()
 	apiBase, token := e.workspaceControlBase, e.controlToken
@@ -148,7 +157,7 @@ func (e *Engine) HandleWorkspaceCheckpoint(w http.ResponseWriter, r *http.Reques
 		e.handleWarmWorkspaceCheckpoint(w, r, run, request)
 		return
 	}
-	if request.WarmWorkspaceLease != nil {
+	if err := e.guardWarmRequest(run, &request); err != nil {
 		http.Error(w, "unexpected warm workspace lease", 400)
 		return
 	}

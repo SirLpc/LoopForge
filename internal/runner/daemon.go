@@ -548,7 +548,7 @@ func (d *Daemon) executeTask(ctx context.Context, task domain.RunnerTask) {
 	// sees this task terminal (and lets a paused run continue), a follow-up
 	// preparation or snapshot must not still find the gate held.
 	releaseGate := func() {}
-	if task.RunID != "" {
+	if task.RunID != "" || d.warmWorkspacePool != nil {
 		gate := d.workspaceGate(d.taskGateKey(task))
 		gate.RLock()
 		releaseGate = onceRelease(gate.RUnlock)
@@ -561,7 +561,10 @@ func (d *Daemon) executeTask(ctx context.Context, task domain.RunnerTask) {
 	var result execResult
 	var artifacts map[string]string
 	managed := d.managedTaskState(task.ID)
+	warmErr := d.checkWarmTask(ctx, task)
 	switch {
+	case warmErr != nil:
+		result = execResult{status: domain.RunnerTaskFailed, errMsg: warmErr.Error()}
 	case managed != nil && managed.err != nil:
 		result = execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("pin managed CLI inventory: %v", managed.err)}
 	case task.Action == domain.RunnerTaskActionCleanupRun:
@@ -744,7 +747,7 @@ func (d *Daemon) executeTerminal(ctx context.Context, task domain.RunnerTask) ex
 		return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("workspace %s: %v", workspace, err)}
 	}
 	if task.Invocation != nil {
-		if err := checkoutInvocationRepositories(ctx, workspace, task.Invocation); err != nil {
+		if err := checkoutForWorkspace(ctx, task.WarmWorkspaceLease, workspace, task.Invocation); err != nil {
 			return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("repository checkout: %v", err)}
 		}
 		if err := writeRunnerHumanContext(workspace, task.Invocation.HumanContext); err != nil {
@@ -825,7 +828,7 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("workspace %s: %v", workspace, err)}, nil
 	}
-	checkoutErr := checkoutInvocationRepositories(ctx, workspace, inv)
+	checkoutErr := checkoutForWorkspace(ctx, task.WarmWorkspaceLease, workspace, inv)
 	repositoryFallback := checkoutErr != nil && inv.RepositoryPreparationFallback && ctx.Err() == nil
 	if checkoutErr != nil {
 		if !repositoryFallback {

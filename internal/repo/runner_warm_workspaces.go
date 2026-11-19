@@ -241,7 +241,7 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 	}
 	var allowed bool
 	switch req.Operation {
-	case domain.RunnerWorkspaceOperationWarmPrepare:
+	case domain.RunnerWorkspaceOperationWarmCheckout, domain.RunnerWorkspaceOperationWarmPrepare:
 		allowed = row.State == domain.WarmWorkspaceReserved
 	case domain.RunnerWorkspaceOperationWarmStatus:
 		allowed = row.Generation != 0

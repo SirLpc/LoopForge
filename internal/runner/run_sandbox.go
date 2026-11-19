@@ -146,10 +146,11 @@ func runSandboxKey(task domain.RunnerTask, requirements runtime.SandboxRequireme
 		return "", "", false
 	}
 	spec, err := json.Marshal(struct {
-		Profile      domain.SandboxProfile
-		Requirements runtime.SandboxRequirements
-		Resources    runtime.SandboxResources
-	}{task.Sandbox.Profile, requirements, resources})
+		WarmWorkspaceLease *domain.WarmWorkspaceLease `json:",omitempty"`
+		Profile            domain.SandboxProfile
+		Requirements       runtime.SandboxRequirements
+		Resources          runtime.SandboxResources
+	}{task.WarmWorkspaceLease, task.Sandbox.Profile, requirements, resources})
 	if err != nil {
 		return "", "", false
 	}

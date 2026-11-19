@@ -79,6 +79,14 @@ func (e *Engine) execute(ctx context.Context, runID string) {
 		delete(e.running, runID)
 		e.mu.Unlock()
 	}()
+	if _, err := e.EnsureWarmWorkspace(ctx, r, r.ExecutionContext.ResponsibleUserID); err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			e.finishInterruptedAt(runID, generation)
+		} else {
+			e.finishAt(runID, generation, "failed", err.Error())
+		}
+		return
+	}
 	for {
 		select {
 		case <-ctx.Done():

@@ -164,7 +164,7 @@ func isPoolRun(run domain.Run) bool {
 // machine to return before continuing. Runs on a user's own machine are left
 // alone.
 func (e *Engine) bindPoolRunner(ctx context.Context, run domain.Run, nodeID string) (domain.Run, error) {
-	if run.ExecutionContext.ExecutionPinned {
+	if run.ExecutionContext.ExecutionPinned || run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
 		if id := run.ExecutionContext.ExecutionRunnerID; id != "" {
 			if r, ok := e.repo.Runner(id); !ok || r.Status != domain.RunnerStatusOnline {
 				return run, fmt.Errorf("会话绑定的执行机器暂不可用，请等待原机器恢复")

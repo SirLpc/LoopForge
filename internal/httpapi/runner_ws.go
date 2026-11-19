@@ -127,7 +127,7 @@ func (h *runnerControlHub) request(ctx context.Context, runnerID string, request
 		return domain.RunnerWorkspaceResponse{}, errRunnerWorkspaceUnavailable
 	}
 	warm := domain.IsWarmWorkspaceOperation(request.Operation) || request.WarmWorkspaceLease != nil
-	if warm {
+	if domain.IsWarmWorkspaceOperation(request.Operation) && request.Operation != domain.RunnerWorkspaceOperationWarmCheckout {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
@@ -136,10 +136,14 @@ func (h *runnerControlHub) request(ctx context.Context, runnerID string, request
 	for attempt := 0; attempt < 4; attempt++ {
 		conn, relay, err := h.connFor(ctx, runnerID, mayRelay, expectReconnect, &waitUntil)
 		if warm && (relay != nil || err == nil) {
-			if h.authorizeWarm == nil {
+			authorize := h.authorizeWarm
+			if scoped, ok := ctx.Value(workspaceWriterEngineKey{}).(*engine.Engine); ok && !domain.IsWarmWorkspaceOperation(request.Operation) {
+				authorize = scoped.AuthorizeWarmWorkspaceControl
+			}
+			if authorize == nil {
 				return domain.RunnerWorkspaceResponse{}, errors.New("warm workspace authorization unavailable")
 			}
-			if authErr := h.authorizeWarm(runnerID, &request); authErr != nil {
+			if authErr := authorize(runnerID, &request); authErr != nil {
 				return domain.RunnerWorkspaceResponse{}, authErr
 			}
 		}
@@ -251,7 +255,7 @@ func (h *runnerControlHub) send(ctx context.Context, conn *runnerControlConn, re
 	case <-ctx.Done():
 		// Chunked exports hold the runner's workspace fence. End the remote
 		// request too; cancelling only our waiter would strand the next turn.
-		if domain.IsWorkspaceCheckpointTransferOperation(request.Operation) || request.Operation == domain.RunnerWorkspaceOperationCheckpoint {
+		if domain.IsWorkspaceCheckpointTransferOperation(request.Operation) || request.Operation == domain.RunnerWorkspaceOperationCheckpoint || request.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
 			timer := time.NewTimer(time.Second)
 			select {
 			case conn.send <- runnerControlMessage{Type: "workspace.cancel", RequestID: requestID}:

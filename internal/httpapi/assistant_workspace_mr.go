@@ -240,10 +240,14 @@ func (h *assistantHandlers) workspaceCheckouts(ctx context.Context, run domain.R
 		if h.runnerControls == nil {
 			return nil, errors.New("remote workspace channel is not configured")
 		}
-		response, err := h.runnerControls.requestWorkspace(ctx, runnerID, domain.RunnerWorkspaceRequest{
+		request := domain.RunnerWorkspaceRequest{
 			RunID: runnerWorkspaceRunID(run), RunStatus: run.Status, WorkspaceLayout: run.ExecutionContext.RunnerWorkspaceLayout,
 			Operation: domain.RunnerWorkspaceOperationCheckouts,
-		})
+		}
+		if err := h.engine.BindWorkspaceLease(run, &request); err != nil {
+			return nil, err
+		}
+		response, err := h.runnerControls.requestWorkspace(ctx, runnerID, request)
 		if err != nil {
 			return nil, err
 		}

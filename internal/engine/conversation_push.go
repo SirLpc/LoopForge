@@ -161,7 +161,7 @@ func (e *Engine) pushConversationOnRunner(ctx context.Context, runnerID string, 
 		NodeID:            conversationPushNode,
 		Invocation:        invocation,
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return nil, err
 	}
 	e.notifyRunnerDispatch("terminal")

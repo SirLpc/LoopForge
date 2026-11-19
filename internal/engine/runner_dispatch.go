@@ -277,7 +277,7 @@ func (e *Engine) dispatchRunnerTask(ctx context.Context, runnerID string, run do
 	if err := validateSOPHandoffRunnerPayload(run, task); err != nil {
 		return "", err
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return "", err
 	}
 	e.notifyRunnerDispatch(ex.Kind)
@@ -447,7 +447,7 @@ func (e *Engine) dispatchRunnerScript(ctx context.Context, runnerID string, run 
 	if err := validateSOPHandoffRunnerPayload(run, task); err != nil {
 		return "", err
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return "", err
 	}
 	e.notifyRunnerDispatch("terminal")
@@ -574,7 +574,7 @@ func (e *Engine) queueRunnerRunCleanup(run domain.Run) error {
 		RunID:       run.ID,
 		Sandbox:     run.WorkflowSnapshot.SandboxSnapshot,
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return err
 	}
 	e.notifyRunnerDispatch("terminal")
@@ -609,7 +609,7 @@ func (e *Engine) queueRunnerPreviewArchive(run domain.Run, spec domain.RunnerPre
 		RunID:          run.ID,
 		PreviewArchive: &spec,
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return err
 	}
 	e.notifyRunnerDispatch("terminal")
@@ -640,7 +640,7 @@ func (e *Engine) dispatchRunnerCommand(ctx context.Context, runnerID, runID, nod
 		}
 		task.Invocation = e.gateCommandInvocation(run, nodeID)
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return "", err
 	}
 	e.notifyRunnerDispatch("terminal")

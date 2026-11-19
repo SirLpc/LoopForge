@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"agentflow/internal/domain"
 )
@@ -124,5 +125,72 @@ func TestWarmGitSandboxConcealsIdleCaches(t *testing.T) {
 	profile, err := seatbeltProfileCommand(ws, req)
 	if err != nil || !strings.Contains(profile, "(deny file-read* file-write* (subpath "+strconv.Quote(root)+"))") {
 		t.Fatalf("unassigned seatbelt cache accessible: %v %v", profile, err)
+	}
+}
+
+func TestWarmDockerSandboxChecksActualHostIsolation(t *testing.T) {
+	ws := t.TempDir()
+	objects := filepath.Join(t.TempDir(), "objects")
+	if err := os.Mkdir(objects, 0700); err != nil {
+		t.Fatal(err)
+	}
+	good := warmDockerInspection{}
+	good.HostConfig.CapDrop = []string{"ALL"}
+	good.HostConfig.SecurityOpt = []string{"no-new-privileges"}
+	good.Mounts = []warmDockerMount{{Type: "bind", Source: ws, Destination: "/workspace", RW: true}, {Type: "bind", Source: objects, Destination: objects}}
+	dirs := []string{objects}
+	if err := good.validate(ws, dirs, ""); err != nil {
+		t.Fatal(err)
+	}
+	bad := good
+	bad.HostConfig.Privileged = true
+	if bad.validate(ws, dirs, "") == nil {
+		t.Fatal("privileged warm runtime accepted")
+	}
+	for _, mount := range []warmDockerMount{{Type: "bind", Source: "/var/run", Destination: "/var/run"}, {Type: "bind", Source: "/", Destination: "/host", RW: true}, {Type: "bind", Source: "/var/run/docker.sock", Destination: "/runtime"}} {
+		bad = good
+		bad.Mounts = append(append([]warmDockerMount(nil), good.Mounts...), mount)
+		if bad.validate(ws, dirs, "") == nil {
+			t.Fatalf("unexpected mount accepted: %v", mount)
+		}
+	}
+}
+
+func TestWarmDockerWorkspaceContainerLifecycle(t *testing.T) {
+	image := os.Getenv("AGENTFLOW_WARM_TEST_DOCKER_IMAGE")
+	if image == "" {
+		t.Skip("requires a local Docker image containing Git")
+	}
+	ws, objects, oid := warmGitSandboxFixture(t)
+	t.Setenv("AGENTFLOW_RUNTIME_CLI_DIR", "")
+	name := "loopforge-test-warm-" + filepath.Base(t.TempDir()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	command := func(args ...string) string {
+		t.Helper()
+		out, err := exec.CommandContext(t.Context(), "docker", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker %s: %s %v", args[0], out, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	requires := SandboxRequirements{GitObjectDirs: []string{objects}}
+	sb := dockerSandbox{id: name, name: name, builtImage: image, workspace: ws, requirements: requires}
+	args := []string{"create", "--pull=never", "--name", name, "--init", "--network=none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--user", strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid()), "-v", ws + ":/workspace"}
+	binds, err := dockerGitObjectMounts(requires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args = append(args, binds...)
+	command(append(args, "--entrypoint", "sh", image, "-c", "sleep 600 & wait")...)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+	if err := sb.verifyWarmDocker(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	command("start", name)
+	command("exec", name, "sh", "-c", `cd /workspace && test "$(git cat-file blob "$1")" = "trusted object" && ! touch "$2/new"`, "sh", oid, objects)
+	if err := sb.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := command("ps", "-aq", "--filter", "name=^/"+name+"$"); got != "" {
+		t.Fatal("container survived teardown", got)
 	}
 }

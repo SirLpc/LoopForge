@@ -61,7 +61,8 @@ func browserWorkspaceRequest(run domain.Run, req *domain.BrowserRequest) domain.
 func (e *Engine) BrowserWorkspaceRequest(run domain.Run, req *domain.BrowserRequest) (domain.RunnerWorkspaceRequest, error) {
 	request := browserWorkspaceRequest(run, req)
 	if !req.Ensure {
-		return request, nil
+		err := e.guardWarmRequest(run, &request)
+		return request, err
 	}
 	return e.preparedWorkspaceRequest(run, request)
 }

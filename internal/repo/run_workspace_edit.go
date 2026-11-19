@@ -40,15 +40,18 @@ func (r *RunsRepo) AcquireWorkspaceEditor(runID string, userID int64) error {
 // WithWorkspaceEditor runs fn for a person editing in the IDE, at any time the
 // workspace is HumanEditable. Agents re-read before write; the hash guards saves.
 func (r *RunsRepo) WithWorkspaceEditor(runID string, userID int64, fn func(domain.Run) error) error {
-	return r.withWorkspaceWriter(runID, userID, false, fn)
+	return r.WithWorkspaceWriterStore(runID, userID, false, func(run domain.Run, _ *Store) error { return fn(run) })
 }
 
 // WithMainBotWorkspace lets Main Bot edit a live conversation workspace as is;
 // a borrowed SOP workspace must be stopped first (runs_pause / runs_cancel).
 func (r *RunsRepo) WithMainBotWorkspace(runID string, userID int64, fn func(domain.Run) error) error {
-	return r.withWorkspaceWriter(runID, userID, true, fn)
+	return r.WithWorkspaceWriterStore(runID, userID, true, func(run domain.Run, _ *Store) error { return fn(run) })
 }
-func (r *RunsRepo) withWorkspaceWriter(runID string, userID int64, mainBot bool, fn func(domain.Run) error) error {
+
+// WithWorkspaceWriterStore supplies the current transaction for authorizing
+// Runner operations while the run row is locked for editing.
+func (r *RunsRepo) WithWorkspaceWriterStore(runID string, userID int64, mainBot bool, fn func(domain.Run, *Store) error) error {
 	if userID <= 0 {
 		return fmt.Errorf("请先登录")
 	}
@@ -65,20 +68,29 @@ func (r *RunsRepo) withWorkspaceWriter(runID string, userID int64, mainBot bool,
 		if !allowed {
 			return fmt.Errorf("请先停止 SOP 执行后再编辑工作区")
 		}
-		return fn(run)
+		return fn(run, newStore(tx))
 	})
 }
 
 func (r *RunsRepo) ReleaseWorkspaceEditor(runID string, userID int64, beforeRelease ...func(domain.Run) error) error {
+	return r.ReleaseWorkspaceEditorStore(runID, userID, func(run domain.Run, _ *Store) error {
+		for _, close := range beforeRelease {
+			if err := close(run); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (r *RunsRepo) ReleaseWorkspaceEditorStore(runID string, userID int64, beforeRelease func(domain.Run, *Store) error) error {
 	return r.DB.Transaction(func(tx *gorm.DB) error {
 		row, err := r.takeRunForUpdate(tx, runID)
 		if err != nil {
 			return err
 		}
-		for _, close := range beforeRelease {
-			if err := close(runFromRow(row)); err != nil {
-				return err
-			}
+		if err := beforeRelease(runFromRow(row), newStore(tx)); err != nil {
+			return err
 		}
 		return tx.Model(&runRow{}).Where("id = ?", runID).Updates(map[string]any{
 			"workspace_editor_id": 0, "workspace_edit_until": nil, "revision": gorm.Expr("revision + 1"),

@@ -41,6 +41,8 @@ type warmWorkspaceSlotRecord struct {
 }
 
 type warmWorkspaceAllocation struct {
+	GitReady bool `json:"gitReady,omitempty"`
+
 	Lease   domain.WarmWorkspaceLease `json:"lease"`
 	Phase   warmWorkspacePhase        `json:"phase"`
 	Targets map[string]string         `json:"targets,omitempty"` // slot ID to absolute destination

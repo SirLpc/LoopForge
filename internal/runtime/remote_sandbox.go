@@ -21,8 +21,8 @@ func OpenRemoteSandbox(ctx context.Context, id, workspace string, profile domain
 	if profile.Driver, err = domain.ResolveSandboxDriver(profile.Driver, goruntime.GOOS); err != nil {
 		return nil, err
 	}
-	if len(requirements.GitObjectDirs) > 0 && !domain.ConversationSandboxDriver(profile.Driver) {
-		return nil, fmt.Errorf("warm Git checkout requires a Docker or native sandbox")
+	if len(requirements.GitObjectDirs) > 0 && profile.Driver != domain.SandboxDriverDocker {
+		return nil, fmt.Errorf("warm Git checkout requires a verified Docker sandbox")
 	}
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		return nil, err

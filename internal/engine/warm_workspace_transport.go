@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,6 +21,19 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 	if err := e.repo.AuthorizeWarmWorkspaceControl(runnerID, run, &req); err != nil {
 		return req, err
 	}
+	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
+		req.Sandbox = run.WorkflowSnapshot.SandboxSnapshot
+		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
+			return req, errors.New("warm checkout requires Docker")
+		}
+		inv := new(domain.RunnerInvocation)
+		identity := resolveGitIdentity(e.repo, run.ExecutionContext.ResponsibleUserID)
+		bindRunnerRepositories(inv, run, identity.name, identity.email)
+		creds := e.WorkspaceTerminalGitCredentials(context.Background(), run, run.ExecutionContext.ResponsibleUserID)
+		inv.GitHTTPUserID, inv.GitSSHUserID = 0, 0
+		inv.GitHTTPCredentials, inv.GitSSHKeys = creds.HTTPS, creds.SSHKeys
+		req.PreparationInvocation = inv
+	}
 	if req.Operation == domain.RunnerWorkspaceOperationWarmPrepare {
 		req.Repositories = run.RepositoryContexts()
 	}
@@ -32,6 +46,24 @@ func (e *Engine) AuthorizeWarmWorkspaceControl(runnerID string, req *domain.Runn
 	owner, ok := e.repo.RunState(req.RunID)
 	if !ok || e.defaultExecutionRunner(owner) != runnerID {
 		return errors.New("warm workspace owner or runner changed")
+	}
+	if !domain.IsWarmWorkspaceOperation(req.Operation) {
+		if err := e.guardWarmRequest(owner, req); err != nil {
+			return err
+		}
+		req.Repositories = owner.RepositoryContexts()
+		switch req.Operation {
+		case domain.RunnerWorkspaceOperationPrepare, domain.RunnerWorkspaceOperationPreparationRecord, domain.RunnerWorkspaceOperationPreparationStatus, domain.RunnerWorkspaceOperationTerminal, domain.RunnerWorkspaceOperationBrowser:
+			if req.Operation == domain.RunnerWorkspaceOperationTerminal && req.Terminal == nil {
+				return errors.New("missing terminal operation")
+			}
+			canonical, err := e.preparedWorkspaceRequest(owner, *req)
+			if err != nil {
+				return err
+			}
+			*req = canonical
+		}
+		return nil
 	}
 	canonical, err := e.warmWorkspaceControlRequest(owner, *req)
 	if err != nil {

@@ -122,6 +122,9 @@ func (e *Engine) preparedWorkspaceRequest(run domain.Run, request domain.RunnerW
 	if err != nil {
 		return request, err
 	}
+	if err := e.guardWarmRequest(run, &request); err != nil {
+		return request, err
+	}
 	request.RunID = run.ID
 	request.RunKind = run.Kind
 	request.WorkspaceRunID = workspaceRunID(run)

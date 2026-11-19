@@ -355,6 +355,8 @@ type RunnerRuntime struct {
 }
 
 type RunnerTask struct {
+	WarmWorkspaceLease *WarmWorkspaceLease `json:"warmWorkspaceLease,omitempty"`
+
 	ID           string     `json:"id"`
 	RunnerID     string     `json:"runnerId,omitempty"` // empty = any compatible runner
 	Provider     string     `json:"provider"`

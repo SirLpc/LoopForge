@@ -314,6 +314,10 @@ func (h *runsHandlers) proxyRunnerWorkspace(c *gin.Context, run domain.Run, runn
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 12*time.Second)
 	defer cancel()
+	if err := h.engine.BindWorkspaceLease(run, &request); err != nil {
+		c.JSON(409, gin.H{"error": err.Error()})
+		return
+	}
 	response, err := h.runnerControls.requestWorkspace(ctx, runnerID, request)
 	if err != nil {
 		reason := "远程执行机器当前离线或工作区通道不可用"

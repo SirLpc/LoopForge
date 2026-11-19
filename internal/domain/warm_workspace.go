@@ -58,6 +58,7 @@ func (r Runner) SupportsWarmWorkspace() bool {
 }
 
 const (
+	RunnerWorkspaceOperationWarmCheckout      = "warm_checkout"
 	RunnerWorkspaceOperationWarmPrepare       = "warm_prepare"
 	RunnerWorkspaceOperationWarmStatus        = "warm_status"
 	RunnerWorkspaceOperationWarmReleaseCheck  = "warm_release_check"
@@ -66,7 +67,7 @@ const (
 
 func IsWarmWorkspaceOperation(op string) bool {
 	switch op {
-	case RunnerWorkspaceOperationWarmPrepare, RunnerWorkspaceOperationWarmStatus, RunnerWorkspaceOperationWarmReleaseCheck, RunnerWorkspaceOperationWarmReleaseCommit:
+	case RunnerWorkspaceOperationWarmCheckout, RunnerWorkspaceOperationWarmPrepare, RunnerWorkspaceOperationWarmStatus, RunnerWorkspaceOperationWarmReleaseCheck, RunnerWorkspaceOperationWarmReleaseCommit:
 		return true
 	}
 	return false

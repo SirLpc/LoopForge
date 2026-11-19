@@ -164,7 +164,7 @@ func (d *Daemon) readControls(daemonCtx context.Context, conn *websocket.Conn) e
 			}
 			requestCtx := ctx
 			stopRequest := func() {}
-			if domain.IsWorkspaceCheckpointTransferOperation(message.WorkspaceRequest.Operation) || message.WorkspaceRequest.Operation == domain.RunnerWorkspaceOperationCheckpoint {
+			if domain.IsWorkspaceCheckpointTransferOperation(message.WorkspaceRequest.Operation) || message.WorkspaceRequest.Operation == domain.RunnerWorkspaceOperationCheckpoint || message.WorkspaceRequest.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
 				requestCtx, stopRequest = context.WithCancel(ctx)
 				checkpointMu.Lock()
 				checkpointCancels[message.RequestID] = stopRequest

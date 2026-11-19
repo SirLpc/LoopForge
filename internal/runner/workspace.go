@@ -123,8 +123,19 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 	if domain.IsWarmWorkspaceOperation(request.Operation) {
 		return d.warmWorkspaceControl(ctx, request)
 	}
-	if request.WarmWorkspaceLease != nil {
-		return runnerWorkspaceError(errors.New("unexpected warm workspace lease"))
+	if d.warmWorkspacePool != nil || request.WarmWorkspaceLease != nil {
+		owner := requestGateKey(request)
+		gate := d.workspaceGate("warm/" + owner)
+		if !gate.TryRLock() {
+			return workspaceBusyResponse("workspace is still in use")
+		}
+		defer gate.RUnlock()
+		if err := d.checkWarmOperation(ctx, owner, request.Operation, request.WarmWorkspaceLease); err != nil {
+			return runnerWorkspaceError(err)
+		}
+		if request.WarmWorkspaceLease != nil && (request.Sandbox != nil && request.Sandbox.Profile.Driver != domain.SandboxDriverDocker || request.Operation == "conversation_process") {
+			return runnerWorkspaceError(errors.New("warm operation requires a verified Docker sandbox"))
+		}
 	}
 	if request.Operation == "conversation_process" {
 		return d.conversationProcess(ctx, request)

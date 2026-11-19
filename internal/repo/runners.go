@@ -22,6 +22,8 @@ var (
 )
 
 type runnerTaskPayload struct {
+	WarmWorkspaceLease *domain.WarmWorkspaceLease `json:"warmWorkspaceLease,omitempty"`
+
 	Prompt            string                           `json:"prompt"`
 	Workspace         string                           `json:"workspace,omitempty"`
 	Args              []string                         `json:"args,omitempty"`
@@ -116,6 +118,7 @@ func runnerTaskFromRow(row runnerTaskRow) domain.RunnerTask {
 		t.CompletedAt = p.CompletedAt.toTime()
 		t.RunID = p.RunID
 		t.NodeID = p.NodeID
+		t.WarmWorkspaceLease = p.WarmWorkspaceLease
 		t.Invocation = p.Invocation
 		t.Sandbox = p.Sandbox
 		t.Command = p.Command
@@ -140,7 +143,7 @@ func runnerTaskPayloadBytes(v domain.RunnerTask) []byte {
 		Prompt: v.Prompt, Workspace: v.Workspace, Args: v.Args, ExitCode: v.ExitCode,
 		Result: v.Result, Error: v.Error, StartedAt: newRunnerTaskTime(v.StartedAt),
 		CompletedAt: newRunnerTaskTime(v.CompletedAt), RunID: v.RunID, NodeID: v.NodeID,
-		Invocation: v.Invocation, Sandbox: v.Sandbox, Command: v.Command, Action: v.Action,
+		WarmWorkspaceLease: v.WarmWorkspaceLease, Invocation: v.Invocation, Sandbox: v.Sandbox, Command: v.Command, Action: v.Action,
 		PreviewArchive: v.PreviewArchive, WorkBranchMessage: v.WorkBranchMessage, Artifacts: v.Artifacts,
 		Outputs: v.Outputs, IntegrationLabel: v.IntegrationLabel,
 	})

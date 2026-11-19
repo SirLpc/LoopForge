@@ -133,6 +133,12 @@ func (e *Engine) startWorkflowDefinition(wf domain.WorkflowDefinition, input str
 		executionContext.ExecutionRunnerID = e.repo.DefaultRunner(executionContext.ResponsibleUserID)
 		executionContext.WorkspaceRunID = ""
 	}
+	if !workspace && executionContext.ParentRunID == "" {
+		if err := e.freezeWarmWorkspace(&executionContext, repositories, profile); err != nil {
+			return domain.Run{}, err
+		}
+	}
+
 	if executionContext.ExecutionRunnerID == "" && !executionContext.ExecutionPinned {
 		if runner, ok := e.cloudPoolRunner(executionContext.ProjectID); ok {
 			executionContext.ExecutionRunnerID = runner.ID

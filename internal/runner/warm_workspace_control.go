@@ -42,7 +42,27 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	}
 	// Git preparation and release proofs have their own lifetimes. A short
 	// control call may report placement, never readiness from placement alone.
+	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus {
+		fence := d.workspaceGate("warm/" + l.OwnerRunID)
+		if !fence.TryLock() {
+			return workspaceBusyResponse("workspace is still in use")
+		}
+		defer fence.Unlock()
+	}
 	switch req.Operation {
+	case domain.RunnerWorkspaceOperationWarmCheckout:
+		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
+			return runnerWorkspaceError(errors.New("warm checkout requires Docker"))
+		}
+		gate := d.requestGate(req)
+		if !gate.TryLock() {
+			return workspaceBusyResponse("workspace is still in use")
+		}
+		defer gate.Unlock()
+		if err := p.prepareLeaseCheckout(ctx, *l, req.PreparationInvocation); err != nil {
+			return runnerWorkspaceError(err)
+		}
+
 	case domain.RunnerWorkspaceOperationWarmPrepare:
 		gate := d.requestGate(req)
 		if !gate.TryLock() {
@@ -74,6 +94,9 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	}
 	if _, err = p.inspectLease(a); err != nil {
 		return runnerWorkspaceError(err)
+	}
+	if a.Phase == warmWorkspacePlaced && a.GitReady {
+		a.Phase = "ready"
 	}
 	payload, _ := json.Marshal(map[string]warmWorkspacePhase{"phase": a.Phase})
 	return domain.RunnerWorkspaceResponse{Payload: payload}

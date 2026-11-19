@@ -15,6 +15,15 @@ import (
 	"time"
 )
 
+type workspaceWriterEngineKey struct{}
+
+func workspaceWriterContext(ctx context.Context, run domain.Run, tx *repo.Store) context.Context {
+	if run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
+		return ctx
+	}
+	return context.WithValue(ctx, workspaceWriterEngineKey{}, engine.New(tx, nil))
+}
+
 func (h *runsHandlers) workspaceEditActor(c *gin.Context) (domain.Run, int64, bool) {
 	run, ok := h.repo.RunState(c.Param("id"))
 	if !ok {
@@ -67,7 +76,9 @@ func (h *runsHandlers) workspaceRelease(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := h.repo.ReleaseWorkspaceEditor(run.ID, user, func(locked domain.Run) error { return h.closeWorkspaceTerminals(c.Request.Context(), locked, user) }); err != nil {
+	if err := h.repo.ReleaseWorkspaceEditorStore(run.ID, user, func(locked domain.Run, tx *repo.Store) error {
+		return h.closeWorkspaceTerminals(workspaceWriterContext(c.Request.Context(), locked, tx), locked, user)
+	}); err != nil {
 		c.JSON(409, gin.H{"error": err.Error()})
 		return
 	}
@@ -89,6 +100,13 @@ func (h *runsHandlers) workspaceWrite(c *gin.Context) {
 	}
 	var sha string
 	runnerID := h.engine.RunExecutionRunner(run)
+	writeRequest := domain.RunnerWorkspaceRequest{RunID: runnerWorkspaceRunID(run), WorkspaceLayout: run.ExecutionContext.RunnerWorkspaceLayout, Operation: domain.RunnerWorkspaceOperationWrite, Path: req.Path, Content: req.Content, ExpectedSHA256: req.ExpectedSHA, TerminalOwner: user}
+	if runnerID != "" {
+		if err := h.engine.BindWorkspaceLease(run, &writeRequest); err != nil {
+			c.JSON(409, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	err := h.withWorkspaceWriter(c, run.ID, user, func(locked domain.Run) error {
 		if runnerID != "" {
 			if h.runnerControls == nil {
@@ -96,7 +114,10 @@ func (h *runsHandlers) workspaceWrite(c *gin.Context) {
 			}
 			ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 			defer cancel()
-			response, err := h.runnerControls.requestWorkspace(ctx, runnerID, domain.RunnerWorkspaceRequest{RunID: runnerWorkspaceRunID(locked), RunStatus: locked.Status, WorkspaceLayout: run.ExecutionContext.RunnerWorkspaceLayout, RunKind: mainBotWorkspaceMode(c, locked), ConcurrentEdit: humanWorkspaceEdit(c, locked), Operation: domain.RunnerWorkspaceOperationWrite, Path: req.Path, Content: req.Content, ExpectedSHA256: req.ExpectedSHA, TerminalOwner: user})
+			writeRequest.RunStatus = locked.Status
+			writeRequest.RunKind = mainBotWorkspaceMode(c, locked)
+			writeRequest.ConcurrentEdit = humanWorkspaceEdit(c, locked)
+			response, err := h.runnerControls.requestWorkspace(ctx, runnerID, writeRequest)
 			if err != nil {
 				return fmt.Errorf("执行端写入失败：%w", err)
 			}
@@ -199,7 +220,9 @@ func (h *runsHandlers) workspaceTerminal(c *gin.Context) {
 		}
 		return h.withWorkspaceWriter(c, run.ID, user, func(locked domain.Run) error {
 			req.ExpiresAt = locked.WorkspaceEditUntil
-			trustedRequest.RunID = runnerWorkspaceRunID(locked)
+			if trustedRequest.WarmWorkspaceLease == nil {
+				trustedRequest.RunID = runnerWorkspaceRunID(locked)
+			}
 			trustedRequest.RunStatus = locked.Status
 			trustedRequest.WorkspaceLayout = locked.ExecutionContext.RunnerWorkspaceLayout
 			trustedRequest.RunKind = mainBotWorkspaceMode(c, locked)
@@ -272,7 +295,15 @@ func (h *runsHandlers) closeWorkspaceTerminals(ctx context.Context, run domain.R
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		req := domain.WorkspaceTerminalRequest{Operation: "close-all"}
-		response, err := h.runnerControls.requestWorkspace(ctx, runnerID, domain.RunnerWorkspaceRequest{RunID: runnerWorkspaceRunID(run), RunStatus: run.Status, WorkspaceLayout: run.ExecutionContext.RunnerWorkspaceLayout, Operation: domain.RunnerWorkspaceOperationTerminal, Terminal: &req, TerminalOwner: user})
+		request := domain.RunnerWorkspaceRequest{RunID: runnerWorkspaceRunID(run), RunStatus: run.Status, WorkspaceLayout: run.ExecutionContext.RunnerWorkspaceLayout, Operation: domain.RunnerWorkspaceOperationTerminal, Terminal: &req, TerminalOwner: user}
+		authorizer := h.engine
+		if scoped, ok := ctx.Value(workspaceWriterEngineKey{}).(*engine.Engine); ok {
+			authorizer = scoped
+		}
+		if err := authorizer.BindWorkspaceLease(run, &request); err != nil {
+			return err
+		}
+		response, err := h.runnerControls.requestWorkspace(ctx, runnerID, request)
 		if err != nil {
 			return err
 		}
@@ -303,10 +334,12 @@ func (h *runsHandlers) withWorkspaceWriter(c *gin.Context, runID string, user in
 			return err
 		}
 	}
-	if mainBotWorkspaceRun(ctx) == runID {
-		return h.repo.WithMainBotWorkspace(runID, user, fn)
-	}
-	return h.repo.WithWorkspaceEditor(runID, user, fn)
+	return h.repo.WithWorkspaceWriterStore(runID, user, mainBotWorkspaceRun(ctx) == runID, func(locked domain.Run, tx *repo.Store) error {
+		previous := c.Request
+		c.Request = previous.WithContext(workspaceWriterContext(previous.Context(), locked, tx))
+		defer func() { c.Request = previous }()
+		return fn(locked)
+	})
 }
 
 // humanWorkspaceEdit marks IDE requests on runs that may still have agents

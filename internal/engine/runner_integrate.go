@@ -54,7 +54,7 @@ func (e *Engine) integrateOnRunner(ctx context.Context, runner domain.Runner, ru
 		NodeID:           integrationTaskNode,
 		Invocation:       invocation,
 	}
-	if err := e.repo.PutRunnerTask(task); err != nil {
+	if err := e.putWorkspaceRunnerTask(task); err != nil {
 		return nil, err
 	}
 	e.notifyRunnerDispatch("terminal")
