@@ -185,7 +185,7 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, p
 	if _, err := gitwork.C(local, stage, "update-ref", "--no-deref", "HEAD", target); err != nil {
 		return err
 	}
-	lfs, err := prepareWarmLFS(local, auth, stage, db, warmLFSCache(cache, projectID, repo), target, repo)
+	lfs, err := prepareWarmLFS(local, auth, stage, db, warmLFSCache(cache, projectID, repo), target, repo, (*os.File).Sync)
 	if err != nil {
 		return err
 	}

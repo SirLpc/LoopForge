@@ -243,7 +243,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 	if err := warmAlternate(filepath.Join(stage, ".git"), filepath.Join(cache, "objects")); err != nil {
 		return ref, err
 	}
-	lfs, err := prepareWarmLFS(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, r), head, r)
+	lfs, err := prepareWarmLFS(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, r), head, r, (*os.File).Sync)
 	if err != nil {
 		return ref, err
 	}

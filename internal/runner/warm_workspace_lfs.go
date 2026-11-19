@@ -43,7 +43,7 @@ func warmLFSObject(storage, oid string) string {
 
 // Each exclusive cache is shared only by slots for the same project, registered
 // repo and frozen origin. Git authorization happens on each checkout and return.
-func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, repo domain.RunnerRepository) (warmLFSManifest, error) {
+func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, repo domain.RunnerRepository, syncDir func(*os.File) error) (warmLFSManifest, error) {
 	var manifest warmLFSManifest
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		return manifest, checkWarmWithoutLFS(local, stage, head)
@@ -120,34 +120,11 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 		}
 		missing[item.OID] = item.Size
 	}
-	if len(missing) == 0 {
-		return manifest, nil
+	if len(missing) > 0 {
+		if err := fetchWarmLFS(local, auth, db, scope, head, repo); err != nil {
+			return manifest, err
+		}
 	}
-	// A trusted transfer repository supplies both a private .git/lfs store and
-	// commit-specific endpoint rules. Relative lfs.storage is resolved inside the
-	// local and remote repos separately, including standalone-file transports.
-	if _, err := gitwork.C(local, scope, "init", "--template=", warmObjectFormat(head)); err != nil {
-		return manifest, err
-	}
-	if err := warmAlternate(filepath.Join(scope, ".git"), filepath.Join(db, "objects")); err != nil {
-		return manifest, err
-	}
-	config, err := gitwork.C(local, scope, "ls-tree", head, "--", ".lfsconfig")
-	if err != nil {
-		return manifest, err
-	}
-	if strings.HasPrefix(config, "100") {
-		_, err = gitwork.C(local, scope, "restore", "--source="+head, "--worktree", "--", ".lfsconfig")
-	} else {
-		err = os.WriteFile(filepath.Join(scope, ".lfsconfig"), nil, 0600)
-	}
-	if err != nil {
-		return manifest, err
-	}
-	if _, err := gitwork.C(auth, scope, "-c", "lfs.storage=lfs", "-c", "remote.origin.url="+repo.CloneURL, "-c", "lfs.fetchrecentalways=false", "lfs", "fetch", "--include=*", "--exclude=", "origin", head); err != nil {
-		return manifest, fmt.Errorf("cannot recover Git LFS objects: %w", err)
-	}
-	parents := map[string]bool{}
 	for oid, size := range missing {
 		path := warmLFSObject(manifest.storage, oid)
 		ok, err := warmLFSMatches(path, warmLFSFile{OID: oid, Size: size})
@@ -157,6 +134,13 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 		if !ok {
 			return manifest, errors.New("downloaded Git LFS object failed integrity check")
 		}
+		manifest.verified[oid] = size
+	}
+	// A failed fetch or an interrupted return may leave valid file bytes
+	// with unconfirmed directory entries. Publish hits and downloads alike.
+	parents := map[string]bool{}
+	for oid := range manifest.verified {
+		path := warmLFSObject(manifest.storage, oid)
 		for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
 			if parents[parent] {
 				break
@@ -165,7 +149,7 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 			if err != nil {
 				return manifest, err
 			}
-			err = dir.Sync()
+			err = syncDir(dir)
 			dir.Close()
 			if err != nil {
 				return manifest, err
@@ -175,9 +159,36 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 				break
 			}
 		}
-		manifest.verified[oid] = size
 	}
 	return manifest, nil
+}
+
+func fetchWarmLFS(local, auth context.Context, db, scope, head string, repo domain.RunnerRepository) error {
+	// A trusted transfer repository supplies both a private .git/lfs store and
+	// commit-specific endpoint rules. Relative lfs.storage is resolved inside the
+	// local and remote repos separately, including standalone-file transports.
+	if _, err := gitwork.C(local, scope, "init", "--template=", warmObjectFormat(head)); err != nil {
+		return err
+	}
+	if err := warmAlternate(filepath.Join(scope, ".git"), filepath.Join(db, "objects")); err != nil {
+		return err
+	}
+	config, err := gitwork.C(local, scope, "ls-tree", head, "--", ".lfsconfig")
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(config, "100") {
+		_, err = gitwork.C(local, scope, "restore", "--source="+head, "--worktree", "--", ".lfsconfig")
+	} else {
+		err = os.WriteFile(filepath.Join(scope, ".lfsconfig"), nil, 0600)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := gitwork.C(auth, scope, "-c", "lfs.storage=lfs", "-c", "remote.origin.url="+repo.CloneURL, "-c", "lfs.fetchrecentalways=false", "lfs", "fetch", "--include=*", "--exclude=", "origin", head); err != nil {
+		return fmt.Errorf("cannot recover Git LFS objects: %w", err)
+	}
+	return nil
 }
 
 // Without git-lfs, ordinary repositories remain usable. Inspect candidate

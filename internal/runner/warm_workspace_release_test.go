@@ -225,6 +225,60 @@ func TestWarmWorkspaceLFSPrepareRequiresVerifier(t *testing.T) {
 		t.Fatal("prepared a pointer with no verified LFS content")
 	}
 }
+func TestWarmWorkspaceLFSRetrySyncsExistingObjectDirectories(t *testing.T) {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("requires git-lfs")
+	}
+	g := newWarmGitFixture(t)
+	runGitT(t, g.source, "lfs", "install", "--local")
+	runGitT(t, g.source, "lfs", "track", "*.bin")
+	const content = "cached Unity asset"
+	warmGitWrite(t, g.source, "asset.bin", content)
+	head := g.publish(t)
+	scope := t.TempDir()
+	storage := filepath.Join(scope, ".git", "lfs")
+	interrupted := errors.New("injected directory sync failure")
+	synced := map[string]bool{}
+	fail := true
+	syncDir := func(dir *os.File) error {
+		if fail && dir.Name() == storage {
+			return interrupted
+		}
+		if err := dir.Sync(); err != nil {
+			return err
+		}
+		synced[dir.Name()] = true
+		return nil
+	}
+	prepare := func() error {
+		_, err := prepareWarmLFS(t.Context(), t.Context(), g.source, filepath.Join(g.source, ".git"), scope, head, g.repo, syncDir)
+		return err
+	}
+	if err := prepare(); !errors.Is(err, interrupted) {
+		t.Fatalf("first publication: %v", err)
+	}
+	remote := filepath.Join(g.repo.CloneURL, "lfs", "objects")
+	if err := os.Rename(remote, remote+".held"); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(); !errors.Is(err, interrupted) {
+		t.Fatalf("all-hit retry bypassed failed directory publication: %v", err)
+	}
+	clear(synced)
+	fail = false
+	if err := prepare(); err != nil {
+		t.Fatal(err)
+	}
+	oid := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	for dir := filepath.Dir(warmLFSObject(storage, oid)); ; dir = filepath.Dir(dir) {
+		if !synced[dir] {
+			t.Errorf("cache returned without syncing %s", dir)
+		}
+		if dir == scope {
+			break
+		}
+	}
+}
 func TestWarmWorkspaceLFSTransfersOnceAcrossReturnsAndSlots(t *testing.T) {
 	realLFS, err := exec.LookPath("git-lfs")
 	if err != nil {
