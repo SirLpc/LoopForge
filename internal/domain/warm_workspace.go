@@ -1,5 +1,7 @@
 package domain
 
+import "fmt"
+
 type WorkspaceMode string
 
 const (
@@ -56,6 +58,28 @@ const RunnerVersionWarmWorkspace = "0.12.0"
 
 func (r Runner) SupportsWarmWorkspace() bool {
 	return versionAtLeast(r.RunnerVersion, RunnerVersionWarmWorkspace)
+}
+
+// Occupied slots count as registered. Their availability is the allocator's job.
+func (r Runner) CheckWarmWorkspaceRegistration(projectID string, repositories []RepositoryContext) error {
+	if !r.SupportsWarmWorkspace() {
+		return fmt.Errorf("当前执行机器需升级至 %s，或在已登记仓库的机器新开对话", RunnerVersionWarmWorkspace)
+	}
+	registered := map[string]bool{}
+	for _, slot := range r.WarmWorkspaceSlots {
+		if slot.ProjectID == projectID && slot.State != "blocked" {
+			registered[slot.RepositoryID] = true
+		}
+	}
+	for _, repository := range repositories {
+		if !registered[repository.RepositoryID] {
+			return fmt.Errorf("请在当前执行机器登记仓库 %s 的预热工作区，或在已登记的机器新开对话", repository.RepositoryID)
+		}
+	}
+	if len(repositories) == 0 {
+		return fmt.Errorf("请指定已登记的项目仓库")
+	}
+	return nil
 }
 
 const (

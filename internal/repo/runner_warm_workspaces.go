@@ -327,9 +327,36 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 	return nil
 }
 
+// Existing placements stay on their original machine. Recheck compatibility
+// when joining the queue and while waiting for the first placement.
+func (r *RunnersRepo) CheckConversationWarmTarget(run domain.Run, state domain.WarmWorkspaceState) error {
+	switch state {
+	case "", domain.WarmWorkspaceQueued, domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled:
+	default:
+		return nil
+	}
+	var machine runnerRow
+	err := r.DB.Select("id", "status", "runner_version", "warm_slots").Take(&machine, "id = ?", run.ExecutionContext.ExecutionRunnerID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("会话执行机器已移除，请在已登记仓库的机器新开对话")
+	}
+	if err != nil {
+		return err
+	}
+	if machine.Status != domain.RunnerStatusOnline && state == domain.WarmWorkspaceQueued {
+		return nil // preserve an existing wait across a temporary disconnect
+	}
+	return runnerFromRow(machine).CheckWarmWorkspaceRegistration(run.ExecutionContext.ProjectID, run.RepositoryContexts())
+}
+
 // joinConversationDemand executes inside the transaction that parks a turn.
 // A turn joining an IDE restore shares capacity but cannot cancel its demand.
-func (r *RunnersRepo) joinConversationDemand(tx *gorm.DB, d domain.WarmWorkspaceDemand) (uint64, bool, error) {
+func (r *RunnersRepo) joinConversationDemand(tx *gorm.DB, run domain.Run) (uint64, bool, error) {
+	repositories := run.RepositoryContexts()
+	if len(repositories) != 1 {
+		return 0, false, errors.New("预热对话需要一个已登记的仓库")
+	}
+	d := domain.WarmWorkspaceDemand{OwnerRunID: run.ID, RunnerID: run.ExecutionContext.ExecutionRunnerID, ProjectID: run.ExecutionContext.ProjectID, RepositoryIDs: []string{repositories[0].RepositoryID}}
 	var owner runRow
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Take(&owner, "id = ?", d.OwnerRunID).Error; err != nil {
 		return 0, false, err
@@ -340,6 +367,9 @@ func (r *RunnersRepo) joinConversationDemand(tx *gorm.DB, d domain.WarmWorkspace
 	scoped.deps = &base
 	l, state, found, err := scoped.WarmWorkspaceAllocation(d.OwnerRunID)
 	if err != nil {
+		return 0, false, err
+	}
+	if err = scoped.CheckConversationWarmTarget(run, state); err != nil {
 		return 0, false, err
 	}
 	if err = scoped.EnqueueWarmWorkspace(d, time.Now()); err != nil {

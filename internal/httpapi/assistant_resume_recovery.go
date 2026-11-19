@@ -47,7 +47,7 @@ func assistantPhaseProgress(ev assistantStreamEvent) bool {
 // the user must fix: cancellation, credentials, an unavailable execution
 // machine, a missing CLI, rate limits, quota or network failures.
 func assistantResumeRecoverable(ctx context.Context, err error) bool {
-	if err == nil || ctx.Err() != nil {
+	if err == nil || ctx.Err() != nil || errors.Is(err, errConversationProcessUnconfirmed) {
 		return false
 	}
 	if errors.Is(err, errAssistantSessionMissing) {
@@ -74,5 +74,5 @@ func assistantResumeRecoverable(ctx context.Context, err error) bool {
 // may end without type=result once it has nothing left to do; failing the
 // turn there would leave the session in the old mode.
 func assistantHandoffOutlivesPhaseError(ctx context.Context, s *AgentToolSession, err error) bool {
-	return err != nil && s != nil && s.requestedMode() != "" && ctx.Err() == nil && !errors.Is(err, runtime.ErrConversationNotStarted)
+	return err != nil && s != nil && s.requestedMode() != "" && ctx.Err() == nil && !errors.Is(err, runtime.ErrConversationNotStarted) && !errors.Is(err, errConversationProcessUnconfirmed)
 }

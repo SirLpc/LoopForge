@@ -21,6 +21,9 @@ func (e *Engine) AdvanceConversationWarmWorkspace(ctx context.Context, run domai
 	}
 	switch state {
 	case domain.WarmWorkspaceQueued:
+		if err := e.repo.CheckConversationWarmTarget(run, state); err != nil {
+			return false, err
+		}
 		if _, _, err := e.repo.ReserveNextWarmWorkspace(l.RunnerID, time.Now()); err != nil {
 			return false, err
 		}

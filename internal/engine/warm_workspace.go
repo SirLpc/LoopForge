@@ -42,24 +42,6 @@ func (e *Engine) WarmWorkspaceStatus(runID string) (domain.WarmWorkspaceState, e
 	return state, err
 }
 
-func supportsWarmDemand(runner domain.Runner, project string, repos []domain.RepositoryContext) bool {
-	if !runner.SupportsWarmWorkspace() || len(repos) == 0 {
-		return false
-	}
-	supported := map[string]bool{}
-	for _, s := range runner.WarmWorkspaceSlots {
-		if s.ProjectID == project && s.State != "blocked" {
-			supported[s.RepositoryID] = true
-		}
-	}
-	for _, r := range repos {
-		if !supported[r.RepositoryID] {
-			return false
-		}
-	}
-	return true
-}
-
 func (e *Engine) readyWarmLease(run domain.Run) (*domain.WarmWorkspaceLease, error) {
 	owner, err := e.warmWorkspaceOwner(run)
 	if err != nil {
@@ -180,7 +162,7 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 		return empty, err
 	}
 	runner, ok := e.repo.Runner(runnerID)
-	if !alreadyQueued && (!ok || !supportsWarmDemand(runner, owner.ExecutionContext.ProjectID, repos)) {
+	if !alreadyQueued && (!ok || runner.CheckWarmWorkspaceRegistration(owner.ExecutionContext.ProjectID, repos) != nil) {
 		return empty, errors.New("执行机器缺少项目所需的预热工作区登记")
 	}
 	ids := make([]string, 0, len(repos))
@@ -316,7 +298,7 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 		e.mu.Unlock()
 		if pool.serves(ec.ProjectID) {
 			for _, r := range e.eligiblePoolRunners(pool.Label) {
-				if supportsWarmDemand(r, ec.ProjectID, repositories) {
+				if r.CheckWarmWorkspaceRegistration(ec.ProjectID, repositories) == nil {
 					ec.ExecutionRunnerID = r.ID
 					ec.ExecutionPool = domain.ExecutionModeCloud
 					break
@@ -325,10 +307,10 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 		}
 	}
 	r, ok := e.repo.Runner(ec.ExecutionRunnerID)
-	if !ok || !supportsWarmDemand(r, ec.ProjectID, repositories) {
+	if !ok {
 		return errors.New("请在当前执行机器登记项目仓库的预热工作区，或在已登记的机器新开对话")
 	}
-	return nil
+	return r.CheckWarmWorkspaceRegistration(ec.ProjectID, repositories)
 }
 
 // confirmWarmWorkspace returns false on a transient transport or owner-gate

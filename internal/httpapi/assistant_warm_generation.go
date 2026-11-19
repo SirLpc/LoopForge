@@ -68,7 +68,8 @@ func (h *assistantHandlers) reconcileWarmGenerations(ctx context.Context) {
 func (h *assistantHandlers) resumeWarmGeneration(ctx context.Context, p repo.WaitingAssistantGeneration) {
 	// Keep the prepared owner pinned until the resumed CLI turn exits. The
 	// foreground lease also serializes Runner admission probes across replicas.
-	useCtx, cancelUse := context.WithCancel(context.WithoutCancel(ctx))
+	followups := context.WithoutCancel(ctx)
+	useCtx, cancelUse := context.WithCancel(followups)
 	defer cancelUse()
 	stopShutdown := context.AfterFunc(ctx, cancelUse)
 	defer stopShutdown()
@@ -137,7 +138,13 @@ func (h *assistantHandlers) resumeWarmGeneration(ctx context.Context, p repo.Wai
 	if admissionErr != nil {
 		parent = context.WithValue(parent, warmContinuationErrorKey{}, admissionErr)
 	}
-	h.executeGeneration(parent, req, g, domainUserToAuth(actor))
+	if follow := h.runGeneration(parent, req, g, domainUserToAuth(actor)); follow != nil {
+		if turn != nil {
+			_ = turn.close(followups)
+		}
+		cancelUse()
+		follow(followups)
+	}
 }
 
 // A conversation may still be in workspace mode after its previous checkout

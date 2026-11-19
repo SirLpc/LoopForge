@@ -438,7 +438,7 @@ const assistantProposalDeclinedText = "不走 SOP，这件事由你直接完成�
 
 // assistantProposalTimeout is how long a timing=start proposal blocks the
 // conversation before Main Bot does the work itself.
-const assistantProposalTimeout = 3 * time.Minute
+var assistantProposalTimeout = 3 * time.Minute
 
 const (
 	assistantProposalExpiredText    = "SOP 建议超时未确认，这件事由你直接完成。"

@@ -101,6 +101,16 @@ func (h *agentToolGateway) requestWarmHandoff(s *AgentToolSession, conv domain.A
 	if run.ExecutionContext.ExecutionRunnerID != conv.Execution().RunnerID {
 		return "", errors.New("工作区与会话不在同一执行机器")
 	}
+	targetState := func() (domain.WarmWorkspaceState, error) {
+		_, state, _, err := h.repo.WarmWorkspaceAllocation(run.ID)
+		if err != nil {
+			return state, err
+		}
+		return state, h.repo.CheckConversationWarmTarget(run, state)
+	}
+	if _, err := targetState(); err != nil {
+		return "", err
+	}
 	pending := &warmConversationHandoff{run: run, previous: conv.WorkspaceRunID}
 	s.mu.Lock()
 	if s.pendingMode != "" {
@@ -109,7 +119,7 @@ func (h *agentToolGateway) requestWarmHandoff(s *AgentToolSession, conv domain.A
 	}
 	s.pendingMode = domain.AssistantModeWorkspace
 	s.modeAction = func(ctx context.Context) error {
-		state, err := h.engine.WarmWorkspaceStatus(run.ID)
+		state, err := targetState()
 		if err != nil {
 			return err
 		}

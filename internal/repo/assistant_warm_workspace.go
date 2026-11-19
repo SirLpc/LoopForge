@@ -103,12 +103,7 @@ func (r *AssistantRepo) ParkWarmGeneration(g domain.AssistantGeneration, run dom
 		if row.CancelRequested || row.WarmWaitRunID != "" {
 			return errors.New("预热工作区请求已变更")
 		}
-		repos := run.RepositoryContexts()
-		if len(repos) != 1 {
-			return errors.New("预热对话需要一个已登记的仓库")
-		}
-		demand := domain.WarmWorkspaceDemand{OwnerRunID: run.ID, RunnerID: item.Execution().RunnerID, ProjectID: item.ProjectID, RepositoryIDs: []string{repos[0].RepositoryID}}
-		wait.Epoch, wait.CancelDemand, err = r.runners.joinConversationDemand(tx, demand)
+		wait.Epoch, wait.CancelDemand, err = r.runners.joinConversationDemand(tx, run)
 		if err != nil {
 			return err
 		}

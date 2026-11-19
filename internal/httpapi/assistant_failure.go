@@ -81,6 +81,10 @@ func classifyAssistantFailure(ctx context.Context, err error) domain.AssistantFa
 	if err == nil {
 		return f
 	}
+	if errors.Is(err, errConversationProcessUnconfirmed) && ctx.Err() == nil {
+		f.Code, f.Message, f.Suggestion = "CLI_EXIT_UNCONFIRMED", "执行机器尚未确认原生进程已退出", "请在原执行机器确认进程已退出并检查工作区，再继续对话。"
+		return f
+	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		f.Code, f.Message = "EXECUTION_TIMEOUT", "生成已取消或超时，请重试"
 		return f

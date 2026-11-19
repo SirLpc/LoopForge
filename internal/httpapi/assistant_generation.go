@@ -279,6 +279,13 @@ func (w *generationHTTPWriter) Write(p []byte) (int, error) {
 func (w *generationHTTPWriter) Flush() {}
 
 func (h *assistantHandlers) executeGeneration(parent context.Context, req assistantRequest, g domain.AssistantGeneration, actor *auth.User) {
+	if follow := h.runGeneration(parent, req, g, actor); follow != nil {
+		follow(parent)
+	}
+}
+
+// Finish this generation and release its resources before starting any follow-up.
+func (h *assistantHandlers) runGeneration(parent context.Context, req assistantRequest, g domain.AssistantGeneration, actor *auth.User) func(context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	rec := newAssistantGenerationRecorder(g, cancel)
@@ -405,7 +412,7 @@ func (h *assistantHandlers) executeGeneration(parent context.Context, req assist
 	g = rec.snapshot()
 	if parked != nil && ctx.Err() == nil {
 		if err := h.parkWarmGeneration(g, req, parked, rec.diagnostics.snapshot(g)); err == nil {
-			return
+			return nil
 		} else {
 			g.Error = err.Error()
 			if latest, ok := h.repo.PeekAssistantGeneration(g.UserID, g.SessionID); ok && latest.ID == g.ID && latest.CancelRequested {
@@ -471,13 +478,15 @@ func (h *assistantHandlers) executeGeneration(parent context.Context, req assist
 	rec.mu.Unlock()
 	rec.live.publish()
 	if finishErr != nil {
-		return
+		return nil
 	}
 	if steer != nil {
-		h.followSteer(parent, g, steer, actor)
-	} else if g.Status == "completed" {
-		h.expireProposalLater(parent, g, req, actor)
+		return func(ctx context.Context) { h.followSteer(ctx, g, steer, actor) }
 	}
+	if g.Status == "completed" {
+		return func(ctx context.Context) { h.expireProposalLater(ctx, g, req, actor) }
+	}
+	return nil
 }
 
 func (h *assistantHandlers) steerGeneration(c *gin.Context) {

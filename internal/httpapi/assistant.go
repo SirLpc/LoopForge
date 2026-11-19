@@ -439,6 +439,29 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		}
 		c.JSON(status, payload)
 	}
+	waitForWarm := func(parked *warmConversationHandoff) {
+		if dest, ok := ctx.Value(warmGenerationHandoffKey{}).(**warmConversationHandoff); ok {
+			*dest = parked
+			if sink == nil {
+				update := gin.H{"id": assistantControlScopeFrom(modelCtx).GenerationID, "sessionId": req.SessionID, "status": "running"}
+				if streaming {
+					emit("workspace.pool_waiting", update)
+				} else {
+					c.JSON(202, update)
+				}
+			}
+			return
+		}
+		fail(409, "请通过后台生成打开预热工作区")
+	}
+	// Parking before dispatch must leave the native journal at its last input.
+	if pending, err := h.boundWarmHandoff(modelCtx, toolSession); err != nil {
+		fail(409, err.Error())
+		return
+	} else if pending != nil {
+		waitForWarm(pending)
+		return
+	}
 	var nativeSession *assistantNativeSession
 	// Every conversation runs in its own CLI root; shared ones switch to the
 	// native session root below. The root's home also carries the skills.
@@ -666,33 +689,13 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			fail(504, "生成已取消或超时，请重试")
 			return
 		}
-		var raw string
-		var err error
-		if pending, gateErr := h.boundWarmHandoff(modelCtx, toolSession); gateErr != nil {
-			err = gateErr
-		} else if pending != nil {
-			err = pending
-		} else {
-			raw, err = generate(modelCtx, turn, user)
-		}
+		raw, err := generate(modelCtx, turn, user)
 		if err == nil && modelCtx.Err() != nil {
 			err = modelCtx.Err()
 		}
 		var parked *warmConversationHandoff
 		if errors.As(err, &parked) {
-			if dest, ok := ctx.Value(warmGenerationHandoffKey{}).(**warmConversationHandoff); ok {
-				*dest = parked
-				if sink == nil {
-					update := gin.H{"id": assistantControlScopeFrom(modelCtx).GenerationID, "sessionId": req.SessionID, "status": "running"}
-					if streaming {
-						emit("workspace.pool_waiting", update)
-					} else {
-						c.JSON(202, update)
-					}
-				}
-				return
-			}
-			fail(409, "请通过后台生成打开预热工作区")
+			waitForWarm(parked)
 			return
 		}
 		if errors.Is(err, errAssistantCredentialRejected) {
@@ -1683,6 +1686,9 @@ func runAssistantCLI(ctx context.Context, req assistantCLIRequest, user domain.U
 	}
 	if inv.finish != nil {
 		inv.finish(err == nil && !resultError && final != "")
+	}
+	if errors.Is(err, errConversationProcessUnconfirmed) {
+		return "", sessionID, err
 	}
 	if req.Resume && missingSession && !modelStarted && final == "" && ctx.Err() == nil {
 		return "", sessionID, errAssistantSessionMissing

@@ -22,6 +22,8 @@ import (
 	"time"
 )
 
+var errConversationProcessUnconfirmed = errors.New("原生进程退出未经确认")
+
 type assistantHelperExecutionKey struct{}
 type assistantHelperExecution struct {
 	h      *assistantHandlers
@@ -247,6 +249,7 @@ func (h *assistantHandlers) conversationExecutor(s *AgentToolSession, root strin
 			return "", err
 		}
 		var stopOnce sync.Once
+		var stopErr error
 		stopProcess := func() {
 			stopOnce.Do(func() {
 				// The ID is addressable before start is dispatched. Stop also fences
@@ -258,11 +261,17 @@ func (h *assistantHandlers) conversationExecutor(s *AgentToolSession, root strin
 				stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), conversationProcessStopTimeout)
 				defer cancel()
 				if err := waitConversationProcessStop(stopCtx, id, call, nil); err != nil {
+					stopErr = errors.Join(errConversationProcessUnconfirmed, err)
 					assistantDiagnosticsFrom(ctx).platform("cli.stop_abandoned", fmt.Sprintf("停止原生进程超过 %s 仍未确认（%v），放弃等待", conversationProcessStopTimeout, err), s.User)
 				}
 			})
 		}
-		defer stopProcess()
+		defer func() {
+			stopProcess()
+			if stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
+		}()
 		preparing = false
 		started, err := call(ctx, runtime.ConversationProcessRequest{Operation: "start", ID: id, Command: wire, Token: s.Token, Gateway: config.Current().AgentToolGateway})
 		if err != nil {
