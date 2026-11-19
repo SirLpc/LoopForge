@@ -491,6 +491,8 @@ func publicRunnerRepository(repository RunnerRepository) RunnerRepository {
 // credentials are included only when the runtime selects personal credentials
 // and are scrubbed from durable storage when the task finishes.
 type RunnerInvocation struct {
+	WarmWorkspaceRefs []WarmWorkspaceRef `json:"warmWorkspaceRefs,omitempty"`
+
 	ArchivedFiles   []WorkspaceArtifactFile `json:"archivedFiles,omitempty"`
 	RunID           string                  `json:"runId,omitempty"`
 	NodeID          string                  `json:"nodeId,omitempty"`

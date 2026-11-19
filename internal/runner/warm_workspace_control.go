@@ -84,7 +84,7 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 		}
 	case domain.RunnerWorkspaceOperationWarmStatus:
 	case domain.RunnerWorkspaceOperationWarmReleaseCheck, domain.RunnerWorkspaceOperationWarmReleaseCommit:
-		return runnerWorkspaceError(errors.New("warm workspace release requires verified return proof"))
+		return d.warmReturnControl(ctx, req)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

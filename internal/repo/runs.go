@@ -1092,7 +1092,14 @@ func (r *RunsRepo) DeleteRun(id string) error {
 		if row.Status == "running" || row.Status == "waiting" || row.Status == "queued" {
 			return fmt.Errorf("run %s is %s: cancel it before deleting", id, row.Status)
 		}
-		for _, table := range []string{"run_nodes", "run_events", "run_telemetry", "run_logs", "run_artifacts", "run_evals", "run_workspace_checkpoint_chunks", "run_workspace_checkpoints"} {
+		var active int64
+		if err := tx.Model(&warmWorkspaceRow{}).Where("owner_run_id = ? AND state NOT IN ?", id, []domain.WarmWorkspaceState{domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled}).Count(&active).Error; err != nil {
+			return err
+		}
+		if active != 0 {
+			return errors.New("return the warm workspace before deleting its owner")
+		}
+		for _, table := range []string{"run_nodes", "run_events", "run_telemetry", "run_logs", "run_artifacts", "run_evals", "run_workspace_checkpoint_chunks", "run_workspace_checkpoints", "run_warm_workspace_refs"} {
 			if err := tx.Table(table).Where("run_id = ?", id).Delete(nil).Error; err != nil {
 				return fmt.Errorf("runs delete %s: %w", id, err)
 			}

@@ -17,6 +17,13 @@ import (
 // A local ref must have a corresponding remote name before its metadata
 // can be exchanged, even when its object also belongs to another branch.
 func verifyWarmSeedRefs(ctx context.Context, meta, db string) error {
+	return verifyWarmRefs(ctx, meta, db, "", false)
+}
+
+func verifyWarmRefs(ctx context.Context, meta, db, current string, returning bool) error {
+	if _, err := warmSeedIdentity(filepath.Join(meta, "refs")); err != nil {
+		return err
+	}
 	for _, name := range []string{"index.lock", "HEAD.lock", "packed-refs.lock", "MERGE_HEAD", "MERGE_MSG", "AUTO_MERGE", "MERGE_AUTOSTASH", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "BISECT_START", "BISECT_LOG", "rebase-apply", "rebase-merge", "sequencer", "worktrees", "commondir"} {
 		if _, err := os.Lstat(filepath.Join(meta, name)); !errors.Is(err, os.ErrNotExist) {
 			if err != nil {
@@ -83,6 +90,9 @@ func verifyWarmSeedRefs(ctx context.Context, meta, db string) error {
 		if name == "refs/remotes/origin/HEAD" && strings.HasPrefix(oid, "ref: refs/remotes/origin/") && remote[strings.TrimPrefix(oid, "ref: ")] != "" {
 			continue
 		}
+		if current != "" && name == "refs/heads/"+current {
+			continue
+		}
 		peer := name
 		switch {
 		case strings.HasPrefix(name, "refs/heads/"):
@@ -98,7 +108,7 @@ func verifyWarmSeedRefs(ctx context.Context, meta, db string) error {
 		if oid == tip {
 			continue
 		}
-		if strings.HasPrefix(name, "refs/tags/") {
+		if strings.HasPrefix(name, "refs/tags/") || returning && strings.HasPrefix(name, "refs/heads/") {
 			return fmt.Errorf("warm seed tag %s differs from the remote", name)
 		}
 		if _, err := gitwork.C(ctx, db, "merge-base", "--is-ancestor", oid, tip); err != nil {

@@ -92,6 +92,15 @@ func (e *Engine) BindWorkspaceLease(run domain.Run, req *domain.RunnerWorkspaceR
 }
 
 func (e *Engine) guardWarmRequest(run domain.Run, req *domain.RunnerWorkspaceRequest) error {
+	if domain.IsWholeWorkspaceOperation(req.Operation) {
+		owner, err := e.warmWorkspaceOwner(run)
+		if err != nil {
+			return err
+		}
+		if owner.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+			return errors.New("whole-workspace archives are unavailable for this workspace")
+		}
+	}
 	lease, err := e.readyWarmLease(run)
 	if err != nil {
 		return err
@@ -178,9 +187,13 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 	for _, r := range repos {
 		ids = append(ids, r.RepositoryID)
 	}
-	if err = e.repo.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: owner.ID, RunnerID: runnerID, ProjectID: owner.ExecutionContext.ProjectID, RepositoryIDs: ids}, time.Now()); err != nil {
-		return empty, err
+	if !alreadyQueued {
+		if err = e.repo.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: owner.ID, RunnerID: runnerID, ProjectID: owner.ExecutionContext.ProjectID, RepositoryIDs: ids}, time.Now()); err != nil {
+			return empty, err
+		}
 	}
+	restoreToken := ConversationWorkspaceToken(ctx, run.ID)
+	restoringTerminal := restoreToken != "" && domain.TerminalRunStatus(run.Status)
 	announced := false
 	for {
 		if err := ctx.Err(); err != nil {
@@ -194,7 +207,7 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 		if !ok {
 			return empty, errors.New("workspace owner disappeared")
 		}
-		if current.CancelRequested || current.Status == "cancelled" {
+		if (current.CancelRequested || current.Status == "cancelled") && !restoringTerminal && !(state == domain.WarmWorkspaceReady && domain.TerminalRunStatus(run.Status)) {
 			return empty, errors.Join(context.Canceled, e.repo.CancelWarmWorkspaceEpoch(owner.ID, l.Epoch, time.Now()))
 		}
 		if run.Generation != current.Generation {
@@ -230,7 +243,11 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 			if !online || runner.Status != domain.RunnerStatusOnline {
 				break
 			}
-			if actorID != owner.ExecutionContext.ResponsibleUserID {
+			if owner.IsWorkspace() {
+				if err := e.RecordWarmWorkspaceActor(owner, l, actorID); err != nil {
+					return empty, err
+				}
+			} else if actorID != owner.ExecutionContext.ResponsibleUserID {
 				return empty, errors.New("warm checkout actor differs from frozen owner")
 			}
 			ready, err := e.confirmWarmWorkspace(ctx, owner, l)
@@ -238,14 +255,20 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 				return empty, err
 			}
 			if ready {
-				return l, e.repo.SettleWarmWorkspace(l, domain.WarmWorkspaceReady)
+				return l, e.repo.ConfirmWarmWorkspaceBinding(l, domain.WarmWorkspaceReady)
 			}
 
 		case domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled:
-			if current.Status != "running" {
+			if current.Status != "running" && state != domain.WarmWorkspaceReleased {
 				return empty, fmt.Errorf("workspace owner is %s", current.Status)
 			}
-			if err := e.repo.RequeueWarmWorkspace(l, time.Now()); err != nil {
+			var err error
+			if restoringTerminal {
+				err = e.repo.ReopenReturnedWarmWorkspace(l, time.Now(), restoreToken)
+			} else {
+				err = e.repo.RequeueWarmWorkspace(l, time.Now())
+			}
+			if err != nil {
 				return empty, err
 			}
 			continue

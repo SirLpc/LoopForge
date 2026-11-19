@@ -718,6 +718,9 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	}
 	image := built
 	args := []string{"create", "--name", name, "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "-v", workspace + ":/workspace"}
+	if len(s.requirements.GitObjectDirs) > 0 {
+		args = append(args, "--label", "io.loopforge.warm-workspace="+workspace)
+	}
 	// Native installs own private (0700) workspaces as the service user.
 	// A root image without DAC capabilities cannot access another UID's bind.
 	// Run default/root images as that user; retain explicit non-root image users.

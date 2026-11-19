@@ -128,7 +128,7 @@ func (h *runnerControlHub) request(ctx context.Context, runnerID string, request
 		return domain.RunnerWorkspaceResponse{}, errRunnerWorkspaceUnavailable
 	}
 	warm := domain.IsWarmWorkspaceOperation(request.Operation) || request.WarmWorkspaceLease != nil
-	if domain.IsWarmWorkspaceOperation(request.Operation) && request.Operation != domain.RunnerWorkspaceOperationWarmCheckout {
+	if domain.IsWarmWorkspaceOperation(request.Operation) && !domain.IsLongWarmWorkspaceOperation(request.Operation) {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
@@ -259,7 +259,7 @@ func (h *runnerControlHub) send(ctx context.Context, conn *runnerControlConn, re
 	case <-ctx.Done():
 		// Chunked exports hold the runner's workspace fence. End the remote
 		// request too; cancelling only our waiter would strand the next turn.
-		if domain.IsWorkspaceCheckpointTransferOperation(request.Operation) || request.Operation == domain.RunnerWorkspaceOperationCheckpoint || request.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
+		if domain.IsWorkspaceCheckpointTransferOperation(request.Operation) || request.Operation == domain.RunnerWorkspaceOperationCheckpoint || domain.IsLongWarmWorkspaceOperation(request.Operation) {
 			timer := time.NewTimer(time.Second)
 			select {
 			case conn.send <- runnerControlMessage{Type: "workspace.cancel", RequestID: requestID}:

@@ -1,0 +1,497 @@
+package runner
+
+import (
+	"agentflow/internal/domain"
+	"agentflow/internal/gitwork"
+	"agentflow/internal/runtime"
+	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"hash"
+	"io"
+	"io/fs"
+	"maps"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+// The owning daemon holds both the operation and execution gates, and has
+// stopped containers using the directory, before starting either return step.
+func (p *warmWorkspacePool) proveReturn(ctx context.Context, lease domain.WarmWorkspaceLease, repos []domain.RunnerRepository) ([]domain.WarmWorkspaceRef, error) {
+	return p.proveReturnWithArtifacts(ctx, lease, repos, nil)
+}
+
+func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease domain.WarmWorkspaceLease, repos []domain.RunnerRepository, files []domain.WorkspaceArtifactFile) ([]domain.WarmWorkspaceRef, error) {
+	p.mu.Lock()
+	a, err := p.loadLease(ctx, lease)
+	if err == nil && a.Phase != warmWorkspaceReleased {
+		_, err = p.inspectLease(a)
+	}
+	p.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if a.ReturnProven {
+		return a.ReturnRefs, nil
+	}
+	if a.Phase == warmWorkspaceReserved || a.Phase == warmWorkspacePlaced && !a.GitReady && !a.PreparingGit {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		a.ReturnProven = true
+		return nil, p.saveAllocation(a)
+	}
+	if a.Phase != warmWorkspacePlaced || !a.GitReady {
+		return nil, errors.New("warm checkout is not prepared for return")
+	}
+	dirs := map[string]string{}
+	if len(repos) != len(lease.Slots) {
+		return nil, errors.New("incomplete return repository list")
+	}
+	for _, r := range repos {
+		dirs[r.RepositoryID] = r.Dir
+	}
+	targets, err := p.ownerTargets(lease, dirs)
+	if err != nil || !maps.Equal(targets, a.Targets) {
+		return nil, errors.New("return does not match placed repositories")
+	}
+	root := filepath.Join(p.workspaceRoot, "runs", lease.OwnerRunID, "workspace")
+	archived := map[string]string{}
+	for _, f := range files {
+		if !validWarmWorkspaceRelativePath(f.Path) || !utf8.ValidString(f.Content) || strings.ContainsRune(f.Content, 0) || len(f.Content) > 1<<20 || runtime.WorkspaceContentSHA(f.Content) != f.SHA256 {
+			return nil, fmt.Errorf("invalid archived file %q", f.Path)
+		}
+		for _, part := range strings.Split(f.Path, "/") {
+			if strings.HasPrefix(part, ".") {
+				return nil, fmt.Errorf("invalid archived path %q", f.Path)
+			}
+		}
+		archived[f.Path] = f.SHA256
+	}
+	var refs []domain.WarmWorkspaceRef
+	var remove []string
+	skip := map[string]bool{}
+	for _, r := range repos {
+		slot := p.slots[lease.Slots[r.RepositoryID]]
+		target := targets[slot.ID]
+		proof := warmReturnTree{root: root, checkout: target, archived: archived, collected: map[string]string{}}
+		ref, err := proof.verify(ctx, slot, p.gitCache(slot.ID), r)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Dir, err)
+		}
+		ref.Artifacts = proof.collected
+		refs = append(refs, ref)
+		remove = append(remove, proof.remove...)
+		skip[target] = true
+	}
+	extra := warmReturnTree{root: root, archived: archived, collected: map[string]string{}}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if skip[path] {
+			return filepath.SkipDir
+		}
+		// The root control directory stays with this run, never with a returned
+		// checkout. Preserve it in place for this owner's next use.
+		if path == filepath.Join(root, ".agentflow") && d.IsDir() {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		return extra.archive(path, d)
+	})
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(refs[0].Artifacts, extra.collected)
+	remove = append(remove, extra.remove...)
+	// Journal proof before responding. Until commit (including after a restart)
+	// normal reads, terminals and execution cannot reopen the frozen checkout.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a, err = p.loadLease(ctx, lease)
+	if err != nil {
+		return nil, err
+	}
+	a.ReturnProven = true
+	a.ReturnRefs = refs
+	a.ReturnRemove = remove
+	return refs, p.saveAllocation(a)
+}
+
+type warmReturnTree struct {
+	root, checkout      string
+	archived, collected map[string]string
+	remove              []string
+}
+
+func (w *warmReturnTree) archive(path string, d fs.DirEntry) error {
+	rel, err := filepath.Rel(w.root, path)
+	if err != nil {
+		return err
+	}
+	digest, ok := w.archived[rel]
+	if !ok || !d.Type().IsRegular() {
+		return fmt.Errorf("commit, archive or remove %s before returning this workspace", rel)
+	}
+	info, err := d.Info()
+	if err != nil {
+		return err
+	}
+	if info.Size() > 1<<20 || info.Mode().Perm()&0111 != 0 {
+		return fmt.Errorf("archive cannot restore %s exactly", rel)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if runtime.WorkspaceContentSHA(string(b)) != digest {
+		return fmt.Errorf("archived content differs at %s", rel)
+	}
+	w.collected[rel] = digest
+	w.remove = append(w.remove, rel)
+	return nil
+}
+
+func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cache string, r domain.RunnerRepository) (domain.WarmWorkspaceRef, error) {
+	var ref domain.WarmWorkspaceRef
+	meta := filepath.Join(w.checkout, ".git")
+	if _, err := warmSeedIdentity(meta); err != nil {
+		return ref, err
+	}
+	// A deinitialized submodule can still own unpublished branches or a
+	// stash in the parent Git directory even when its checkout is empty.
+	modules, err := openWarmWorkspaceDir(filepath.Join(meta, "modules"), false)
+	if err == nil {
+		_, readErr := modules.Readdirnames(1)
+		modules.Close()
+		if readErr != io.EOF {
+			return ref, errors.New("inspect stored submodule repositories before return")
+		}
+	} else if !os.IsNotExist(err) {
+		return ref, err
+	}
+	head, err := warmCurrentHead(meta)
+	if err != nil {
+		return ref, err
+	}
+	raw, err := os.ReadFile(filepath.Join(meta, "HEAD"))
+	if err != nil {
+		return ref, err
+	}
+	branch, _ := strings.CutPrefix(strings.TrimSpace(string(raw)), "ref: refs/heads/")
+	if branch == head {
+		branch = ""
+	}
+	ref = domain.WarmWorkspaceRef{RepositoryID: r.RepositoryID, Branch: branch, Commit: head}
+	private, err := os.MkdirTemp(filepath.Dir(cache), ".return-")
+	if err != nil {
+		return ref, err
+	}
+	defer os.RemoveAll(private)
+	// The cache was created outside all sandbox mounts except its read-only
+	// objects directory. Remote and origin are bound to the frozen registration.
+	id, err := gitwork.C(ctx, cache, "config", "--get", "warm.repositoryID")
+	if err != nil || id != r.RepositoryID {
+		return ref, errors.New("warm cache repository changed")
+	}
+	origin, err := gitwork.C(ctx, cache, "remote", "get-url", "origin")
+	if err != nil || origin != r.CloneURL {
+		return ref, errors.New("warm cache origin changed")
+	}
+	if err := warmRegular(filepath.Join(meta, "config")); err != nil {
+		return ref, err
+	}
+	local, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
+	origin, err = gitwork.C(local, private, "config", "--no-includes", "--file", filepath.Join(meta, "config"), "--get-all", "remote.origin.url")
+	if err != nil || domain.URLHasCredentials(origin) || gitwork.CanonicalRemote(origin) != gitwork.CanonicalRemote(r.CloneURL) {
+		return ref, errors.New("checkout origin differs from frozen repository")
+	}
+	auth := repositoryGitContext(ctx, r)
+	if _, err = gitwork.C(auth, cache, "fetch", "--no-auto-gc", "--prune", "--no-tags", "origin", "+HEAD:refs/warm/default", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"); err != nil {
+		return ref, err
+	}
+	if err := authorizeWarmRestore(local, auth, private, cache, r, head); err != nil {
+		return ref, err
+	}
+	if branch != "" {
+		if _, err := gitwork.C(local, cache, "check-ref-format", "--branch", branch); err != nil {
+			return ref, err
+		}
+	}
+	if err := validateWarmLFSConfig(local, cache, head, r.CloneURL); err != nil {
+		return ref, err
+	}
+	if err := verifyWarmRefs(local, meta, cache, branch, true); err != nil {
+		return ref, err
+	}
+	stage := filepath.Join(private, "check")
+	if _, err := gitwork.C(local, private, "init", "--template=", warmObjectFormat(head), stage); err != nil {
+		return ref, err
+	}
+	if err := warmAlternate(filepath.Join(stage, ".git"), filepath.Join(cache, "objects")); err != nil {
+		return ref, err
+	}
+	if _, err = exec.LookPath("git-lfs"); err == nil {
+		paths, err := gitwork.C(local, stage, "lfs", "ls-files", head)
+		if err != nil {
+			return ref, err
+		}
+		if paths != "" {
+			if _, err := gitwork.C(local, stage, "remote", "add", "origin", r.CloneURL); err != nil {
+				return ref, err
+			}
+			config, err := gitwork.C(local, cache, "ls-tree", head, "--", ".lfsconfig")
+			if err != nil {
+				return ref, err
+			}
+			if config != "" {
+				if _, err := gitwork.C(local, stage, "restore", "--source="+head, "--worktree", "--", ".lfsconfig"); err != nil {
+					return ref, err
+				}
+			}
+			if _, err := gitwork.C(auth, stage, "lfs", "fetch", "--include=*", "--exclude=", "origin", head); err != nil {
+				return ref, fmt.Errorf("cannot recover Git LFS objects: %w", err)
+			}
+		}
+	}
+	if err := warmRegular(filepath.Join(meta, "index")); err != nil {
+		return ref, err
+	}
+	index, err := os.ReadFile(filepath.Join(meta, "index"))
+	if err != nil {
+		return ref, err
+	}
+	if err := os.WriteFile(filepath.Join(stage, ".git", "index"), index, 0600); err != nil {
+		return ref, err
+	}
+	if _, err := gitwork.C(local, stage, "diff-index", "--no-ext-diff", "--cached", "--quiet", head, "--"); err != nil {
+		return ref, errors.New("commit or unstage pending index changes")
+	}
+	library := filepath.Join(slot.UnityProjectPath, "Library")
+	if err := warmTreeProtectsLibrary(local, cache, head, library); err != nil {
+		return ref, err
+	}
+	allowed := map[string]bool{library: true}
+	for _, name := range slot.DiscardGenerated {
+		rel := filepath.Join(slot.UnityProjectPath, name)
+		if err := warmTreeProtectsLibrary(local, cache, head, rel); err != nil {
+			return ref, err
+		}
+		allowed[rel] = true
+	}
+	entries, err := gitwork.C(local, cache, "ls-tree", "-rz", head)
+	if err != nil {
+		return ref, err
+	}
+	tracked := map[string][]string{}
+	for _, line := range strings.Split(entries, "\x00") {
+		if line == "" {
+			continue
+		}
+		header, path, ok := strings.Cut(line, "\t")
+		fields := strings.Fields(header)
+		if !ok || len(fields) != 3 || !validWarmWorkspaceRelativePath(path) {
+			return ref, errors.New("invalid tracked entry")
+		}
+		tracked[path] = fields
+	}
+	err = filepath.WalkDir(w.checkout, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(w.checkout, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".git" {
+			return filepath.SkipDir
+		}
+		if allowed[rel] {
+			if !d.IsDir() {
+				return fmt.Errorf("generated path %s is not a directory", rel)
+			}
+			if rel == library {
+				if err := warmTargetIgnoresLibrary(local, stage, head, library); err != nil {
+					return err
+				}
+			} else {
+				target, err := filepath.Rel(w.root, path)
+				if err != nil {
+					return err
+				}
+				w.remove = append(w.remove, target)
+			}
+			return filepath.SkipDir
+		}
+		fields, ok := tracked[rel]
+		if ok {
+			delete(tracked, rel)
+			if fields[0] == "160000" {
+				children, err := os.ReadDir(path)
+				if err != nil || len(children) != 0 {
+					return fmt.Errorf("populated submodule %s needs inspection", rel)
+				}
+				return filepath.SkipDir
+			}
+			if !warmBlobMatches(local, cache, path, fields[2], fields[0]) {
+				return fmt.Errorf("commit or restore changes in %s", rel)
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		return w.archive(path, d)
+	})
+	if err != nil {
+		return ref, err
+	}
+	for path, fields := range tracked {
+		if fields[0] != "160000" {
+			return ref, fmt.Errorf("tracked file %s is missing", path)
+		}
+	}
+	return ref, nil
+}
+
+// Read actual bytes independently of index stat hints, excludes, filters,
+// hooks and submodule configuration in the writable checkout.
+func warmBlobMatches(ctx context.Context, cache, path, oid, mode string) bool {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	var h hash.Hash = sha1.New()
+	if len(oid) == 64 {
+		h = sha256.New()
+	}
+	fmt.Fprintf(h, "blob %d%c", st.Size(), 0)
+	if mode == "120000" {
+		if st.Mode()&os.ModeSymlink == 0 {
+			return false
+		}
+		dest, err := os.Readlink(path)
+		if err != nil {
+			return false
+		}
+		io.WriteString(h, dest)
+		return hex.EncodeToString(h.Sum(nil)) == oid
+	}
+	if !st.Mode().IsRegular() || (st.Mode()&0100 != 0) != (mode == "100755") {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	digest := sha256.New()
+	if _, err = io.Copy(io.MultiWriter(h, digest), f); err != nil {
+		return false
+	}
+	if hex.EncodeToString(h.Sum(nil)) == oid {
+		return true
+	}
+	size, err := gitwork.C(ctx, cache, "cat-file", "-s", oid)
+	n, parseErr := strconv.ParseInt(size, 10, 64)
+	if err != nil || parseErr != nil || n > 1024 {
+		return false
+	}
+	pointer, err := gitwork.C(ctx, cache, "cat-file", "blob", oid)
+	expected := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%x\nsize %d", digest.Sum(nil), st.Size())
+	return err == nil && pointer == expected
+}
+
+func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
+	p.mu.Lock()
+	a, err := p.loadLease(ctx, l)
+	if err == nil && a.Phase != warmWorkspaceReleased {
+		_, err = p.inspectLease(a)
+	}
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !a.ReturnProven || !slices.EqualFunc(a.ReturnRefs, refs, func(a, b domain.WarmWorkspaceRef) bool {
+		return a.RepositoryID == b.RepositoryID && a.Commit == b.Commit && a.Branch == b.Branch && maps.Equal(a.Artifacts, b.Artifacts)
+	}) {
+		return errors.New("missing durable acknowledgement of this return proof")
+	}
+	if a.Phase == warmWorkspacePlaced {
+		root, err := os.OpenRoot(filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace"))
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+		for _, rel := range a.ReturnRemove {
+			if !validWarmWorkspaceRelativePath(rel) {
+				return errors.New("invalid return cleanup path")
+			}
+			var digest string
+			for _, ref := range refs {
+				if d, ok := ref.Artifacts[rel]; ok {
+					digest = d
+					break
+				}
+			}
+			info, err := root.Lstat(rel)
+			if os.IsNotExist(err) {
+				if err := syncWarmWorkspaceParent(filepath.Join(root.Name(), rel)); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if digest != "" {
+				if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+					return fmt.Errorf("archived artifact changed at %s", rel)
+				}
+				b, err := root.ReadFile(rel)
+				if err != nil || runtime.WorkspaceContentSHA(string(b)) != digest {
+					return fmt.Errorf("archived artifact changed at %s", rel)
+				}
+				if err := root.Remove(rel); err != nil {
+					return err
+				}
+			} else {
+				generated := false
+				for id, target := range a.Targets {
+					slot := p.slots[id]
+					for _, name := range slot.DiscardGenerated {
+						if filepath.Join(root.Name(), rel) == filepath.Join(target, slot.UnityProjectPath, name) {
+							generated = true
+						}
+					}
+				}
+				if !generated || !info.IsDir() {
+					return fmt.Errorf("unexpected generated path %s", rel)
+				}
+				if err := root.RemoveAll(rel); err != nil {
+					return err
+				}
+			}
+			if err := syncWarmWorkspaceParent(filepath.Join(root.Name(), rel)); err != nil {
+				return err
+			}
+		}
+	}
+	return p.returnSlots(ctx, l)
+}

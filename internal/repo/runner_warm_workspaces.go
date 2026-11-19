@@ -15,15 +15,17 @@ import (
 )
 
 type warmWorkspaceRow struct {
-	OwnerRunID    string                    `gorm:"primaryKey;size:64"`
-	RunnerID      string                    `gorm:"index:idx_warm_queue,priority:1;size:64;not null"`
-	ProjectID     string                    `gorm:"size:64;not null"`
-	RepositoryIDs []string                  `gorm:"serializer:json;type:json;not null"`
-	QueuedAt      time.Time                 `gorm:"index:idx_warm_queue,priority:3;not null"`
-	State         domain.WarmWorkspaceState `gorm:"index:idx_warm_queue,priority:2;size:16;not null"`
-	Epoch         uint64                    `gorm:"not null;default:1"`
-	Generation    uint64
-	Slots         map[string]string `gorm:"serializer:json;type:json"`
+	OwnerRunID      string                    `gorm:"primaryKey;size:64"`
+	RunnerID        string                    `gorm:"index:idx_warm_queue,priority:1;size:64;not null"`
+	ProjectID       string                    `gorm:"size:64;not null"`
+	RepositoryIDs   []string                  `gorm:"serializer:json;type:json;not null"`
+	QueuedAt        time.Time                 `gorm:"index:idx_warm_queue,priority:3;not null"`
+	State           domain.WarmWorkspaceState `gorm:"index:idx_warm_queue,priority:2;size:16;not null"`
+	Epoch           uint64                    `gorm:"not null;default:1"`
+	Generation      uint64
+	LastActorID     int64
+	ReadyGeneration uint64
+	Slots           map[string]string `gorm:"serializer:json;type:json"`
 }
 
 func validateWarmInventory(slots []domain.WarmWorkspaceSlot) error {
@@ -104,8 +106,21 @@ func (r *RunnersRepo) EnqueueWarmWorkspace(d domain.WarmWorkspaceDemand, now tim
 // caller must have observed this particular terminal epoch. Ordinary enqueue
 // retries do not resurrect completed or canceled work.
 func (r *RunnersRepo) RequeueWarmWorkspace(previous domain.WarmWorkspaceLease, now time.Time) error {
+	return r.requeueWarmWorkspace(previous, now, "")
+}
+func (r *RunnersRepo) ReopenReturnedWarmWorkspace(previous domain.WarmWorkspaceLease, now time.Time, token string) error {
+	if token == "" {
+		return ErrWorkspaceInUse
+	}
+	return r.requeueWarmWorkspace(previous, now, token)
+}
+func (r *RunnersRepo) requeueWarmWorkspace(previous domain.WarmWorkspaceLease, now time.Time, restoreToken string) error {
 	return r.DB.Transaction(func(tx *gorm.DB) error {
-		if err := warmOwnerCanQueue(tx, previous.OwnerRunID); err != nil {
+		if restoreToken != "" {
+			if err := holdsWorkspaceLease(tx, previous.OwnerRunID, restoreToken); err != nil {
+				return err
+			}
+		} else if err := warmOwnerCanQueue(tx, previous.OwnerRunID); err != nil {
 			return err
 		}
 		var row warmWorkspaceRow
@@ -113,7 +128,7 @@ func (r *RunnersRepo) RequeueWarmWorkspace(previous domain.WarmWorkspaceLease, n
 			return err
 		}
 		terminal := row.State == domain.WarmWorkspaceReleased || row.State == domain.WarmWorkspaceCanceled
-		if !terminal || row.Epoch != previous.Epoch || row.RunnerID != previous.RunnerID || row.Generation != previous.Generation || !maps.Equal(row.Slots, previous.Slots) {
+		if !terminal || restoreToken != "" && row.State != domain.WarmWorkspaceReleased || row.Epoch != previous.Epoch || row.RunnerID != previous.RunnerID || row.Generation != previous.Generation || !maps.Equal(row.Slots, previous.Slots) {
 			return errors.New("stale warm workspace requeue")
 		}
 		if row.Epoch+1 == 0 {
@@ -222,33 +237,38 @@ func cancelWarmEpoch(tx *gorm.DB, ownerRunID string, epoch uint64) error {
 }
 
 func (r *RunnersRepo) SettleWarmWorkspace(l domain.WarmWorkspaceLease, state domain.WarmWorkspaceState) error {
-	return r.DB.Transaction(func(tx *gorm.DB) error {
-		var row warmWorkspaceRow
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "owner_run_id = ?", l.OwnerRunID).Error; err != nil {
-			return err
-		}
-		if !matchesWarmLease(row, l) {
-			return errors.New("stale warm workspace lease")
-		}
-		if row.State == state {
-			return nil
-		}
-		var allowed bool
-		switch state {
-		case domain.WarmWorkspaceReady:
-			allowed = row.State == domain.WarmWorkspaceReserved
-		case domain.WarmWorkspaceBlocked:
-			allowed = row.State == domain.WarmWorkspaceReserved || row.State == domain.WarmWorkspaceReleasing || row.State == domain.WarmWorkspaceReady
-		case domain.WarmWorkspaceReleasing:
-			allowed = row.State == domain.WarmWorkspaceReady || row.State == domain.WarmWorkspaceBlocked || row.State == domain.WarmWorkspaceReserved
-		case domain.WarmWorkspaceReleased:
-			allowed = row.State == domain.WarmWorkspaceReleasing
-		}
-		if !allowed {
-			return fmt.Errorf("invalid warm workspace transition %s to %s", row.State, state)
-		}
-		return tx.Model(&row).Update("state", state).Error
-	})
+	return r.DB.Transaction(func(tx *gorm.DB) error { return r.settleWarmWorkspace(tx, l, state) })
+}
+func (r *RunnersRepo) settleWarmWorkspace(tx *gorm.DB, l domain.WarmWorkspaceLease, state domain.WarmWorkspaceState) error {
+	var row warmWorkspaceRow
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "owner_run_id = ?", l.OwnerRunID).Error; err != nil {
+		return err
+	}
+	if !matchesWarmLease(row, l) {
+		return errors.New("stale warm workspace lease")
+	}
+	if row.State == state {
+		return nil
+	}
+	var allowed bool
+	switch state {
+	case domain.WarmWorkspaceReady:
+		allowed = row.State == domain.WarmWorkspaceReserved
+	case domain.WarmWorkspaceBlocked:
+		allowed = row.State == domain.WarmWorkspaceReserved || row.State == domain.WarmWorkspaceReleasing || row.State == domain.WarmWorkspaceReady
+	case domain.WarmWorkspaceReleasing:
+		allowed = row.State == domain.WarmWorkspaceReady || row.State == domain.WarmWorkspaceBlocked || row.State == domain.WarmWorkspaceReserved
+	case domain.WarmWorkspaceReleased:
+		allowed = row.State == domain.WarmWorkspaceReleasing
+	}
+	if !allowed {
+		return fmt.Errorf("invalid warm workspace transition %s to %s", row.State, state)
+	}
+	changes := map[string]any{"state": state}
+	if state == domain.WarmWorkspaceReady || row.State == domain.WarmWorkspaceReady {
+		changes["ready_generation"] = l.Generation
+	}
+	return tx.Model(&row).Updates(changes).Error
 }
 
 func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.Run, req *domain.RunnerWorkspaceRequest) error {
@@ -284,7 +304,17 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 		allowed = row.State == domain.WarmWorkspaceReserved
 	case domain.RunnerWorkspaceOperationWarmStatus:
 		allowed = row.Generation != 0
-	case domain.RunnerWorkspaceOperationWarmReleaseCheck, domain.RunnerWorkspaceOperationWarmReleaseCommit:
+	case domain.RunnerWorkspaceOperationWarmReleaseCheck:
+		allowed = row.State == domain.WarmWorkspaceReleasing
+	case domain.RunnerWorkspaceOperationWarmReleaseCommit:
+		var proof warmWorkspaceRefRow
+		if err := r.DB.Take(&proof, "run_id = ? AND generation = ? AND epoch = ?", row.OwnerRunID, row.Generation, row.Epoch).Error; err != nil {
+			return fmt.Errorf("no matching durable return proof: %w", err)
+		}
+		req.WarmWorkspaceRefs = nil
+		if !proof.Unplaced {
+			req.WarmWorkspaceRefs = proof.Refs
+		}
 		allowed = row.State == domain.WarmWorkspaceReleasing
 	}
 	if !allowed {

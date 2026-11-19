@@ -760,7 +760,7 @@ func allModels() []any {
 		runAdmissionLockRow{}, runRow{}, runNodeRow{}, runEventRow{}, runTelemetryRow{}, runLogRow{}, runArtifactRow{}, runEvalRow{},
 		runPreviewRow{}, previewSessionRow{}, previewBlobRow{}, WorkspaceCheckpoint{}, workspaceCheckpointChunk{},
 		mrDeliveryStateRow{}, definitionRevisionRow{},
-		runnerRow{}, warmWorkspaceRow{}, runnerTaskRow{}, runnerTaskEventRow{}, userRunnerPrefRow{},
+		runnerRow{}, warmWorkspaceRow{}, warmWorkspaceRefRow{}, runnerTaskRow{}, runnerTaskEventRow{}, userRunnerPrefRow{},
 		assistantSessionRow{}, assistantTaskRow{}, assistantGenerationRow{}, assistantSessionReadRow{}, assistantPreferenceRow{}, assistantDiagnosticsRow{},
 		chatRoomRow{}, chatMessageRow{},
 		requirementSpaceRow{}, spaceMemberRow{}, spaceArtifactRow{}, spaceArtifactRevisionRow{}, spaceThreadRow{},

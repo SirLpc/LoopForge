@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"agentflow/internal/apperr"
 	"agentflow/internal/domain"
 	"context"
 	"fmt"
@@ -98,15 +99,29 @@ func (e *Engine) sandboxSweep(ctx context.Context) {
 func (e *Engine) reconcileTerminalWorkspaceCleanup() {
 	now := time.Now().UTC()
 	seen := map[string]bool{}
-	for _, run := range e.repo.TerminalWorkspaceCleanupRuns() {
-		seen[run.ID] = true
-		e.cleanupWorkspace(run, now)
+	candidates, err := e.repo.WarmWorkspaceReturnCandidates()
+	if err != nil {
+		log.Printf("list warm workspace returns: %v", err)
 	}
-	for _, id := range e.repo.CheckpointWorkspaceRunIDs() {
-		if !seen[id] {
-			if run, ok := e.repo.RunState(id); ok {
-				e.cleanupWorkspace(run, now)
-			}
+	for _, id := range candidates {
+		if run, ok := e.repo.RunState(id); ok && run.IsWorkspace() {
+			seen[id] = true
+			e.cleanupWorkspace(run, now)
+		}
+	}
+	for _, run := range e.repo.TerminalWorkspaceCleanupRuns() {
+		if !seen[run.ID] {
+			seen[run.ID] = true
+			e.cleanupWorkspace(run, now)
+		}
+	}
+	for _, id := range append(candidates, e.repo.CheckpointWorkspaceRunIDs()...) {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if run, ok := e.repo.RunState(id); ok {
+			e.cleanupWorkspace(run, now)
 		}
 	}
 }
@@ -162,6 +177,10 @@ func (e *Engine) cleanupRunWorkspace(runID string) {
 }
 
 func (e *Engine) cleanupWorkspace(run domain.Run, now time.Time) {
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		e.cleanupWarmWorkspace(run, now)
+		return
+	}
 	managed, checkpointClaimed, releaseCheckpoint, checkpointErr := e.claimIdleConversationWorkspace(run, now)
 	if releaseCheckpoint != nil {
 		defer releaseCheckpoint()
@@ -325,6 +344,12 @@ func (e *Engine) DeleteRun(runID string) error {
 	if e.WorkspaceActive != nil && e.WorkspaceActive(run) || e.conversationGenerationRunning(run) {
 		return fmt.Errorf("工作区仍在使用，请先停止")
 	}
+	warm := run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool
+	if warm && !sharesWorkspace(run) {
+		if err := e.ReleaseWarmWorkspace(WithConversationWorkspaceToken(context.Background(), token, runID), run, 0); err != nil {
+			return apperr.New(apperr.Conflict, err.Error())
+		}
+	}
 	if err := e.repo.ClaimWorkspaceDeletion(runID, token, run.Revision, time.Now().UTC()); err != nil {
 		return err
 	}
@@ -339,8 +364,10 @@ func (e *Engine) DeleteRun(runID string) error {
 			return fmt.Errorf("delete run preview: %w", err)
 		}
 	}
-	if err := e.queueRunnerRunCleanup(run); err != nil {
-		return fmt.Errorf("queue runner workspace cleanup: %w", err)
+	if !warm {
+		if err := e.queueRunnerRunCleanup(run); err != nil {
+			return fmt.Errorf("queue runner workspace cleanup: %w", err)
+		}
 	}
 	if err := e.releaseRunEnvironment(runID, true); err != nil {
 		return fmt.Errorf("destroy run sandbox: %w", err)

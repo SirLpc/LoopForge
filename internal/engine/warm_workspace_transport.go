@@ -21,17 +21,43 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 	if err := e.repo.AuthorizeWarmWorkspaceControl(runnerID, run, &req); err != nil {
 		return req, err
 	}
-	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
+	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout || req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
 		req.Sandbox = run.WorkflowSnapshot.SandboxSnapshot
 		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
 			return req, errors.New("warm checkout requires Docker")
 		}
 		inv := new(domain.RunnerInvocation)
-		identity := resolveGitIdentity(e.repo, run.ExecutionContext.ResponsibleUserID)
+		actor := run.ExecutionContext.ResponsibleUserID
+		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || run.IsWorkspace() {
+			selected, err := e.repo.WarmWorkspaceActor(*req.WarmWorkspaceLease)
+			if err != nil {
+				return req, err
+			}
+			if selected != 0 {
+				actor = selected
+			}
+			if err = e.authorizeWarmActor(run, actor); err != nil {
+				return req, err
+			}
+		}
+		identity := resolveGitIdentity(e.repo, actor)
 		bindRunnerRepositories(inv, run, identity.name, identity.email)
-		creds := e.WorkspaceTerminalGitCredentials(context.Background(), run, run.ExecutionContext.ResponsibleUserID)
+		creds := e.WorkspaceTerminalGitCredentials(context.Background(), run, actor)
 		inv.GitHTTPUserID, inv.GitSSHUserID = 0, 0
 		inv.GitHTTPCredentials, inv.GitSSHKeys = creds.HTTPS, creds.SSHKeys
+		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
+			req.ArtifactFiles = archivedWorkspaceFiles(run, "")
+		} else {
+			refs, err := e.repo.WarmWorkspaceRefs(run.ID)
+			if err != nil {
+				return req, err
+			}
+			inv.WarmWorkspaceRefs = refs
+			inv.ArchivedFiles, err = warmRestoreFiles(run, refs)
+			if err != nil {
+				return req, err
+			}
+		}
 		req.PreparationInvocation = inv
 	}
 	if req.Operation == domain.RunnerWorkspaceOperationWarmPrepare {

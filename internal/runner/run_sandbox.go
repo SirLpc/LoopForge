@@ -26,11 +26,12 @@ const runSandboxIdleTTL = 30 * time.Minute
 // sandbox definition, like the persistent per-run container of the cloud
 // path. cleanup_run, the idle reaper or daemon shutdown closes it.
 type runSandbox struct {
-	runID    string
-	mu       sync.Mutex
-	sandbox  runtime.Sandbox
-	active   int
-	lastUsed time.Time
+	runID     string
+	warmOwner string
+	mu        sync.Mutex
+	sandbox   runtime.Sandbox
+	active    int
+	lastUsed  time.Time
 }
 
 // acquireTaskSandbox returns the sandbox a task executes in and the function
@@ -56,6 +57,9 @@ func (d *Daemon) acquireTaskSandbox(ctx context.Context, task domain.RunnerTask)
 	entry := d.runSandboxes[key]
 	if entry == nil {
 		entry = &runSandbox{runID: task.RunID}
+		if task.WarmWorkspaceLease != nil {
+			entry.warmOwner = task.WarmWorkspaceLease.OwnerRunID
+		}
 		d.runSandboxes[key] = entry
 	}
 	entry.active++

@@ -12,7 +12,7 @@ import (
 
 func (e *Engine) saveConversationWorkspaceAfterUse(ctx context.Context, id, token string) error {
 	run, ok := e.repo.RunState(id)
-	if !ok || !run.WorkspaceCleanedAt.IsZero() || !e.conversationWorkspaceIdle(run) {
+	if !ok || run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool || !run.WorkspaceCleanedAt.IsZero() || !e.conversationWorkspaceIdle(run) {
 		return nil
 	}
 	err := e.saveConversationWorkspace(ctx, run, token)
@@ -27,6 +27,13 @@ func (e *Engine) saveConversationWorkspaceAfterUse(ctx context.Context, id, toke
 // Foreground use can supersede this lease, even from another API instance.
 func (e *Engine) EndConversationWorkspaceUseAsync(ctx context.Context, id, token string) (<-chan error, error) {
 	usedAt := time.Now().UTC()
+	if run, ok := e.repo.RunState(id); ok && run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		err := e.repo.FinishWorkspaceUse(id, token, usedAt, nil, "")
+		done := make(chan error, 1)
+		done <- err
+		close(done)
+		return done, err
+	}
 	saveToken, err := e.repo.HandoffWorkspaceUseToSave(id, token, usedAt)
 	if err != nil {
 		return nil, err

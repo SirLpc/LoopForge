@@ -41,7 +41,12 @@ type warmWorkspaceSlotRecord struct {
 }
 
 type warmWorkspaceAllocation struct {
-	GitReady bool `json:"gitReady,omitempty"`
+	PreparingGit     bool                      `json:"preparingGit,omitempty"`
+	CheckoutComplete bool                      `json:"checkoutComplete,omitempty"`
+	ReturnProven     bool                      `json:"returnProven,omitempty"`
+	ReturnRefs       []domain.WarmWorkspaceRef `json:"returnRefs,omitempty"`
+	ReturnRemove     []string                  `json:"returnRemove,omitempty"`
+	GitReady         bool                      `json:"gitReady,omitempty"`
 
 	Lease   domain.WarmWorkspaceLease `json:"lease"`
 	Phase   warmWorkspacePhase        `json:"phase"`

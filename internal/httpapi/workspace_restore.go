@@ -19,7 +19,7 @@ func (h *runsHandlers) workspaceRestore(c *gin.Context) {
 	}
 	if strings.Contains(c.GetHeader("Prefer"), "respond-async") && !run.WorkspaceCleanedAt.IsZero() {
 		meta, _ := h.engine.ConversationWorkspaceStatus(run.ID)
-		if meta.SavedAt == nil {
+		if meta.SavedAt == nil && run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
 			c.JSON(409, gin.H{"error": "没有已保存的工作区快照，无法恢复"})
 			return
 		}

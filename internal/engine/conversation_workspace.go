@@ -119,6 +119,10 @@ func (e *Engine) MaterializeConversationWorkspace(ctx context.Context, id string
 	if !ok {
 		return fmt.Errorf("运行不存在")
 	}
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		_, err := e.EnsureWarmWorkspace(ctx, run, run.ExecutionContext.ResponsibleUserID)
+		return err
+	}
 	if !run.IsWorkspace() || sharesWorkspace(run) || !run.WorkspaceCleanedAt.IsZero() || e.foreignWorkspaceBind(run) {
 		return nil
 	}
@@ -216,7 +220,7 @@ func (e *Engine) PrepareConversationWorkspace(ctx context.Context, id, token str
 	}
 	// Readers stay available during execution; never inject prior outputs while
 	// a node is currently expected to generate its own fresh deliverables.
-	if run.HasActiveNode() || !run.IsWorkspace() && (run.Status == "running" || run.Status == "queued") {
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool || run.HasActiveNode() || !run.IsWorkspace() && (run.Status == "running" || run.Status == "queued") {
 		return nil, nil
 	}
 	return e.restoreArchivedWorkspaceFiles(ctx, run)
@@ -236,6 +240,10 @@ func (e *Engine) ensureConversationWorkspace(ctx context.Context, id, token stri
 	run, ok := e.repo.RunState(id)
 	if !ok {
 		return fmt.Errorf("运行不存在")
+	}
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		_, err := e.EnsureWarmWorkspace(WithConversationWorkspaceToken(ctx, token, id), run, run.ExecutionContext.ResponsibleUserID)
+		return err
 	}
 	runner := e.defaultExecutionRunner(run)
 	if runner == "" && e.foreignWorkspaceBind(run) {
@@ -398,6 +406,9 @@ func (e *Engine) claimIdleConversationWorkspace(run domain.Run, now time.Time) (
 func (e *Engine) restoreCheckpointBeforeExecution(ctx context.Context, run domain.Run) error {
 	if sharesWorkspace(run) {
 		return e.RestoreConversationWorkspaceIfNeeded(ctx, workspaceRunID(run))
+	}
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		return nil
 	}
 	checkpoint, exists := e.repo.WorkspaceCheckpoint(run.ID)
 	// A Main Bot turn or IDE heartbeat also creates this metadata row. Old

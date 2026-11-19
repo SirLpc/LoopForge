@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 
@@ -8,12 +11,31 @@ import (
 	"agentflow/internal/repo"
 )
 
+var errWarmConversationRetained = errors.New("对话工作区仍需保留")
+
 // deleteConversation deletes a conversation together with what it left
 // behind: the workspaces it opened and the requirements it created but never
 // handed in. Manual deletion, scheduled cleanup and replaced scheduled runs
 // all go through here so they settle a conversation the same way.
 func (h *assistantHandlers) deleteConversation(userID int64, id string) error {
 	conv, found := h.repo.AssistantSession(userID, id)
+	if found {
+		for _, runID := range ownWorkspaceRunIDs(conv) {
+			run, err := h.repo.RunHeader(runID)
+			if err != nil {
+				return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
+			}
+			if run.ID == "" || !run.IsWorkspace() || run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
+				continue
+			}
+			if h.engine == nil {
+				return errWarmConversationRetained
+			}
+			if err := h.engine.ReleaseWarmWorkspace(context.Background(), run, 0); err != nil {
+				return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
+			}
+		}
+	}
 	if err := deleteAssistantConversation(h.repo, userID, id); err != nil {
 		return err
 	}

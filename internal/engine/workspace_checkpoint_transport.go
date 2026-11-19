@@ -65,7 +65,7 @@ func (e *Engine) requestWorkspaceCheckpoint(ctx context.Context, run domain.Run,
 		run = owner
 		var cancel context.CancelFunc
 		timeout := 8 * time.Second
-		if request.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
+		if domain.IsLongWarmWorkspaceOperation(request.Operation) {
 			timeout = 30 * time.Minute
 		}
 		ctx, cancel = context.WithTimeout(ctx, timeout)

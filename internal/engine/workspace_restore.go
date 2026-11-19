@@ -36,7 +36,7 @@ func (e *Engine) WorkspaceRestoreStatus(id string) (domain.WorkspaceRestoreStatu
 		state.Status, state.Error = "failed", meta.RestoreError
 	case meta.RestoreStatus == "restoring":
 		state.Status, state.Error = "failed", repo.WorkspaceRestoreInterrupted
-	case run.WorkspaceCleanedAt.IsZero() || meta.SavedAt == nil:
+	case run.WorkspaceCleanedAt.IsZero() || meta.SavedAt == nil && run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool:
 		state.Status = "ready"
 	}
 	return state, nil

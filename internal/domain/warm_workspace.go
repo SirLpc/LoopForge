@@ -26,9 +26,10 @@ type WarmWorkspaceLease struct {
 
 // WarmWorkspaceRef records an exact checkout for a returned workspace.
 type WarmWorkspaceRef struct {
-	RepositoryID string `json:"repositoryId"`
-	Branch       string `json:"branch,omitempty"`
-	Commit       string `json:"commit"`
+	RepositoryID string            `json:"repositoryId"`
+	Branch       string            `json:"branch,omitempty"`
+	Commit       string            `json:"commit"`
+	Artifacts    map[string]string `json:"artifacts,omitempty"`
 }
 
 type WarmWorkspaceState string
@@ -64,6 +65,13 @@ const (
 	RunnerWorkspaceOperationWarmReleaseCheck  = "warm_release_check"
 	RunnerWorkspaceOperationWarmReleaseCommit = "warm_release_commit"
 )
+
+func IsWholeWorkspaceOperation(op string) bool {
+	return IsWorkspaceCheckpointTransferOperation(op) || op == RunnerWorkspaceOperationRestore || op == RunnerWorkspaceOperationCheckpoint || op == RunnerWorkspaceOperationReclaim
+}
+func IsLongWarmWorkspaceOperation(op string) bool {
+	return op == RunnerWorkspaceOperationWarmCheckout || op == RunnerWorkspaceOperationWarmReleaseCheck || op == RunnerWorkspaceOperationWarmReleaseCommit
+}
 
 func IsWarmWorkspaceOperation(op string) bool {
 	switch op {

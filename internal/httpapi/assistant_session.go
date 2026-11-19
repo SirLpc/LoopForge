@@ -449,6 +449,10 @@ func (h *assistantHandlers) session(c *gin.Context) {
 			return
 		}
 		if err := h.deleteConversation(ownerID, id); err != nil {
+			if errors.Is(err, errWarmConversationRetained) {
+				c.JSON(409, gin.H{"error": err.Error()})
+				return
+			}
 			c.JSON(404, gin.H{"error": "对话不存在"})
 			return
 		}
@@ -568,10 +572,10 @@ func deleteAssistantConversation(st *repo.Store, userID int64, id string) error 
 		return os.ErrNotExist
 	}
 	err := st.DeleteAssistantSession(userID, id)
-	deleteAssistantCLISession(userID, id)
 	if err != nil {
 		return os.ErrNotExist
 	}
+	deleteAssistantCLISession(userID, id)
 	// Session ids are unique across owners, so once the owner's row is gone no
 	// participant can open the shared root again.
 	_ = os.RemoveAll(assistantSharedSessionRoot(id))

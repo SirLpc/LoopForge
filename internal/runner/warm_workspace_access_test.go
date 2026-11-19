@@ -72,6 +72,16 @@ func TestWarmWorkspaceExactReadyGeneration(t *testing.T) {
 	if err := d.checkWarmTask(t.Context(), task); err != nil {
 		t.Fatal(err)
 	}
+	preview := task
+	preview.Action = domain.RunnerTaskActionArchivePreview
+	preview.PreviewArchive = &domain.RunnerPreviewArchiveSpec{SourcePath: "checkout"}
+	if err := d.checkWarmTask(t.Context(), preview); err == nil {
+		t.Fatal("whole checkout sent to preview archiver")
+	}
+	preview.PreviewArchive.SourcePath = "checkout/public"
+	if err := d.checkWarmTask(t.Context(), preview); err != nil {
+		t.Fatal(err)
+	}
 	task.WarmWorkspaceLease = &stale
 	if err := d.checkWarmTask(t.Context(), task); err == nil {
 		t.Fatal("stale task used current generation")

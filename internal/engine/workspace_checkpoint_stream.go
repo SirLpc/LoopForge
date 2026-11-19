@@ -18,6 +18,9 @@ import (
 )
 
 func (e *Engine) saveConversationWorkspace(ctx context.Context, run domain.Run, token string) error {
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		return errors.New("whole-workspace snapshots are disabled for this workspace")
+	}
 	file, err := os.CreateTemp("", "agentflow-checkpoint-save-")
 	if err != nil {
 		return err
@@ -239,6 +242,9 @@ func legacyCheckpointMissingPath(message string) bool {
 }
 
 func (e *Engine) restoreConversationCheckpoint(ctx context.Context, run domain.Run, root string) error {
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		return errors.New("whole-workspace restores are disabled for this workspace")
+	}
 	source, err := e.repo.OpenWorkspaceCheckpointArchive(run.ID)
 	if err != nil {
 		return err
