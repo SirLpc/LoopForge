@@ -1,10 +1,12 @@
 package runner
 
 import (
+	"agentflow/internal/gitwork"
 	"context"
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
 	"slices"
 
 	"agentflow/internal/domain"
@@ -50,6 +52,32 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 		defer fence.Unlock()
 	}
 	switch req.Operation {
+	case domain.RunnerWorkspaceOperationWarmVerifyAccess:
+		inv := req.PreparationInvocation
+		if req.WarmWorkspaceActorID <= 0 || inv == nil || len(inv.Repositories) == 0 {
+			return runnerWorkspaceError(errors.New("missing current repository actor or repositories"))
+		}
+		dir, err := os.MkdirTemp(p.journalDir.Name(), ".verify-access-")
+		if err != nil {
+			return runnerWorkspaceError(err)
+		}
+		defer os.RemoveAll(dir)
+		if _, err = gitwork.C(ctx, dir, "init", "--bare", "--template="); err != nil {
+			return runnerWorkspaceError(err)
+		}
+		auth := invocationGitHTTPContext(gitwork.WithSSHKeys(ctx, inv.GitSSHKeys), inv)
+		for _, r := range inv.Repositories {
+			if domain.URLHasCredentials(r.CloneURL) {
+				return runnerWorkspaceError(errors.New("warm access check requires a credential-free remote"))
+			}
+			if err := gitwork.ValidateRemoteURL(r.CloneURL, true); err != nil {
+				return runnerWorkspaceError(err)
+			}
+			if _, err := gitwork.C(repositoryGitContext(auth, r), dir, "ls-remote", "--exit-code", "--", r.CloneURL, "HEAD"); err != nil {
+				return runnerWorkspaceError(errors.New("current actor cannot read the frozen remote"))
+			}
+		}
+		return runnerWorkspacePayload(map[string]string{"phase": "authorized"})
 	case domain.RunnerWorkspaceOperationWarmCheckout:
 		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
 			return runnerWorkspaceError(errors.New("warm checkout requires Docker"))

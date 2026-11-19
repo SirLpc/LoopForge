@@ -46,12 +46,19 @@ func (e *Engine) WorkspaceRestoreStatus(id string) (domain.WorkspaceRestoreStatu
 // owns its DB lease until restoration and binding acknowledgement have finished;
 // closing an HTTP request cannot release it while the Runner is still working.
 func (e *Engine) StartWorkspaceRestore(id string) (domain.WorkspaceRestoreStatus, error) {
+	return e.StartWorkspaceRestoreContext(context.Background(), id)
+}
+
+func (e *Engine) StartWorkspaceRestoreContext(ctx context.Context, id string) (domain.WorkspaceRestoreStatus, error) {
 	run, ok := e.repo.RunState(id)
 	if !ok {
 		return domain.WorkspaceRestoreStatus{}, fmt.Errorf("run not found")
 	}
 	if sharesWorkspace(run) {
-		return e.StartWorkspaceRestore(workspaceRunID(run))
+		return e.StartWorkspaceRestoreContext(ctx, workspaceRunID(run))
+	}
+	if err := e.CheckWorkspaceRestoreAccess(ctx, run); err != nil {
+		return domain.WorkspaceRestoreStatus{}, err
 	}
 	state, err := e.WorkspaceRestoreStatus(id)
 	if err != nil || state.Status == "restoring" || state.Status == "ready" {
@@ -71,16 +78,16 @@ func (e *Engine) StartWorkspaceRestore(id string) (domain.WorkspaceRestoreStatus
 	if token == "" {
 		return e.WorkspaceRestoreStatus(id)
 	}
-	go e.restoreWorkspaceInBackground(id, token)
+	go e.restoreWorkspaceInBackground(id, token, workspaceRestoreActor(ctx))
 	return e.WorkspaceRestoreStatus(id)
 }
 
-func (e *Engine) restoreWorkspaceInBackground(id, token string) {
+func (e *Engine) restoreWorkspaceInBackground(id, token string, actor int64) {
 	// Workspace-use leases last 15 minutes. Keep the whole operation bounded
 	// below that TTL, including retries while an older Runner RPC finishes.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	ctx = WithConversationWorkspaceToken(ctx, token, id)
+	ctx = WithConversationWorkspaceToken(WithWorkspaceRestoreActor(ctx, actor), token, id)
 	var err error
 	for {
 		err = e.EnsureConversationWorkspace(ctx, id, token)

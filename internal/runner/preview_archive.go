@@ -35,10 +35,21 @@ func (d *Daemon) executePreviewArchive(ctx context.Context, task domain.RunnerTa
 		return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("refusing unsafe preview workspace %q", target)}
 	}
 	limits := preview.Limits{MaxFiles: spec.MaxFiles, MaxCompressed: spec.MaxBytes}
+	archive := func(w io.Writer) (preview.Result, error) {
+		return preview.ArchiveDir(target, spec.SourcePath, spec.IndexFile, limits, w)
+	}
+	if task.WarmWorkspaceLease != nil {
+		dir, err := d.openWarmPreview(task)
+		if err != nil {
+			return execResult{status: domain.RunnerTaskFailed, errMsg: err.Error()}
+		}
+		defer dir.Close()
+		archive = func(w io.Writer) (preview.Result, error) { return preview.ArchiveRoot(dir, spec.IndexFile, limits, w) }
+	}
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		_, archiveErr := preview.ArchiveDir(target, spec.SourcePath, spec.IndexFile, limits, pw)
+		_, archiveErr := archive(pw)
 		_ = pw.CloseWithError(archiveErr)
 		errCh <- archiveErr
 	}()

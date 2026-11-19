@@ -302,6 +302,8 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 	switch req.Operation {
 	case domain.RunnerWorkspaceOperationWarmCheckout, domain.RunnerWorkspaceOperationWarmPrepare:
 		allowed = row.State == domain.WarmWorkspaceReserved
+	case domain.RunnerWorkspaceOperationWarmVerifyAccess:
+		allowed = true // read-only probe of the frozen remote, independent of placement
 	case domain.RunnerWorkspaceOperationWarmStatus:
 		allowed = row.Generation != 0
 	case domain.RunnerWorkspaceOperationWarmReleaseCheck:

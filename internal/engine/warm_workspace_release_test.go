@@ -40,12 +40,22 @@ func TestWarmWorkspaceReclaimDuringRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	step := "dirty"
+	actorProbe := int64(0)
 	archiveCalls := 0
 	e.WorkspaceCheckpointTransport = func(ctx context.Context, r domain.Run, q domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
 		switch q.Operation {
+		case domain.RunnerWorkspaceOperationWarmVerifyAccess:
+			actorProbe = q.WarmWorkspaceActorID
+			if actorProbe == 2 {
+				return domain.RunnerWorkspaceResponse{Error: "Git access revoked", Status: 403}, nil
+			}
+			return domain.RunnerWorkspaceResponse{Payload: []byte(`{"phase":"authorized"}`)}, nil
 		case domain.RunnerWorkspaceOperationWarmPrepare:
 			return domain.RunnerWorkspaceResponse{Payload: []byte(`{"phase":"placed"}`)}, nil
 		case domain.RunnerWorkspaceOperationWarmCheckout:
+			if q.WarmWorkspaceActorID != 1 {
+				t.Fatalf("lost authenticated restore identity: %d", q.WarmWorkspaceActorID)
+			}
 			if req := q.PreparationInvocation; req == nil || len(req.WarmWorkspaceRefs) != 1 || req.WarmWorkspaceRefs[0].Commit != "0123456789012345678901234567890123456789" {
 				t.Errorf("reopen failed to pin old commit: %+v", req)
 			}
@@ -103,6 +113,12 @@ func TestWarmWorkspaceReclaimDuringRestart(t *testing.T) {
 			t.Fatal(op)
 		}
 	}
+	if err := e.repo.PutProject(domain.Project{ID: "release-project", Key: "release-project", Name: "Release", OwnerID: 1, Members: []domain.ProjectMember{{UserID: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.StartWorkspaceRestoreContext(WithWorkspaceRestoreActor(t.Context(), 2), run.ID); err == nil || actorProbe != 2 {
+		t.Fatalf("ready restore bypassed actor's Git access: %v %d", err, actorProbe)
+	}
 	step = "lost"
 	if err = e.ReleaseWarmWorkspace(t.Context(), run, 1); err == nil {
 		t.Fatal("lost acknowledgement ignored")
@@ -117,7 +133,7 @@ func TestWarmWorkspaceReclaimDuringRestart(t *testing.T) {
 	if state, _ := e.WarmWorkspaceStatus(run.ID); state != domain.WarmWorkspaceReleased || archiveCalls != 0 {
 		t.Fatal(state, archiveCalls)
 	}
-	state, err := e.StartWorkspaceRestore(run.ID)
+	state, err := e.StartWorkspaceRestoreContext(WithWorkspaceRestoreActor(t.Context(), 1), run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

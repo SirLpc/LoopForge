@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // The qualified driver tears down its own containers. Leave an unrelated
@@ -24,62 +23,107 @@ func CheckWarmWorkspaceProcesses(ctx context.Context, root string) error {
 		name = strings.TrimSuffix(name, " (deleted)")
 		return name == root || strings.HasPrefix(name, root+string(filepath.Separator))
 	}
-	if runtime.GOOS != "linux" {
-		raw, err := exec.CommandContext(ctx, "lsof", "-nP", "-u", strconv.Itoa(os.Geteuid()), "-F0pn").Output()
-		if err != nil {
-			return fmt.Errorf("cannot inspect native workspace handles: %w", err)
+	switch runtime.GOOS {
+	case "linux":
+		// Linux reserves PROC_PID_INIT_INO for the initial PID namespace. A
+		// nested procfs cannot enumerate workspace holders on the runner host.
+		const initialPIDNamespace = 0xeffffffc
+		ns, err := os.Stat("/proc/1/ns/pid")
+		if err != nil || ns.Sys().(*syscall.Stat_t).Ino != initialPIDNamespace {
+			return errors.New("workspace retained: host PID namespace visibility required")
 		}
+		mounts, err := os.ReadFile("/proc/self/mountinfo")
+		if err != nil {
+			return err
+		}
+		visible := false
+		for _, line := range strings.Split(string(mounts), "\n") {
+			parts := strings.Fields(line)
+			if len(parts) > 7 && parts[3] == "/" && parts[4] == "/proc" && strings.Contains(line, " - proc ") {
+				visible = true
+				for _, option := range strings.Split(parts[len(parts)-1], ",") {
+					if strings.HasPrefix(option, "hidepid=") && option != "hidepid=0" && option != "hidepid=off" {
+						return errors.New("workspace retained: complete host procfs visibility is required")
+					}
+				}
+			}
+		}
+		if !visible {
+			return errors.New("workspace retained: cannot verify host procfs mount")
+		}
+		return checkWarmLinuxProcesses(ctx, "/proc", owns)
+	case "darwin":
+		if os.Geteuid() != 0 {
+			return errors.New("workspace retained: host-wide lsof process visibility required")
+		}
+		// lsof may succeed while declaring protected files or processes unreadable.
+		// Compare its inventory to live PIDs; fail on any partial diagnostic.
+		before, err := exec.CommandContext(ctx, "ps", "-axo", "pid=").Output()
+		if err != nil {
+			return err
+		}
+		var stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "lsof", "-nP", "+c", "0", "-F0pfn")
+		cmd.Stderr = &stderr
+		raw, err := cmd.Output()
+		if err != nil || stderr.Len() != 0 {
+			return errors.New("workspace retained: lsof cannot inspect every host process")
+		}
+		observed := map[string]bool{}
 		for _, field := range strings.Split(string(raw), "\x00") {
-			if path, ok := strings.CutPrefix(strings.TrimLeft(field, "\n"), "n"); ok && owns(path) {
-				return errors.New("close native processes using this workspace")
+			field = strings.TrimLeft(field, "\n")
+			if id, ok := strings.CutPrefix(field, "p"); ok {
+				observed[id] = true
+			}
+			if field == "fNOFD" || strings.Contains(field, "Permission denied") || strings.Contains(field, "Operation not permitted") {
+				return errors.New("workspace retained: lsof reports inaccessible process handles")
+			}
+			if path, ok := strings.CutPrefix(field, "n"); ok && owns(path) {
+				return errors.New("native process still uses this workspace")
+			}
+		}
+		for _, id := range strings.Fields(string(before)) {
+			pid, err := strconv.Atoi(id)
+			if err != nil {
+				return err
+			}
+			if pid > 0 && !observed[id] && !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+				return errors.New("workspace retained: lsof omitted a live process")
 			}
 		}
 		return nil
+	default:
+		return errors.New("native workspace process inventory unavailable")
 	}
-	dirs, err := os.ReadDir("/proc")
-	if err != nil {
-		return err
-	}
-	session, err := unix.Getsid(0)
+}
+
+func checkWarmLinuxProcesses(ctx context.Context, proc string, owns func(string) bool) error {
+	dirs, err := os.ReadDir(proc)
 	if err != nil {
 		return err
 	}
 	for _, dir := range dirs {
-		pid, err := strconv.Atoi(dir.Name())
-		if err != nil {
+		if _, err := strconv.Atoi(dir.Name()); err != nil {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		st, err := dir.Info()
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
-			continue
-		}
-		err = checkWarmProcessHandles(dir.Name(), owns)
-		if errors.Is(err, os.ErrPermission) {
-			// Procfs can hide the handles of unrelated login sessions. The
-			// Docker mount inventory accounts for detached qualified workloads.
-			otherSession, sidErr := unix.Getsid(pid)
-			if errors.Is(sidErr, syscall.ESRCH) || (sidErr == nil && otherSession != session) {
+		base := filepath.Join(proc, dir.Name())
+		if err := checkWarmProcessHandles(base, owns); err != nil {
+			if _, statErr := os.Stat(base); os.IsNotExist(statErr) {
 				continue
 			}
-		}
-		if err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
+			if errors.Is(err, syscall.ESRCH) {
+				continue
+			}
+			return fmt.Errorf("workspace retained: verify host process %s handles: %w", dir.Name(), err)
 		}
 	}
 	return nil
 }
-
-func checkWarmProcessHandles(pid string, owns func(string) bool) error {
-	base := filepath.Join("/proc", pid)
+func checkWarmProcessHandles(base string, owns func(string) bool) error {
+	pid := filepath.Base(base)
 	check := func(file string) error {
 		path, err := os.Readlink(file)
 		if os.IsNotExist(err) {
@@ -99,9 +143,6 @@ func checkWarmProcessHandles(pid string, owns func(string) bool) error {
 		}
 	}
 	entries, err := os.ReadDir(filepath.Join(base, "fd"))
-	if os.IsNotExist(err) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}
@@ -111,9 +152,6 @@ func checkWarmProcessHandles(pid string, owns func(string) bool) error {
 		}
 	}
 	mapped, err := os.Open(filepath.Join(base, "maps"))
-	if os.IsNotExist(err) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}

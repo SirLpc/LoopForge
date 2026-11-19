@@ -468,7 +468,18 @@ func warmTargetIgnoresLibrary(ctx context.Context, stage, target, library string
 			break
 		}
 	}
-	if _, err := gitwork.C(ctx, stage, "check-ignore", "-q", "--", library+"/"); err != nil {
+	// A trailing slash can match "Temp/*" even when "!Temp/notes" protects a
+	// child. Ask Git about the actual directory inode with no trailing slash.
+	directory := filepath.Join(stage, library)
+	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
+		return err
+	}
+	if err := os.Mkdir(directory, 0700); err == nil {
+		defer os.Remove(directory)
+	} else if !os.IsExist(err) {
+		return err
+	}
+	if _, err := gitwork.C(ctx, stage, "-c", "core.excludesFile=/dev/null", "check-ignore", "-q", "--", library); err != nil {
 		return fmt.Errorf("target commit must ignore %s", library)
 	}
 	return nil

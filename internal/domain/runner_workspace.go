@@ -39,8 +39,9 @@ const (
 // runner's outbound control socket. Responses are transient and are never
 // persisted in runner_tasks or the run record.
 type RunnerWorkspaceRequest struct {
-	WarmWorkspaceRefs  []WarmWorkspaceRef  `json:"warmWorkspaceRefs,omitempty"`
-	WarmWorkspaceLease *WarmWorkspaceLease `json:"warmWorkspaceLease,omitempty"`
+	WarmWorkspaceRefs    []WarmWorkspaceRef  `json:"warmWorkspaceRefs,omitempty"`
+	WarmWorkspaceActorID int64               `json:"warmWorkspaceActorId,omitempty"`
+	WarmWorkspaceLease   *WarmWorkspaceLease `json:"warmWorkspaceLease,omitempty"`
 
 	Maintenance   *RunnerMaintenanceRequest `json:"maintenance,omitempty"`
 	ModelProvider string                    `json:"modelProvider,omitempty"`

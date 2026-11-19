@@ -3,6 +3,8 @@ package repo
 import (
 	"agentflow/internal/domain"
 	"errors"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"slices"
 )
 
@@ -55,4 +57,34 @@ func (r *RunnersRepo) WarmWorkspaceReturnCandidates() ([]string, error) {
 
 func (r *RunnersRepo) RetainWarmWorkspaceOwner(l domain.WarmWorkspaceLease) error {
 	return r.DB.Model(&warmWorkspaceRow{}).Where("owner_run_id = ? AND runner_id = ? AND generation = ? AND epoch = ? AND state = ?", l.OwnerRunID, l.RunnerID, l.Generation, l.Epoch, domain.WarmWorkspaceReleasing).Where("ready_generation = generation").Where("NOT EXISTS (?)", r.DB.Model(&warmWorkspaceRefRow{}).Select("1").Where("run_id = ? AND generation = ? AND epoch = ?", l.OwnerRunID, l.Generation, l.Epoch)).Update("state", domain.WarmWorkspaceReady).Error
+}
+
+func (r *RunnersRepo) lockReturnedWorkspace(tx *gorm.DB, id string, expected *domain.WarmWorkspaceLease) error {
+	var owner runRow
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "kind", "workflow_id", "execution_context").Take(&owner, "id = ?", id).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if err == nil && !runFromRow(owner).IsWorkspace() {
+		if expected != nil {
+			return ErrConversationWorkspaceChanged
+		}
+		return nil
+	}
+	var row warmWorkspaceRow
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "owner_run_id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) && expected == nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if expected == nil || !matchesWarmLease(row, *expected) || row.State != domain.WarmWorkspaceReleased && row.State != domain.WarmWorkspaceCanceled {
+		return ErrConversationWorkspaceChanged
+	}
+	if row.State == domain.WarmWorkspaceReleased {
+		var receipt warmWorkspaceRefRow
+		return tx.Select("run_id").Take(&receipt, "run_id = ? AND epoch = ? AND generation = ?", id, row.Epoch, row.Generation).Error
+	}
+	return nil
 }

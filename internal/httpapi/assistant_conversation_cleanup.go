@@ -9,6 +9,8 @@ import (
 
 	"agentflow/internal/domain"
 	"agentflow/internal/repo"
+	"gorm.io/gorm"
+	"os"
 )
 
 var errWarmConversationRetained = errors.New("对话工作区仍需保留")
@@ -18,31 +20,46 @@ var errWarmConversationRetained = errors.New("对话工作区仍需保留")
 // handed in. Manual deletion, scheduled cleanup and replaced scheduled runs
 // all go through here so they settle a conversation the same way.
 func (h *assistantHandlers) deleteConversation(userID int64, id string) error {
-	conv, found := h.repo.AssistantSession(userID, id)
-	if found {
-		for _, runID := range ownWorkspaceRunIDs(conv) {
-			run, err := h.repo.RunHeader(runID)
-			if err != nil {
-				return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
-			}
-			if run.ID == "" || !run.IsWorkspace() || run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
-				continue
-			}
-			if h.engine == nil {
-				return errWarmConversationRetained
-			}
-			if err := h.engine.ReleaseWarmWorkspace(context.Background(), run, 0); err != nil {
-				return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
-			}
+	conv, err := h.repo.AssistantSessionForDeletion(userID, id)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
+	}
+	leases := map[string]*domain.WarmWorkspaceLease{}
+	for _, runID := range ownWorkspaceRunIDs(conv) {
+		run, err := h.repo.RunHeader(runID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
+		}
+		if run.ID == "" || !run.IsWorkspace() || run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
+			continue
+		}
+		if h.engine == nil {
+			return errWarmConversationRetained
+		}
+		// Compare the same epoch at deletion, even if another generation
+		// has since been acquired and returned between the two operations.
+		l, _, found, err := h.repo.WarmWorkspaceAllocation(runID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
+		}
+		if found {
+			leases[runID] = &l
+		} else {
+			leases[runID] = nil
+		}
+		if err := h.engine.ReleaseWarmWorkspace(context.Background(), run, 0); err != nil {
+			return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
 		}
 	}
-	if err := deleteAssistantConversation(h.repo, userID, id); err != nil {
-		return err
+	if err := h.repo.DeleteAssistantSessionAfterReturn(conv, leases); err != nil {
+		return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
 	}
-	if found {
-		h.settleDeletedConversation(conv)
-		h.queueConversationAttachments(conv)
-	}
+	deleteAssistantConversationFiles(userID, conv.ID)
+	h.settleDeletedConversation(conv)
+	h.queueConversationAttachments(conv)
 	return nil
 }
 

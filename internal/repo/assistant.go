@@ -486,6 +486,13 @@ func (r *AssistantRepo) updateAssistantSessionWorkspace(userID int64, id, projec
 }
 
 func (r *AssistantRepo) DeleteAssistantSession(userID int64, id string) error {
+	session, err := r.AssistantSessionForDeletion(userID, id)
+	if err != nil {
+		return err
+	}
+	return r.DeleteAssistantSessionAfterReturn(session, nil)
+}
+func (r *AssistantRepo) deleteAssistantSession(userID int64, id string, expected *domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease) error {
 	id = assistantRecordID(id)
 	if userID <= 0 || id == "" {
 		return fmt.Errorf("assistant session not found")
@@ -498,6 +505,11 @@ func (r *AssistantRepo) DeleteAssistantSession(userID int64, id string) error {
 		}
 		if err == nil && job.Status == "running" {
 			return fmt.Errorf("请先停止生成再删除会话")
+		}
+		if expected != nil {
+			if err := r.lockSessionReturn(tx, *expected, leases); err != nil {
+				return err
+			}
 		}
 		res := tx.Table("assistant_sessions").Where("id = ? AND user_id = ?", id, userID).Delete(nil)
 		if res.Error != nil {

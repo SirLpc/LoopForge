@@ -191,3 +191,42 @@ func (e *Engine) cleanupWarmWorkspace(run domain.Run, now time.Time) {
 		}
 	}
 }
+
+type workspaceRestoreActorKey struct{}
+
+func WithWorkspaceRestoreActor(ctx context.Context, id int64) context.Context {
+	return context.WithValue(ctx, workspaceRestoreActorKey{}, id)
+}
+func workspaceRestoreActor(ctx context.Context) int64 {
+	id, _ := ctx.Value(workspaceRestoreActorKey{}).(int64)
+	return id
+}
+func (e *Engine) CheckWorkspaceRestoreAccess(ctx context.Context, run domain.Run) error {
+	owner, err := e.warmWorkspaceOwner(run)
+	if err != nil {
+		return err
+	}
+	if owner.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
+		return nil
+	}
+	actor := workspaceRestoreActor(ctx)
+	if err := e.authorizeWarmActor(owner, actor); err != nil {
+		return err
+	}
+	l, _, found, err := e.repo.WarmWorkspaceAllocation(owner.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("warm workspace has no allocation to restore")
+	}
+	resp, err := e.requestWorkspaceCheckpoint(ctx, owner, domain.RunnerWorkspaceRequest{Operation: domain.RunnerWorkspaceOperationWarmVerifyAccess, RunID: owner.ID, WarmWorkspaceLease: &l, WarmWorkspaceActorID: actor})
+	if err != nil {
+		return err
+	}
+	var result struct{ Phase string }
+	if resp.Error != "" || resp.Status >= 400 || json.Unmarshal(resp.Payload, &result) != nil || result.Phase != "authorized" {
+		return errors.New("current actor cannot verify access to the workspace repositories")
+	}
+	return nil
+}

@@ -35,10 +35,6 @@ func ArchiveDir(workspace, sourcePath, indexFile string, limits Limits, dst io.W
 	if err != nil {
 		return Result{}, err
 	}
-	indexFile, err = SanitizeRelPath(indexFile)
-	if err != nil {
-		return Result{}, err
-	}
 	root := filepath.Join(workspace, filepath.FromSlash(rel))
 	info, err := os.Lstat(root)
 	if err != nil {
@@ -51,7 +47,21 @@ func ArchiveDir(workspace, sourcePath, indexFile string, limits Limits, dst io.W
 		return Result{}, err
 	}
 
-	entries, expanded, err := collectRegularFiles(workspace, root, limits)
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return Result{}, err
+	}
+	defer dir.Close()
+	return ArchiveRoot(dir, indexFile, limits, dst)
+}
+
+// ArchiveRoot traverses and reads through the same pinned source directory.
+func ArchiveRoot(dir *os.Root, indexFile string, limits Limits, dst io.Writer) (Result, error) {
+	indexFile, err := SanitizeRelPath(indexFile)
+	if err != nil {
+		return Result{}, err
+	}
+	entries, expanded, err := collectRegularFiles(dir, limits)
 	if err != nil {
 		return Result{}, err
 	}
@@ -101,18 +111,19 @@ func writeTarZst(dst io.Writer, entries []fileEntry, maxCompressed int64) (strin
 }
 
 type fileEntry struct {
+	dir  *os.Root
 	abs  string
 	name string
 	mode os.FileMode
 	size int64
 }
 
-func collectRegularFiles(workspace, root string, limits Limits) ([]fileEntry, int64, error) {
+func collectRegularFiles(root *os.Root, limits Limits) ([]fileEntry, int64, error) {
 	var (
 		entries  []fileEntry
 		expanded int64
 	)
-	err := filepath.WalkDir(root, func(abs string, d fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -120,11 +131,7 @@ func collectRegularFiles(workspace, root string, limits Limits) ([]fileEntry, in
 		if err != nil {
 			return err
 		}
-		if err := rejectSpecial(abs, info); err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
+		if err := rejectSpecial(rel, info); err != nil {
 			return err
 		}
 		if rel == "." {
@@ -147,10 +154,7 @@ func collectRegularFiles(workspace, root string, limits Limits) ([]fileEntry, in
 		if err := checkExpandedSize(expanded, limits); err != nil {
 			return err
 		}
-		if _, err := filepath.Rel(workspace, abs); err != nil {
-			return fmt.Errorf("%w: %s", ErrUnsafePath, rel)
-		}
-		entries = append(entries, fileEntry{abs: abs, name: rel, mode: info.Mode(), size: info.Size()})
+		entries = append(entries, fileEntry{dir: root, name: rel, mode: info.Mode(), size: info.Size()})
 		return nil
 	})
 	if err != nil {
@@ -165,11 +169,24 @@ func containsIndex(entries []fileEntry, indexFile string) bool {
 }
 
 func writeTarFile(tw *tar.Writer, item fileEntry) error {
-	src, err := os.Open(item.abs)
+	var src *os.File
+	var err error
+	if item.dir != nil {
+		src, err = item.dir.Open(item.name)
+	} else {
+		src, err = os.Open(item.abs)
+	}
 	if err != nil {
 		return err
 	}
 	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || rejectSpecial(item.name, info) != nil {
+		return fmt.Errorf("invalid preview member %s", item.name)
+	}
 	mode := int64(0o644)
 	if item.mode&0o111 != 0 {
 		mode = 0o755

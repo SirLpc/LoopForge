@@ -326,11 +326,10 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 			if !d.IsDir() {
 				return fmt.Errorf("generated path %s is not a directory", rel)
 			}
-			if rel == library {
-				if err := warmTargetIgnoresLibrary(local, stage, head, library); err != nil {
-					return err
-				}
-			} else {
+			if err := warmTargetIgnoresLibrary(local, stage, head, rel); err != nil {
+				return err
+			}
+			if rel != library {
 				target, err := filepath.Rel(w.root, path)
 				if err != nil {
 					return err
@@ -349,7 +348,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 				}
 				return filepath.SkipDir
 			}
-			if !warmBlobMatches(local, cache, path, fields[2], fields[0]) {
+			if !warmBlobMatches(local, cache, stage, path, fields[2], fields[0]) {
 				return fmt.Errorf("commit or restore changes in %s", rel)
 			}
 			return nil
@@ -372,7 +371,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 
 // Read actual bytes independently of index stat hints, excludes, filters,
 // hooks and submodule configuration in the writable checkout.
-func warmBlobMatches(ctx context.Context, cache, path, oid, mode string) bool {
+func warmBlobMatches(ctx context.Context, cache, stage, path, oid, mode string) bool {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -405,8 +404,19 @@ func warmBlobMatches(ctx context.Context, cache, path, oid, mode string) bool {
 	if _, err = io.Copy(io.MultiWriter(h, digest), f); err != nil {
 		return false
 	}
-	if hex.EncodeToString(h.Sum(nil)) == oid {
-		return true
+	matches := hex.EncodeToString(h.Sum(nil)) == oid
+	if matches {
+		const prefix = "version https://git-lfs.github.com/spec/v1\n"
+		if st.Size() < int64(len(prefix)) || st.Size() > 1024 {
+			return true
+		}
+		var start [len(prefix)]byte
+		if _, err := f.ReadAt(start[:], 0); err != nil {
+			return false
+		}
+		if string(start[:]) != prefix {
+			return true
+		}
 	}
 	size, err := gitwork.C(ctx, cache, "cat-file", "-s", oid)
 	n, parseErr := strconv.ParseInt(size, 10, 64)
@@ -414,10 +424,53 @@ func warmBlobMatches(ctx context.Context, cache, path, oid, mode string) bool {
 		return false
 	}
 	pointer, err := gitwork.C(ctx, cache, "cat-file", "blob", oid)
-	expected := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%x\nsize %d", digest.Sum(nil), st.Size())
-	return err == nil && pointer == expected
+	if err != nil {
+		return false
+	}
+	if !strings.HasPrefix(pointer, "version https://git-lfs.github.com/spec/v1\n") {
+		return matches
+	}
+	var object string
+	var length int64
+	if _, err := fmt.Sscanf(pointer, "version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d", &object, &length); err != nil || len(object) != 64 || length < 0 || strings.ContainsAny(object, "/\\") {
+		return false
+	}
+	if _, err := hex.DecodeString(object); err != nil {
+		return false
+	}
+	if !matches && (hex.EncodeToString(digest.Sum(nil)) != object || st.Size() != length) {
+		return false
+	}
+	// The private stage starts empty. Only this authenticated fetch can put the
+	// actual object here, independently of an existing checkout or LFS cache.
+	file, err := os.Open(filepath.Join(stage, ".git", "lfs", "objects", object[:2], object[2:4], object))
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	remote := sha256.New()
+	sizeRead, err := io.Copy(remote, file)
+	return err == nil && sizeRead == length && hex.EncodeToString(remote.Sum(nil)) == object
 }
 
+// Repeat destructive cleanup proof from the recorded commit after a crash.
+func verifyWarmCleanupIgnore(ctx context.Context, cache, head, rel string) error {
+	private, err := os.MkdirTemp(filepath.Dir(cache), ".check-ignore-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(private)
+	if _, err := gitwork.C(ctx, private, "init", "--template=", warmObjectFormat(head)); err != nil {
+		return err
+	}
+	if err := warmAlternate(filepath.Join(private, ".git"), filepath.Join(cache, "objects")); err != nil {
+		return err
+	}
+	if err := warmTreeProtectsLibrary(ctx, cache, head, rel); err != nil {
+		return err
+	}
+	return warmTargetIgnoresLibrary(ctx, private, head, rel)
+}
 func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
 	p.mu.Lock()
 	a, err := p.loadLease(ctx, l)
@@ -477,6 +530,18 @@ func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorks
 					slot := p.slots[id]
 					for _, name := range slot.DiscardGenerated {
 						if filepath.Join(root.Name(), rel) == filepath.Join(target, slot.UnityProjectPath, name) {
+							repoID := slot.RepositoryID
+							refIndex := slices.IndexFunc(refs, func(ref domain.WarmWorkspaceRef) bool { return ref.RepositoryID == repoID })
+							if refIndex < 0 {
+								return errors.New("missing generated-directory ref")
+							}
+							head := refs[refIndex].Commit
+							if actual, err := warmCurrentHead(filepath.Join(target, ".git")); err != nil || actual != head {
+								return errors.New("checkout changed before generated-directory cleanup")
+							}
+							if err := verifyWarmCleanupIgnore(ctx, p.gitCache(id), head, filepath.Join(slot.UnityProjectPath, name)); err != nil {
+								return err
+							}
 							generated = true
 						}
 					}

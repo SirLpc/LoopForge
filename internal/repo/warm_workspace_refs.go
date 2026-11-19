@@ -113,3 +113,9 @@ func (r *RunsRepo) WarmWorkspaceBorrowed(id string, now time.Time) (bool, error)
 		Where("status IN ? OR workspace_edit_until > ?", []string{"running", "queued", "waiting"}, now).Count(&count).Error
 	return count != 0, err
 }
+
+func (r *RunsRepo) WarmWorkspaceRestorable(id string) (bool, error) {
+	var n int64
+	err := r.DB.Table("run_warm_workspace_refs AS proof").Joins("JOIN "+(warmWorkspaceRow{}).TableName()+" AS slot ON slot.owner_run_id = proof.run_id AND slot.epoch = proof.epoch AND slot.generation = proof.generation").Where("proof.run_id = ? AND proof.unplaced = ? AND slot.state = ?", id, false, domain.WarmWorkspaceReleased).Count(&n).Error
+	return n == 1, err
+}

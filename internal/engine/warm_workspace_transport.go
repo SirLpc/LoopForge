@@ -17,18 +17,23 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 	if runnerID == "" || input.RunID != run.ID || sharesWorkspace(run) || run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool || input.WorkspaceRunID != "" && input.WorkspaceRunID != run.ID {
 		return req, errors.New("invalid warm workspace owner")
 	}
-	req = domain.RunnerWorkspaceRequest{RunID: run.ID, WorkspaceRunID: run.ID, Operation: input.Operation, WarmWorkspaceLease: input.WarmWorkspaceLease}
+	req = domain.RunnerWorkspaceRequest{RunID: run.ID, WorkspaceRunID: run.ID, Operation: input.Operation, WarmWorkspaceLease: input.WarmWorkspaceLease, WarmWorkspaceActorID: input.WarmWorkspaceActorID}
 	if err := e.repo.AuthorizeWarmWorkspaceControl(runnerID, run, &req); err != nil {
 		return req, err
 	}
-	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout || req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
+	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout || req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || req.Operation == domain.RunnerWorkspaceOperationWarmVerifyAccess {
 		req.Sandbox = run.WorkflowSnapshot.SandboxSnapshot
 		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
 			return req, errors.New("warm checkout requires Docker")
 		}
 		inv := new(domain.RunnerInvocation)
 		actor := run.ExecutionContext.ResponsibleUserID
-		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || run.IsWorkspace() {
+		if req.Operation == domain.RunnerWorkspaceOperationWarmVerifyAccess || req.Operation == domain.RunnerWorkspaceOperationWarmCheckout && req.WarmWorkspaceActorID != 0 {
+			actor = req.WarmWorkspaceActorID
+			if err := e.authorizeWarmActor(run, actor); err != nil {
+				return req, err
+			}
+		} else if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || run.IsWorkspace() {
 			selected, err := e.repo.WarmWorkspaceActor(*req.WarmWorkspaceLease)
 			if err != nil {
 				return req, err
@@ -47,7 +52,7 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 		inv.GitHTTPCredentials, inv.GitSSHKeys = creds.HTTPS, creds.SSHKeys
 		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
 			req.ArtifactFiles = archivedWorkspaceFiles(run, "")
-		} else {
+		} else if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout {
 			refs, err := e.repo.WarmWorkspaceRefs(run.ID)
 			if err != nil {
 				return req, err

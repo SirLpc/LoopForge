@@ -78,6 +78,18 @@ func TestWarmWorkspaceExactReadyGeneration(t *testing.T) {
 	if err := d.checkWarmTask(t.Context(), preview); err == nil {
 		t.Fatal("whole checkout sent to preview archiver")
 	}
+	if err := os.Symlink(checkout, filepath.Join(checkout, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{" checkout ", "checkout/alias/Library", "checkout/Library "} {
+		preview.PreviewArchive.SourcePath = path
+		if err := d.checkWarmTask(t.Context(), preview); err == nil {
+			t.Errorf("accepted preview alias %q", path)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(checkout, "public"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	preview.PreviewArchive.SourcePath = "checkout/public"
 	if err := d.checkWarmTask(t.Context(), preview); err != nil {
 		t.Fatal(err)

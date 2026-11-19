@@ -247,7 +247,7 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 				if err := e.RecordWarmWorkspaceActor(owner, l, actorID); err != nil {
 					return empty, err
 				}
-			} else if actorID != owner.ExecutionContext.ResponsibleUserID {
+			} else if actorID != owner.ExecutionContext.ResponsibleUserID && workspaceRestoreActor(ctx) == 0 {
 				return empty, errors.New("warm checkout actor differs from frozen owner")
 			}
 			ready, err := e.confirmWarmWorkspace(ctx, owner, l)
@@ -335,7 +335,7 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 // conflict. Replaying either RPC against the same generation is idempotent.
 func (e *Engine) confirmWarmWorkspace(ctx context.Context, owner domain.Run, l domain.WarmWorkspaceLease) (bool, error) {
 	for _, op := range []string{domain.RunnerWorkspaceOperationWarmPrepare, domain.RunnerWorkspaceOperationWarmCheckout} {
-		resp, err := e.requestWorkspaceCheckpoint(ctx, owner, domain.RunnerWorkspaceRequest{Operation: op, RunID: owner.ID, WarmWorkspaceLease: &l})
+		resp, err := e.requestWorkspaceCheckpoint(ctx, owner, domain.RunnerWorkspaceRequest{Operation: op, RunID: owner.ID, WarmWorkspaceLease: &l, WarmWorkspaceActorID: workspaceRestoreActor(ctx)})
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, ErrWorkspaceControlConfiguration) {
 				return false, err

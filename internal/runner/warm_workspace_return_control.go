@@ -10,6 +10,9 @@ import (
 )
 
 func (d *Daemon) warmReturnControl(ctx context.Context, req domain.RunnerWorkspaceRequest) domain.RunnerWorkspaceResponse {
+	return d.warmReturnWithProcessInventory(ctx, req, runtime.CheckWarmWorkspaceProcesses)
+}
+func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.RunnerWorkspaceRequest, checkProcesses func(context.Context, string) error) domain.RunnerWorkspaceResponse {
 	p := d.warmWorkspacePool
 	l := *req.WarmWorkspaceLease
 	gate := d.requestGate(req)
@@ -47,7 +50,7 @@ func (d *Daemon) warmReturnControl(ctx context.Context, req domain.RunnerWorkspa
 		root := filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace")
 		err := runtime.FenceWarmWorkspaceContainers(ctx, root)
 		if err == nil {
-			err = runtime.CheckWarmWorkspaceProcesses(ctx, root)
+			err = checkProcesses(ctx, root)
 		}
 		if err != nil {
 			r := runnerWorkspaceError(err)

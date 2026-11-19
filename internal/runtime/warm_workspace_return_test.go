@@ -5,14 +5,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+func TestWarmWorkspaceReleaseRetainsOnHiddenProcfs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "999"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWarmLinuxProcesses(t.Context(), dir, func(string) bool { return false }); err == nil {
+		t.Fatal("incomplete inventory qualified for release")
+	}
+}
 func TestWarmWorkspaceReleaseDetectsNativeWorkspaceProcess(t *testing.T) {
 	root := t.TempDir()
-	if err := CheckWarmWorkspaceProcesses(t.Context(), root); err != nil {
-		t.Fatal("clean fixture blocked", err)
+	cleanErr := CheckWarmWorkspaceProcesses(t.Context(), root)
+	// A host without system-wide visibility must retain even a clean checkout.
+	if cleanErr != nil && !strings.Contains(cleanErr.Error(), "workspace retained") {
+		t.Fatal(cleanErr)
 	}
 	cmd := exec.Command("sleep", "30")
 	cmd.Dir = root
@@ -20,7 +33,19 @@ func TestWarmWorkspaceReleaseDetectsNativeWorkspaceProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	if err := CheckWarmWorkspaceProcesses(t.Context(), root); err == nil || !strings.Contains(err.Error(), "native process") {
+	if runtime.GOOS == "linux" {
+		dir := t.TempDir()
+		if err := os.Symlink(filepath.Join("/proc", strconv.Itoa(cmd.Process.Pid)), filepath.Join(dir, strconv.Itoa(cmd.Process.Pid))); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkWarmLinuxProcesses(t.Context(), dir, func(p string) bool { return p == root }); err == nil || !strings.Contains(err.Error(), "native process") {
+			t.Fatalf("missed open cwd: %v", err)
+		}
+		if err := checkWarmLinuxProcesses(t.Context(), dir, func(string) bool { return false }); err != nil {
+			t.Fatalf("fully visible inventory blocked: %v", err)
+		}
+	}
+	if err := CheckWarmWorkspaceProcesses(t.Context(), root); err == nil || cleanErr == nil && !strings.Contains(err.Error(), "native process") {
 		t.Fatalf("expected live owner, got %v", err)
 	}
 }

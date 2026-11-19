@@ -121,6 +121,7 @@ type TokensRepo struct {
 
 // AssistantRepo owns Studio AI assistant conversations and scheduled prompts.
 type AssistantRepo struct {
+	runners *RunnersRepo
 	*deps
 	users         *UsersRepo
 	notifications *NotificationsRepo
@@ -210,6 +211,7 @@ func newStore(db *gorm.DB) *Store {
 	s.IssuesRepo = &IssuesRepo{deps: d, projects: s.ProjectsRepo, users: s.UsersRepo, tasks: s.TasksRepo}
 	s.NotificationsRepo.issues = s.IssuesRepo
 	s.RunnersRepo = &RunnersRepo{deps: d}
+	s.AssistantRepo.runners = s.RunnersRepo
 	s.RunsRepo = &RunsRepo{deps: d, runners: s.RunnersRepo, assistant: s.AssistantRepo, issues: s.IssuesRepo, catalog: s.CatalogRepo, notifications: s.NotificationsRepo}
 	s.DeliveryRepo = &DeliveryRepo{deps: d, issues: s.IssuesRepo, tasks: s.TasksRepo, catalog: s.CatalogRepo, runs: s.RunsRepo}
 	s.InsightsRepo = &InsightsRepo{deps: d}

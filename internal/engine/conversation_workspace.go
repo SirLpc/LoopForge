@@ -242,7 +242,11 @@ func (e *Engine) ensureConversationWorkspace(ctx context.Context, id, token stri
 		return fmt.Errorf("运行不存在")
 	}
 	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
-		_, err := e.EnsureWarmWorkspace(WithConversationWorkspaceToken(ctx, token, id), run, run.ExecutionContext.ResponsibleUserID)
+		actor := workspaceRestoreActor(ctx)
+		if actor == 0 {
+			actor = run.ExecutionContext.ResponsibleUserID
+		}
+		_, err := e.EnsureWarmWorkspace(WithConversationWorkspaceToken(ctx, token, id), run, actor)
 		return err
 	}
 	runner := e.defaultExecutionRunner(run)

@@ -10,6 +10,7 @@ import (
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
+	"agentflow/internal/preview"
 	"agentflow/internal/runtime"
 )
 
@@ -165,24 +166,56 @@ func (d *Daemon) checkWarmTask(ctx context.Context, task domain.RunnerTask) erro
 		return errors.New("warm task must use the shared checkout")
 	}
 	if task.Action == domain.RunnerTaskActionArchivePreview {
-		if task.PreviewArchive == nil || !validWarmWorkspaceRelativePath(task.PreviewArchive.SourcePath) {
-			return errors.New("warm previews require a dedicated output directory")
+		dir, err := d.openWarmPreview(task)
+		if err != nil {
+			return err
 		}
-		source := filepath.Join(d.taskWorkspace(task), task.PreviewArchive.SourcePath)
-		p := d.warmWorkspacePool
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		for id, target := range p.state.Leases[owner].Targets {
-			relative, err := filepath.Rel(source, target)
-			if err != nil || filepath.IsLocal(relative) || warmWorkspacePathsOverlap(source, filepath.Join(target, ".git")) || warmWorkspacePathsOverlap(source, filepath.Join(target, p.slots[id].UnityProjectPath, "Library")) {
-				return errors.New("warm previews cannot archive an entire checkout or its cache")
-			}
-		}
+		dir.Close()
 	}
 	if task.Action == "" && (task.Sandbox == nil || task.Sandbox.Profile.Driver != domain.SandboxDriverDocker || task.Invocation == nil && task.Command == "") {
 		return errors.New("warm task requires Docker execution")
 	}
 	return nil
+}
+
+// Pin the allowed physical output directory before walking or reading any members.
+func (d *Daemon) openWarmPreview(task domain.RunnerTask) (*os.Root, error) {
+	if task.PreviewArchive == nil {
+		return nil, errors.New("missing preview path")
+	}
+	rel, err := preview.SanitizeRelPath(task.PreviewArchive.SourcePath)
+	if err != nil || rel != task.PreviewArchive.SourcePath {
+		return nil, errors.New("warm previews require a canonical output directory")
+	}
+	source := filepath.Join(d.taskWorkspace(task), rel)
+	p := d.warmWorkspacePool
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id, target := range p.state.Leases[d.taskGateKey(task)].Targets {
+		relative, err := filepath.Rel(source, target)
+		if err != nil || filepath.IsLocal(relative) || warmWorkspacePathsOverlap(source, filepath.Join(target, ".git")) || warmWorkspacePathsOverlap(source, filepath.Join(target, p.slots[id].UnityProjectPath, "Library")) {
+			return nil, errors.New("warm previews cannot archive an entire checkout or its cache")
+		}
+	}
+	pinned, err := openWarmWorkspaceDir(source, false)
+	if err != nil {
+		return nil, err
+	}
+	defer pinned.Close()
+	expected, err := pinned.Stat()
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(source)
+	if err != nil {
+		return nil, err
+	}
+	observed, err := root.Stat(".")
+	if err != nil || !os.SameFile(expected, observed) {
+		root.Close()
+		return nil, errors.New("preview source changed")
+	}
+	return root, nil
 }
 
 func checkoutForWorkspace(ctx context.Context, lease *domain.WarmWorkspaceLease, root string, inv *domain.RunnerInvocation, refresh ...bool) error {

@@ -3,7 +3,13 @@ package runner
 import (
 	"agentflow/internal/domain"
 	"agentflow/internal/runtime"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -96,6 +102,147 @@ func TestWarmWorkspaceReleaseProtectsLocalData(t *testing.T) {
 	}
 }
 
+func TestWarmWorkspaceReleasePreservesUnprovenGeneratedAndLFS(t *testing.T) {
+	t.Run("generated", func(t *testing.T) {
+		_, p, l, g := warmReturnFixture(t)
+		slot := p.slots["a"]
+		slot.DiscardGenerated = []string{"Temp"}
+		p.slots["a"] = slot
+		warmGitWrite(t, g.checkout, "Temp/user-work", "unique")
+		if _, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo}); err == nil {
+			t.Fatal("accepted unignored generated directory")
+		}
+	})
+	for _, tc := range []struct {
+		name, rule string
+		ignored    bool
+	}{{"ignored directory", "/Temp/\n", true}, {"negated child", "/Temp/*\n!/Temp/user-work\n", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, p, l, g := warmReturnFixture(t)
+			slot := p.slots["a"]
+			slot.DiscardGenerated = []string{"Temp"}
+			p.slots["a"] = slot
+			warmGitWrite(t, g.checkout, ".gitignore", "/Library/\n"+tc.rule)
+			runGitT(t, g.checkout, "add", ".gitignore")
+			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-m", "ignore generated files")
+			runGitT(t, g.checkout, "push", "origin", "HEAD")
+			warmGitWrite(t, g.checkout, "Temp/user-work", "unique")
+			refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
+			if !tc.ignored {
+				if err == nil {
+					t.Fatal("accepted re-included user file")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.commitReturn(t.Context(), l, refs); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(p.slots["a"].Path, "Temp")); !os.IsNotExist(err) {
+				t.Fatalf("verified generated directory remained: %v", err)
+			}
+		})
+	}
+	t.Run("resumed removal", func(t *testing.T) {
+		_, p, l, g := warmReturnFixture(t)
+		slot := p.slots["a"]
+		slot.DiscardGenerated = []string{"Temp"}
+		p.slots["a"] = slot
+		refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := p.state.Leases[l.OwnerRunID]
+		a.ReturnRemove = []string{"checkout/Temp"}
+		if err := p.saveAllocation(a); err != nil {
+			t.Fatal(err)
+		}
+		warmGitWrite(t, g.checkout, "Temp/user-work", "unique")
+		if err := p.commitReturn(t.Context(), l, refs); err == nil {
+			t.Fatal("replayed unproven recursive cleanup")
+		}
+		if _, err := os.Stat(filepath.Join(g.checkout, "Temp", "user-work")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("remote LFS", func(t *testing.T) {
+		if _, err := exec.LookPath("git-lfs"); err != nil {
+			t.Skip("requires git-lfs")
+		}
+		_, p, l, g := warmReturnFixture(t)
+		runGitT(t, g.checkout, "lfs", "install", "--local")
+		runGitT(t, g.checkout, "lfs", "track", "*.bin")
+		warmGitWrite(t, g.checkout, "asset.bin", "verified large asset")
+		runGitT(t, g.checkout, "add", "asset.bin", ".gitattributes")
+		runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-m", "asset")
+		runGitT(t, g.checkout, "push", "origin", "HEAD")
+		runGitT(t, g.checkout, "lfs", "push", "--all", "origin")
+		if _, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("unavailable LFS", func(t *testing.T) {
+		_, p, l, g := warmReturnFixture(t)
+		content := "unique large asset"
+		pointer := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%x\nsize %d\n", sha256.Sum256([]byte(content)), len(content))
+		warmGitWrite(t, g.checkout, "asset", pointer)
+		runGitT(t, g.checkout, "add", "asset")
+		runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-m", "asset")
+		runGitT(t, g.checkout, "push", "origin", "HEAD")
+		warmGitWrite(t, g.checkout, "asset", content)
+		git, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatal(err)
+		}
+		bin := t.TempDir()
+		if err := os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin)
+		if _, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo}); err == nil {
+			t.Fatal("accepted hydrated asset without remote proof")
+		}
+	})
+}
+
+func TestWarmWorkspaceReleaseQualifiedInventory(t *testing.T) {
+	f, p, l, g := warmReturnFixture(t)
+	d := Daemon{cfg: Config{DefaultWorkspaceRoot: f.workspace}, state: daemonState{RunnerID: l.RunnerID}, warmWorkspacePool: p}
+	req := domain.RunnerWorkspaceRequest{RunID: l.OwnerRunID, WarmWorkspaceLease: &l, Operation: domain.RunnerWorkspaceOperationWarmReleaseCheck, PreparationInvocation: &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}}}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\n[ \"$1\" = ps ] || exit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	uncertain := true
+	inspections := 0
+	inspect := func(_ context.Context, root string) error {
+		inspections++
+		if root != filepath.Dir(g.checkout) {
+			t.Fatal(root)
+		}
+		if uncertain {
+			return errors.New("workspace retained: incomplete process inventory")
+		}
+		return nil
+	}
+	res := d.warmReturnWithProcessInventory(t.Context(), req, inspect)
+	if res.Code != "warm_owner_retained" || p.state.Leases[l.OwnerRunID].ReturnProven {
+		t.Fatal(res)
+	}
+	uncertain = false
+	res = d.warmReturnWithProcessInventory(t.Context(), req, inspect)
+	if res.Error != "" || json.Unmarshal(res.Payload, &req.WarmWorkspaceRefs) != nil {
+		t.Fatal(res)
+	}
+	req.Operation = domain.RunnerWorkspaceOperationWarmReleaseCommit
+	res = d.warmReturnWithProcessInventory(t.Context(), req, inspect)
+	if res.Error != "" || inspections != 3 || p.state.Leases[l.OwnerRunID].Phase != warmWorkspaceReleased {
+		t.Fatal(res, inspections)
+	}
+}
 func TestWarmWorkspaceReleaseRequiresMatchingArtifactBytes(t *testing.T) {
 	f, p, l, g := warmReturnFixture(t)
 	file := domain.WorkspaceArtifactFile{Path: "checkout/out/report.bin", Content: "verified"}

@@ -13,10 +13,11 @@ import (
 )
 
 func (h *runsHandlers) workspaceRestore(c *gin.Context) {
-	run, _, ok := h.workspaceEditActor(c)
+	run, actor, ok := h.workspaceEditActor(c)
 	if !ok {
 		return
 	}
+	ctx := engine.WithWorkspaceRestoreActor(c.Request.Context(), actor)
 	if strings.Contains(c.GetHeader("Prefer"), "respond-async") && !run.WorkspaceCleanedAt.IsZero() {
 		meta, _ := h.engine.ConversationWorkspaceStatus(run.ID)
 		if meta.SavedAt == nil && run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
@@ -29,6 +30,10 @@ func (h *runsHandlers) workspaceRestore(c *gin.Context) {
 		c.JSON(200, gin.H{"restored": true, "idleTimeoutSeconds": 3600})
 		return
 	}
+	if err := h.engine.CheckWorkspaceRestoreAccess(ctx, run); err != nil {
+		respondWorkspaceError(c, err)
+		return
+	}
 	token, err := h.engine.BeginConversationWorkspaceUse(run.ID)
 	if err != nil {
 		c.JSON(409, gin.H{"error": err.Error()})
@@ -39,7 +44,7 @@ func (h *runsHandlers) workspaceRestore(c *gin.Context) {
 		defer stop()
 		_ = h.engine.EndConversationWorkspaceUse(ctx, run.ID, token)
 	}()
-	if err = h.engine.EnsureConversationWorkspace(c.Request.Context(), run.ID, token); err != nil {
+	if err = h.engine.EnsureConversationWorkspace(ctx, run.ID, token); err != nil {
 		c.JSON(409, gin.H{"error": err.Error()})
 		return
 	}
@@ -49,14 +54,24 @@ func (h *runsHandlers) workspaceRestore(c *gin.Context) {
 // Async callers poll the durable restore separately, then repeat their control
 // decision once ready. A 202 acknowledges restoration, never SOP execution.
 func (h *runsHandlers) prepareRunActivationWorkspace(c *gin.Context, id string) bool {
+	ctx := c.Request.Context()
+	if user, ok := h.requestUser(c.Request, true); ok {
+		ctx = engine.WithWorkspaceRestoreActor(ctx, user.ID)
+	}
 	if !strings.Contains(c.GetHeader("Prefer"), "respond-async") {
-		if err := h.engine.RestoreConversationWorkspaceIfNeeded(c.Request.Context(), id); err != nil {
+		if run, ok := h.repo.RunState(id); ok {
+			if err := h.engine.CheckWorkspaceRestoreAccess(ctx, run); err != nil {
+				respondWorkspaceError(c, err)
+				return true
+			}
+		}
+		if err := h.engine.RestoreConversationWorkspaceIfNeeded(ctx, id); err != nil {
 			respond(c, err)
 			return true
 		}
 		return false
 	}
-	state, err := h.engine.StartWorkspaceRestore(id)
+	state, err := h.engine.StartWorkspaceRestoreContext(ctx, id)
 	if err != nil {
 		if errors.Is(err, repo.ErrWorkspaceInUse) {
 			c.Header("Retry-After", "1")
@@ -99,11 +114,16 @@ func (h *runsHandlers) workspaceRestoreStatus(c *gin.Context) {
 func (h *runsHandlers) workspaceLifecycleInfo(c *gin.Context, run domain.Run, payload map[string]any) {
 	payload["idleTimeoutSeconds"] = int(engine.ConversationWorkspaceIdleTTL.Seconds())
 	meta, ok := h.engine.ConversationWorkspaceStatus(run.ID)
-	if !ok {
+	warm := run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool
+	if !ok && !warm {
 		return
 	}
 	restorable := false
-	if meta.SavedAt != nil && meta.SHA256 != "" {
+	hasRecovery := meta.SavedAt != nil && meta.SHA256 != ""
+	if warm {
+		hasRecovery, _ = h.repo.WarmWorkspaceRestorable(run.ID)
+	}
+	if hasRecovery {
 		_, status, _ := h.workspaceEditAccess(c.Request, run)
 		restorable = status == 0
 	}
