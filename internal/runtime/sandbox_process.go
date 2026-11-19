@@ -405,6 +405,26 @@ func seatbeltProfileCommand(workspace string, requirements SandboxRequirements) 
 			}
 		}
 	}
+	if root := requirements.GitCacheRoot; root != "" {
+		for _, dir := range seatbeltPathVariants(root) {
+			fmt.Fprintf(&b, "(deny file-read* file-write* (subpath %s))\n", strconv.Quote(dir))
+			for ancestor := filepath.Dir(dir); ancestor != "/"; ancestor = filepath.Dir(ancestor) {
+				fmt.Fprintf(&b, "(deny file-write* (literal %s))\n", strconv.Quote(ancestor))
+			}
+		}
+	}
+	for _, objects := range requirements.GitObjectDirs {
+		for _, dir := range seatbeltPathVariants(objects) {
+			fmt.Fprintf(&b, "(allow file-read* (subpath %s))\n", strconv.Quote(dir))
+		}
+
+		for _, dir := range seatbeltPathVariants(filepath.Dir(objects)) {
+			fmt.Fprintf(&b, "(deny file-write* (subpath %s))\n", strconv.Quote(dir))
+			for ancestor := filepath.Dir(dir); ancestor != "/"; ancestor = filepath.Dir(ancestor) {
+				fmt.Fprintf(&b, "(deny file-write* (literal %s))\n", strconv.Quote(ancestor))
+			}
+		}
+	}
 	return b.String(), nil
 }
 
@@ -534,6 +554,15 @@ func bwrapArgsCommand(workspace string, requirements SandboxRequirements) ([]str
 		} else if statErr != nil && !os.IsNotExist(statErr) {
 			return nil, statErr
 		}
+	}
+	if requirements.GitCacheRoot != "" {
+		args = append(args, "--tmpfs", requirements.GitCacheRoot)
+	}
+	for _, dir := range requirements.GitObjectDirs {
+		args = append(args, "--ro-bind", dir, dir)
+	}
+	if requirements.GitCacheRoot != "" {
+		args = append(args, "--remount-ro", requirements.GitCacheRoot)
 	}
 	args = append(args, "--")
 	return args, nil

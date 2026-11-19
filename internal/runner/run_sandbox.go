@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +40,7 @@ func (d *Daemon) acquireTaskSandbox(ctx context.Context, task domain.RunnerTask)
 	if task.Sandbox == nil {
 		return nil, nil, fmt.Errorf("frozen run sandbox definition is required")
 	}
-	requirements, resources := taskSandboxSpec(task)
+	requirements, resources := d.localTaskSandboxSpec(task)
 	key, id, shared := runSandboxKey(task, requirements, resources)
 	if !shared || d.cfg.DisableRunSandboxReuse {
 		sandbox, err := runtime.OpenRemoteSandbox(ctx, task.ID, d.taskWorkspace(task), task.Sandbox.Profile, requirements, resources)
@@ -173,6 +175,31 @@ func containerSafe(v string) string {
 	}, v)
 }
 
+// The task cannot supply host bind paths. Resolve each object directory from
+// the local journal after the slot has been placed at its owner's workspace.
+func (d *Daemon) localTaskSandboxSpec(task domain.RunnerTask) (runtime.SandboxRequirements, runtime.SandboxResources) {
+	requirements, resources := taskSandboxSpec(task)
+	p := d.warmWorkspacePool
+	if p == nil {
+		return requirements, resources
+	}
+	requirements.GitCacheRoot = p.gitCacheRoot()
+	workspace := d.taskWorkspace(task)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for owner, allocation := range p.state.Leases {
+		if allocation.Phase != warmWorkspacePlaced || workspace != filepath.Join(p.workspaceRoot, "runs", owner, "workspace") {
+			continue
+		}
+		for _, slot := range allocation.Lease.Slots {
+			requirements.GitObjectDirs = append(requirements.GitObjectDirs, filepath.Join(p.gitCache(slot), "objects"))
+		}
+		sort.Strings(requirements.GitObjectDirs)
+		break
+	}
+	return requirements, resources
+}
+
 // taskSandboxSpec is the sandbox a task asks for: the provider's CLI needs
 // plus the Dockerfile and environment it carries.
 func taskSandboxSpec(task domain.RunnerTask) (runtime.SandboxRequirements, runtime.SandboxResources) {
@@ -219,7 +246,7 @@ func (d *Daemon) acquireExistingTaskSandbox(task domain.RunnerTask) (runtime.San
 	if task.Sandbox == nil || d.cfg.DisableRunSandboxReuse {
 		return nil, nil
 	}
-	requirements, resources := taskSandboxSpec(task)
+	requirements, resources := d.localTaskSandboxSpec(task)
 	key, _, shared := runSandboxKey(task, requirements, resources)
 	if !shared {
 		return nil, nil

@@ -102,3 +102,16 @@ func scpHost(s string) (string, bool) {
 	}
 	return hostPart, true
 }
+
+// CanonicalRemote compares frozen repository identities without changing transport.
+func CanonicalRemote(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if u, err := url.Parse(raw); err == nil && u.Scheme == "https" {
+		if host, err := HTTPSHostScope(u.Host); err == nil {
+			u.Host = host
+		}
+		u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), ".git")
+		return u.String()
+	}
+	return raw
+}

@@ -22,3 +22,10 @@ type WarmWorkspaceLease struct {
 	Generation uint64            `json:"generation"`
 	Slots      map[string]string `json:"slots"` // repository ID to slot ID
 }
+
+// WarmWorkspaceRef records an exact checkout for a returned workspace.
+type WarmWorkspaceRef struct {
+	RepositoryID string `json:"repositoryId"`
+	Branch       string `json:"branch,omitempty"`
+	Commit       string `json:"commit"`
+}

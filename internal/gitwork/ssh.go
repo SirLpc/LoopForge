@@ -366,6 +366,9 @@ func sshCommandEnvironment(ctx context.Context, args []string) (map[string]strin
 	if len(args) >= 2 && args[0] == "-C" {
 		args = args[2:]
 	}
+	if len(args) >= 2 && args[0] == "lfs" && args[1] == "fetch" {
+		args = args[1:]
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "clone", "fetch", "pull", "push", "ls-remote":

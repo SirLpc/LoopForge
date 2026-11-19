@@ -69,6 +69,17 @@ func openWarmWorkspacePool(configPath, workspaceRoot, statePath string) (*warmWo
 		_ = pool.close()
 		return nil, err
 	}
+	cacheRoot := pool.gitCacheRoot()
+	if warmWorkspacePathsOverlap(cacheRoot, workspaceRoot) {
+		pool.close()
+		return nil, errors.New("warm Git cache overlaps the runner workspace root")
+	}
+	cacheDir, err := openWarmWorkspaceDir(cacheRoot, true)
+	if err != nil {
+		pool.close()
+		return nil, err
+	}
+	cacheDir.Close()
 	return pool, nil
 }
 

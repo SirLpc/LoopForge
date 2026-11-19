@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -63,7 +62,7 @@ func VerifyGitPreparation(ctx context.Context, workspace string, repositories []
 			return fmt.Errorf("repository %s: checkout escapes the workspace", r.Name)
 		}
 		origin, err := gitwork.C(ctx, dir, "config", "--local", "--get", "remote.origin.url")
-		if err != nil || domain.URLHasCredentials(origin) || canonicalGitRemote(origin) != canonicalGitRemote(r.CloneURL) {
+		if err != nil || domain.URLHasCredentials(origin) || gitwork.CanonicalRemote(origin) != gitwork.CanonicalRemote(r.CloneURL) {
 			return fmt.Errorf("repository %s: origin differs from the frozen clone URL", r.Name)
 		}
 		branch := r.WorkBranch
@@ -100,16 +99,4 @@ func VerifyGitPreparation(ctx context.Context, workspace string, repositories []
 		}
 	}
 	return nil
-}
-
-func canonicalGitRemote(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if u, err := url.Parse(raw); err == nil && u.Scheme == "https" {
-		if host, err := gitwork.HTTPSHostScope(u.Host); err == nil {
-			u.Host = host
-		}
-		u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), ".git")
-		return u.String()
-	}
-	return raw
 }

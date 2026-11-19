@@ -5,6 +5,7 @@ import (
 	"agentflow/internal/procwatch"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -381,8 +382,9 @@ func isDockerCwdUnsafe(out string, err error) bool {
 }
 
 type dockerWorkspaceMounts struct {
-	source      string
-	legacyMasks bool
+	source          string
+	legacyMasks     bool
+	readOnlyObjects map[string]string
 }
 
 func inspectDockerWorkspaceMounts(ctx context.Context, name string) (*dockerWorkspaceMounts, error) {
@@ -395,12 +397,16 @@ func inspectDockerWorkspaceMounts(ctx context.Context, name string) (*dockerWork
 	}
 	var mounts []struct {
 		Destination, Source string
+		RW                  bool
 	}
 	if err := json.Unmarshal(out, &mounts); err != nil {
 		return nil, fmt.Errorf("decode Docker mounts for %s: %w", name, err)
 	}
-	workspace := &dockerWorkspaceMounts{}
+	workspace := &dockerWorkspaceMounts{readOnlyObjects: make(map[string]string)}
 	for _, mount := range mounts {
+		if !mount.RW {
+			workspace.readOnlyObjects[mount.Destination] = mount.Source
+		}
 		switch mount.Destination {
 		case "/workspace":
 			workspace.source = mount.Source
@@ -689,6 +695,11 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		if !dockerBindMatchesWorkspace(mounts.source, workspace) {
 			return fmt.Errorf("docker sandbox %s is bound to %s, not %s", name, mounts.source, workspace)
 		}
+		for _, objects := range s.requirements.GitObjectDirs {
+			if !dockerBindMatchesWorkspace(mounts.readOnlyObjects[objects], objects) {
+				recreate = true
+			}
+		}
 		if !recreate && !mounts.legacyMasks {
 			if err := exec.CommandContext(ctx, "docker", "start", name).Run(); err == nil {
 				if err := waitDockerWorkspaceReady(ctx, name); err == nil {
@@ -739,6 +750,11 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		}
 		args = append(args, guards...)
 	}
+	objectArgs, err := dockerGitObjectMounts(s.requirements)
+	if err != nil {
+		return err
+	}
+	args = append(args, objectArgs...)
 	stateArgs, err := dockerAgentStateMountRequirements(s.requirements)
 	if err != nil {
 		return err
@@ -942,4 +958,22 @@ func isolateLocalDriver(profile domain.SandboxProfile, dockerfile domain.Dockerf
 		dockerfile = domain.DockerfileDefinition{ID: "generic-backend", Name: "Isolated local sandbox", Content: IsolatedDockerfile}
 	}
 	return profile, dockerfile
+}
+
+func dockerGitObjectMounts(requirements SandboxRequirements) ([]string, error) {
+	var args []string
+	for _, dir := range requirements.GitObjectDirs {
+		// Docker parses --mount as CSV, including bind paths containing commas.
+		var mount strings.Builder
+		writer := csv.NewWriter(&mount)
+		if err := writer.Write([]string{"type=bind", "src=" + dir, "dst=" + dir, "readonly"}); err != nil {
+			return nil, err
+		}
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			return nil, err
+		}
+		args = append(args, "--mount", strings.TrimSuffix(mount.String(), "\n"))
+	}
+	return args, nil
 }

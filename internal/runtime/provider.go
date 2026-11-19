@@ -10,6 +10,9 @@ import (
 // SandboxRequirements describes the host state and runtime features a provider
 // needs before a Run sandbox is created.
 type SandboxRequirements struct {
+	GitCacheRoot string `json:",omitempty"`
+	// GitObjectDirs come exclusively from the runner-local lease journal.
+	GitObjectDirs []string `json:",omitempty"`
 	// ConversationRoot is the private, persistent native CLI state directory.
 	ConversationRoot string
 	CLIStates        []CLIStateRequirement
