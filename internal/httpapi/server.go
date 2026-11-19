@@ -118,6 +118,7 @@ func NewWithNotificationsAndBackground(ctx context.Context, s *repo.Store, e *en
 	router := newWithNotifications(s, e, syncSvc, basicUser, basicPass, notifications, bg, func(h *assistantHandlers, runs *runsHandlers) {
 		h.startSessionJanitor(ctx)
 		h.startAttachmentSweeper(ctx)
+		h.startWarmGenerationRecovery(ctx)
 	})
 	return router, bg
 }

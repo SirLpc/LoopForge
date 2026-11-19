@@ -103,7 +103,7 @@ func (t *assistantWorkspaceTurn) usableLocked() error {
 	return t.renewError
 }
 
-func (t *assistantWorkspaceTurn) lease(ctx context.Context, runID string) (context.Context, error) {
+func (t *assistantWorkspaceTurn) hold(ctx context.Context, runID string) (context.Context, error) {
 	t.mu.Lock()
 	if err := t.usableLocked(); err != nil {
 		t.mu.Unlock()
@@ -130,6 +130,14 @@ func (t *assistantWorkspaceTurn) lease(ctx context.Context, runID string) (conte
 	}
 	ctx = engine.WithConversationWorkspaceToken(ctx, t.token, runID)
 	t.mu.Unlock()
+	return ctx, nil
+}
+
+func (t *assistantWorkspaceTurn) lease(ctx context.Context, runID string) (context.Context, error) {
+	ctx, err := t.hold(ctx, runID)
+	if err != nil {
+		return ctx, err
+	}
 	// Checkout can be slow. Serialize its first preparation without blocking
 	// renewal of the lease that protects it.
 	t.preparation.Lock()

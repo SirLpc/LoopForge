@@ -326,3 +326,39 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 	req.WarmWorkspaceLease = &canonical
 	return nil
 }
+
+// joinConversationDemand executes inside the transaction that parks a turn.
+// A turn joining an IDE restore shares capacity but cannot cancel its demand.
+func (r *RunnersRepo) joinConversationDemand(tx *gorm.DB, d domain.WarmWorkspaceDemand) (uint64, bool, error) {
+	var owner runRow
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Take(&owner, "id = ?", d.OwnerRunID).Error; err != nil {
+		return 0, false, err
+	}
+	scoped := *r
+	base := *r.deps
+	base.DB = tx
+	scoped.deps = &base
+	l, state, found, err := scoped.WarmWorkspaceAllocation(d.OwnerRunID)
+	if err != nil {
+		return 0, false, err
+	}
+	if err = scoped.EnqueueWarmWorkspace(d, time.Now()); err != nil {
+		return 0, false, err
+	}
+	if !found {
+		l, _, _, err = scoped.WarmWorkspaceAllocation(d.OwnerRunID)
+		return l.Epoch, true, err
+	}
+	if state == domain.WarmWorkspaceReleased || state == domain.WarmWorkspaceCanceled {
+		if err = scoped.RequeueWarmWorkspace(l, time.Now()); err != nil {
+			return 0, false, err
+		}
+		return l.Epoch + 1, true, nil
+	}
+	return l.Epoch, false, nil
+}
+
+func (r *RunnersRepo) lockReadyWarmEpoch(tx *gorm.DB, id string, epoch uint64) error {
+	var row warmWorkspaceRow
+	return tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("owner_run_id").Take(&row, "owner_run_id = ? AND epoch = ? AND state = ?", id, epoch, domain.WarmWorkspaceReady).Error
+}

@@ -64,6 +64,14 @@ func (h *assistantHandlers) claimDirectSharedGeneration(ctx context.Context, req
 		defer assistantDirectGenerations.Delete(g.ID)
 		close(stop)
 		<-done
+		if dest, ok := ctx.Value(warmGenerationHandoffKey{}).(**warmConversationHandoff); ok && *dest != nil {
+			g.MessageCount = len(req.Messages)
+			if err := h.parkWarmGeneration(g, req, *dest, diagnostics.snapshot(g)); err == nil {
+				return
+			} else {
+				g.Error = err.Error()
+			}
+		}
 		g.Status = "failed"
 		if completed {
 			g.Status = "completed"

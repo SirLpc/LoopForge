@@ -136,6 +136,19 @@ func (h *agentToolGateway) callMainBotWorkspace(ctx context.Context, s *AgentToo
 			}
 		}
 	}()
+	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		if s.workspaceTurn != nil {
+			held, err := s.workspaceTurn.hold(ctx, run.ID)
+			if err != nil {
+				return "", err
+			}
+			ctx = held
+		}
+		ctx = engine.WithWorkspaceRestoreActor(ctx, s.UserID)
+		if err := h.engine.AuthorizeConversationWarmWorkspace(ctx, run, s.UserID); err != nil {
+			return "", err
+		}
+	}
 	ctx, restoredArtifacts, release, err := h.mainBotWorkspaceLease(ctx, s, runID)
 	if err != nil {
 		return "", err

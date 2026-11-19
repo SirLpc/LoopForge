@@ -144,6 +144,18 @@ func serveAssistantGenerationStream(c *gin.Context, persisted domain.AssistantGe
 	for {
 		changed := live.signal()
 		g := live.read()
+		// Parking ends the local CLI phase while the same generation stays
+		// running. Follow its durable progress and its next owner on this SSE.
+		if owner, _ := assistantLiveGenerations.Load(g.ID); reload != nil && g.Status == "running" && owner != live {
+			if next, ok := reload(); ok && next.ID == g.ID {
+				if next.Status == "running" {
+					streamPersistedAssistantGeneration(c, next, reload)
+				} else {
+					writeAssistantSSE(c, next)
+				}
+			}
+			return
+		}
 		if first || (len(g.Events) > 0 && cursor < g.Events[0].Sequence-1) {
 			if g.Stream != nil {
 				cursor = g.Stream.Sequence

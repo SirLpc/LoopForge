@@ -79,6 +79,11 @@ func (r *AssistantRepo) AssistantDiagnostics(userID int64, sessionID, generation
 		return domain.AssistantDiagnostics{}, false
 	}
 	if report.Status == "running" && !row.UpdatedAt.IsZero() && time.Since(row.UpdatedAt) > 45*time.Second {
+		var parked int64
+		if err := r.DB.Model(&assistantGenerationRow{}).Where("user_id = ? AND session_id = ? AND generation_id = ? AND status = ? AND warm_wait_run_id <> ''", userID, sessionID, generationID, "running").Count(&parked).Error; err == nil && parked > 0 {
+			domain.AnalyzeAssistantDiagnostics(&report)
+			return report, true
+		}
 		now := time.Now().UTC()
 		report.Status = "interrupted"
 		if report.LastCheckpointAt == nil {

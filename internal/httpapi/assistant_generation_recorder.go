@@ -26,6 +26,17 @@ type assistantGenerationRecorder struct {
 // turn's final state has been checkpointed.
 func newAssistantGenerationRecorder(g domain.AssistantGeneration, cancel ...context.CancelFunc) *assistantGenerationRecorder {
 	r := &assistantGenerationRecorder{g: g, live: &assistantLiveGeneration{changed: make(chan struct{})}, diagnostics: newAssistantDiagnosticsCollector(g)}
+	if snapshot := g.Stream; snapshot != nil {
+		r.sequence = snapshot.Sequence
+		r.projection.answer = snapshot.Answer
+		r.projection.draft = snapshot.DraftJSON
+		for _, ev := range snapshot.Activity {
+			r.projection.activity.add(ev)
+		}
+		for _, ev := range g.Events {
+			r.eventBytes += len(ev.Data)
+		}
+	}
 	r.live.read = r.snapshot
 	r.live.diagnostics = func() domain.AssistantDiagnostics { return r.diagnostics.snapshot(r.snapshot()) }
 	if len(cancel) > 0 {
@@ -46,7 +57,10 @@ func newAssistantGenerationRecorder(g domain.AssistantGeneration, cancel ...cont
 	return r
 }
 
-func (r *assistantGenerationRecorder) close() { assistantLiveGenerations.Delete(r.g.ID) }
+func (r *assistantGenerationRecorder) close() {
+	assistantLiveGenerations.CompareAndDelete(r.g.ID, r.live)
+	r.live.publish()
+}
 
 // snapshotLocked copies the generation with its current stream projection.
 func (r *assistantGenerationRecorder) snapshotLocked() domain.AssistantGeneration {

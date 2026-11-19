@@ -166,7 +166,13 @@ func (e *Engine) cleanupWarmWorkspace(run domain.Run, now time.Time) {
 	if sharesWorkspace(run) || !e.conversationWorkspaceIdle(run) {
 		return
 	}
-	if run.IsWorkspace() {
+	state, err := e.WarmWorkspaceStatus(run.ID)
+	if err != nil {
+		return
+	}
+	// Stop may have cancelled a reservation already placed on disk. Finish
+	// that exact return immediately, including when nobody else is waiting.
+	if run.IsWorkspace() && state != domain.WarmWorkspaceReleasing {
 		meta, ok := e.repo.WorkspaceCheckpoint(run.ID)
 		last := run.UpdatedAt
 		if meta.LastUsedAt.After(last) {
@@ -191,6 +197,8 @@ func (e *Engine) cleanupWarmWorkspace(run domain.Run, now time.Time) {
 		}
 	}
 }
+
+var errWarmAccessUnavailable = errors.New("暂时无法连接执行机器验证仓库权限")
 
 type workspaceRestoreActorKey struct{}
 
@@ -222,8 +230,15 @@ func (e *Engine) CheckWorkspaceRestoreAccess(ctx context.Context, run domain.Run
 	}
 	resp, err := e.requestWorkspaceCheckpoint(ctx, owner, domain.RunnerWorkspaceRequest{Operation: domain.RunnerWorkspaceOperationWarmVerifyAccess, RunID: owner.ID, WarmWorkspaceLease: &l, WarmWorkspaceActorID: actor})
 	if err != nil {
-		return err
+		if errors.Is(err, ErrWorkspaceControlConfiguration) {
+			return err
+		}
+		return errors.Join(errWarmAccessUnavailable, err)
 	}
+	if resp.Status == 429 || resp.Status == 503 || resp.Code == domain.WorkspaceErrorBusy {
+		return errWarmAccessUnavailable
+	}
+
 	var result struct{ Phase string }
 	if resp.Error != "" || resp.Status >= 400 || json.Unmarshal(resp.Payload, &result) != nil || result.Phase != "authorized" {
 		return errors.New("current actor cannot verify access to the workspace repositories")

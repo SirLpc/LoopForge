@@ -18,7 +18,7 @@ import (
 // earlier workspace of this conversation on the same execution machine). Empty
 // workspaces start empty so the agent clones, branches, commits and pushes with
 // its own git using the requester's Git credentials.
-const workspaceOpenSchema = `{"type":"object","properties":{"sandboxProfileId":{"type":"string","maxLength":128,"description":"运行环境（沙箱配置）id；用于新开或切回本对话在该环境自己的工作区，不填沿用当前工作区的环境（没有工作区时用会话设置或 generic-docker）。传入 workspaceRunId 接入已有工作区/SOP 时沿用原运行冻结的沙箱环境，不要传不同的 sandboxProfileId"},"workspaceRunId":{"type":"string","maxLength":128,"description":"可选：要直接接入的同项目 SOP 运行 id（或本对话之前开过的工作区 id）。要求与当前对话在同一执行机器上：会直接绑定并操作该原工作区现场（包括未推送改动与中间产物，改完后也可回 SOP 从后续节点重跑或继续；已回收工作区会自动恢复快照；传子 SOP 时自动定位到父工作区）。日常继续当前工作区或只切换对话自身环境时不要传"}},"additionalProperties":false}`
+const workspaceOpenSchema = `{"type":"object","properties":{"repositoryId":{"type":"string","maxLength":128,"description":"预热项目的登记仓库 ID；空白工作区省略。不能和 workspaceRunId 同用。"},"sandboxProfileId":{"type":"string","maxLength":128,"description":"运行环境（沙箱配置）id；用于新开或切回本对话在该环境自己的工作区，不填沿用当前工作区的环境（没有工作区时用会话设置或 generic-docker）。传入 workspaceRunId 接入已有工作区/SOP 时沿用原运行冻结的沙箱环境，不要传不同的 sandboxProfileId"},"workspaceRunId":{"type":"string","maxLength":128,"description":"可选：要直接接入的同项目 SOP 运行 id（或本对话之前开过的工作区 id）。要求与当前对话在同一执行机器上：会直接绑定并操作该原工作区现场（包括未推送改动与中间产物，改完后也可回 SOP 从后续节点重跑或继续；已回收工作区会自动恢复快照；传子 SOP 时自动定位到父工作区）。日常继续当前工作区或只切换对话自身环境时不要传"}},"additionalProperties":false}`
 
 func workspaceOpenDescriptor() agentToolDescriptor {
 	return agentToolDescriptor{
@@ -53,7 +53,11 @@ func (h *agentToolGateway) workspaceOpenDescriptorFor(s *AgentToolSession) agent
 	if s.ProjectID == "" {
 		b.WriteString("\n\n个人对话可直接打开可写工作区，使用共享运行环境。workspaceRunId 只可切回本对话开过的工作区。")
 	} else if repos := projectRepositoryHints(h.repo.Repositories(), s.ProjectID); repos != "" {
-		b.WriteString("\n\n项目登记的仓库（供 git clone 参考，不会自动检出）：" + repos)
+		if p, ok := h.repo.Project(s.ProjectID); ok && p.WorkspaceMode == domain.WorkspaceModeWarmPool {
+			fmt.Fprintf(&b, "\n\n需要访问登记仓库时传 repositoryId，默认仓库为 %s；仅制作产物时可省略。%s", p.DefaultRepositoryID, repos)
+		} else {
+			b.WriteString("\n\n项目登记的仓库（供 git clone 参考）：" + repos)
+		}
 	}
 	d.Description = b.String()
 	return d
@@ -65,7 +69,7 @@ func projectRepositoryHints(all []domain.Repository, projectID string) string {
 		if r.ProjectID != projectID {
 			continue
 		}
-		fmt.Fprintf(&b, "\n- %s", r.Name)
+		fmt.Fprintf(&b, "\n- %s（%s）", r.Name, r.ID)
 		if clone := strings.TrimSpace(r.CloneURL); clone != "" {
 			fmt.Fprintf(&b, "：%s", clone)
 		} else if web := strings.TrimSpace(r.WebURL); web != "" {
@@ -79,6 +83,7 @@ func projectRepositoryHints(all []domain.Repository, projectID string) string {
 }
 
 type workspaceOpenChoice struct {
+	RepositoryID   string
 	SandboxID      string
 	WorkspaceRunID string
 }
@@ -86,8 +91,8 @@ type workspaceOpenChoice struct {
 func parseWorkspaceOpenChoice(args map[string]any) (workspaceOpenChoice, error) {
 	choice := workspaceOpenChoice{}
 	for key := range args {
-		if key != "sandboxProfileId" && key != "workspaceRunId" {
-			return choice, fmt.Errorf("workbench_workspace_open 只接收 sandboxProfileId 和可选的 workspaceRunId：普通工作区不再预先检出仓库或分支，进入工作区后自己 git clone / checkout（收到多余参数 %s）", key)
+		if key != "sandboxProfileId" && key != "workspaceRunId" && key != "repositoryId" {
+			return choice, fmt.Errorf("workbench_workspace_open 只接收 sandboxProfileId、workspaceRunId 或 repositoryId（收到多余参数 %s）", key)
 		}
 	}
 	readString := func(key string) (string, error) {
@@ -108,6 +113,12 @@ func parseWorkspaceOpenChoice(args map[string]any) (workspaceOpenChoice, error) 
 	if choice.WorkspaceRunID, err = readString("workspaceRunId"); err != nil {
 		return choice, err
 	}
+	if choice.RepositoryID, err = readString("repositoryId"); err != nil {
+		return choice, err
+	}
+	if choice.RepositoryID != "" && choice.WorkspaceRunID != "" {
+		return choice, errors.New("repositoryId 与 workspaceRunId 不能同时使用")
+	}
 	return choice, nil
 }
 
@@ -120,6 +131,9 @@ func (h *agentToolGateway) openConversationWorkspace(ctx context.Context, s *Age
 	if err != nil {
 		return "", err
 	}
+	if choice.RepositoryID != "" {
+		return h.openWarmRepository(s, choice)
+	}
 	if s.RunID != "" {
 		if choice.WorkspaceRunID != "" && choice.WorkspaceRunID != s.RunID {
 			return "", fmt.Errorf("任务对话固定使用自身工作区，不能切换到其他运行 %s", choice.WorkspaceRunID)
@@ -128,6 +142,9 @@ func (h *agentToolGateway) openConversationWorkspace(ctx context.Context, s *Age
 	}
 	if !s.canOpenConversationWorkspace() {
 		return "", errAgentToolForbidden
+	}
+	if raw, handled, err := h.reopenWarmOwner(s, choice); handled {
+		return raw, err
 	}
 	bound, err := h.bindConversationWorkspace(ctx, s, choice)
 	if err != nil {
@@ -445,7 +462,7 @@ func (h *agentToolGateway) ownConversationWorkspace(conv domain.AssistantSession
 	own := ownWorkspaceRunIDs(conv)
 	for i := len(own) - 1; i >= 0; i-- {
 		run, ok := h.repo.RunState(own[i])
-		if ok && run.WorkflowSnapshot.SandboxProfileID == sandboxID && conversationMayBind(conv, run, projectID) {
+		if ok && run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool && run.WorkflowSnapshot.SandboxProfileID == sandboxID && conversationMayBind(conv, run, projectID) {
 			return run, true
 		}
 	}

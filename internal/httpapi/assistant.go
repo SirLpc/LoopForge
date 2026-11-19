@@ -86,15 +86,16 @@ type assistantHandlers struct {
 	runnerControls        *runnerControlHub
 	conversationProcesses runtime.ConversationProcessPool
 	*deps
-	notifications *notificationHandlers
-	identities    *botIdentityHandlers
-	active        sync.Map
-	sourceRoot    string
-	api           http.Handler
-	generate      func(context.Context, string, domain.User) (string, error)
-	review        func(context.Context, assistantApprovalInput, domain.User, string) (assistantApprovalReview, error)
-	reviewCatalog func(string) assistantModelCatalog
-	titleSummary  func(context.Context, domain.User, string) (string, error)
+	notifications  *notificationHandlers
+	identities     *botIdentityHandlers
+	active         sync.Map
+	warmAdmissions sync.Map
+	sourceRoot     string
+	api            http.Handler
+	generate       func(context.Context, string, domain.User) (string, error)
+	review         func(context.Context, assistantApprovalInput, domain.User, string) (assistantApprovalReview, error)
+	reviewCatalog  func(string) assistantModelCatalog
+	titleSummary   func(context.Context, domain.User, string) (string, error)
 	// attachmentSweepWake nudges the background sweep after a deletion
 	// queues files; nil when no sweeper runs (tests sweep directly).
 	attachmentSweepWake chan struct{}
@@ -278,6 +279,8 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 	defer cancelModel()
 	chatCompleted := false
 	if shared && sink == nil {
+		var parked *warmConversationHandoff
+		ctx = context.WithValue(ctx, warmGenerationHandoffKey{}, &parked)
 		job, diagnostics, finish, err := h.claimDirectSharedGeneration(ctx, req, ownerID, user, cancelModel)
 		if err != nil {
 			c.JSON(409, gin.H{"error": err.Error()})
@@ -357,7 +360,10 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		defer sess.Close()
 		defer files.Cleanup()
 		if req.RunID == "" && h.engine != nil {
-			sess.workspaceTurn = newAssistantWorkspaceTurn(h.engine, cancelModel)
+			sess.workspaceTurn, _ = modelCtx.Value(warmAdmittedTurnKey{}).(*assistantWorkspaceTurn)
+			if sess.workspaceTurn == nil {
+				sess.workspaceTurn = newAssistantWorkspaceTurn(h.engine, cancelModel)
+			}
 			if scope := assistantControlScopeFrom(modelCtx); scope.GenerationID != "" {
 				generation := domain.AssistantGeneration{ID: scope.GenerationID, SessionID: req.SessionID, UserID: ownerID}
 				sess.workspaceTurn.recordLeases(func(runID, token string) {
@@ -479,6 +485,13 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 				return
 			}
 			defer nativeSession.Close()
+			if journal, _ := ctx.Value(warmNativeSessionKey{}).(string); journal != "" {
+				nativeSession.checkpoint.SessionID = journal
+				nativeSession.checkpoint.Unstarted = false
+				nativeSession.checkpoint.Ready = false
+				nativeSession.checkpoint.MessageHashes = assistantMessageHashes(req.Messages)
+				nativeSession.resume = true
+			}
 			resume = nativeSession.resume
 			cliSessionID = nativeSession.checkpoint.SessionID
 			if resume {
@@ -610,6 +623,10 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 				toolSession.mu.Unlock()
 				if action != nil {
 					if err := action(ctx); err != nil {
+						var parked *warmConversationHandoff
+						if errors.As(err, &parked) {
+							parked.nativeSessionID = cliSessionID
+						}
 						return "", err
 					}
 				}
@@ -649,9 +666,34 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			fail(504, "生成已取消或超时，请重试")
 			return
 		}
-		raw, err := generate(modelCtx, turn, user)
+		var raw string
+		var err error
+		if pending, gateErr := h.boundWarmHandoff(modelCtx, toolSession); gateErr != nil {
+			err = gateErr
+		} else if pending != nil {
+			err = pending
+		} else {
+			raw, err = generate(modelCtx, turn, user)
+		}
 		if err == nil && modelCtx.Err() != nil {
 			err = modelCtx.Err()
+		}
+		var parked *warmConversationHandoff
+		if errors.As(err, &parked) {
+			if dest, ok := ctx.Value(warmGenerationHandoffKey{}).(**warmConversationHandoff); ok {
+				*dest = parked
+				if sink == nil {
+					update := gin.H{"id": assistantControlScopeFrom(modelCtx).GenerationID, "sessionId": req.SessionID, "status": "running"}
+					if streaming {
+						emit("workspace.pool_waiting", update)
+					} else {
+						c.JSON(202, update)
+					}
+				}
+				return
+			}
+			fail(409, "请通过后台生成打开预热工作区")
+			return
 		}
 		if errors.Is(err, errAssistantCredentialRejected) {
 			failure := assistantDiagnosticsFrom(modelCtx).fail(ctx, err, user)

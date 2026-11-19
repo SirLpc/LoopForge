@@ -133,12 +133,15 @@ func (e *Engine) startWorkflowDefinition(wf domain.WorkflowDefinition, input str
 		executionContext.ExecutionRunnerID = e.repo.DefaultRunner(executionContext.ResponsibleUserID)
 		executionContext.WorkspaceRunID = ""
 	}
-	if !workspace && executionContext.ParentRunID == "" {
+	if (!workspace || len(repositories) > 0) && executionContext.ParentRunID == "" {
 		if err := e.freezeWarmWorkspace(&executionContext, repositories, profile); err != nil {
 			return domain.Run{}, err
 		}
 	}
 
+	if workspace && len(repositories) > 0 && executionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
+		return domain.Run{}, fmt.Errorf("当前项目未启用预热工作区")
+	}
 	if executionContext.ExecutionRunnerID == "" && !executionContext.ExecutionPinned {
 		if runner, ok := e.cloudPoolRunner(executionContext.ProjectID); ok {
 			executionContext.ExecutionRunnerID = runner.ID

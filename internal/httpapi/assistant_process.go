@@ -3,6 +3,7 @@ package httpapi
 import (
 	"agentflow/internal/config"
 	"agentflow/internal/domain"
+	"agentflow/internal/engine"
 	"agentflow/internal/runtime"
 	"bufio"
 	"context"
@@ -82,6 +83,19 @@ func (h *assistantHandlers) conversationExecutor(s *AgentToolSession, root strin
 			}
 			if !run.IsWorkspace() && !sopStopped(run) {
 				return "", fmt.Errorf("SOP 正在执行，请先暂停后接管工作区")
+			}
+			if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+				if s.workspaceTurn != nil {
+					held, err := s.workspaceTurn.hold(ctx, run.ID)
+					if err != nil {
+						return "", err
+					}
+					ctx = held
+				}
+				ctx = engine.WithWorkspaceRestoreActor(ctx, s.UserID)
+				if err := h.engine.AuthorizeConversationWarmWorkspace(ctx, run, s.UserID); err != nil {
+					return "", err
+				}
 			}
 			var err error
 			if s.workspaceTurn != nil {

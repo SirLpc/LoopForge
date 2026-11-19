@@ -181,7 +181,7 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 	}
 	runner, ok := e.repo.Runner(runnerID)
 	if !alreadyQueued && (!ok || !supportsWarmDemand(runner, owner.ExecutionContext.ProjectID, repos)) {
-		return empty, errors.New("执行机器缺少项目所需的预热工作区")
+		return empty, errors.New("执行机器缺少项目所需的预热工作区登记")
 	}
 	ids := make([]string, 0, len(repos))
 	for _, r := range repos {
@@ -326,7 +326,7 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	}
 	r, ok := e.repo.Runner(ec.ExecutionRunnerID)
 	if !ok || !supportsWarmDemand(r, ec.ProjectID, repositories) {
-		return errors.New("执行机器缺少项目所需的预热工作区")
+		return errors.New("请在当前执行机器登记项目仓库的预热工作区，或在已登记的机器新开对话")
 	}
 	return nil
 }

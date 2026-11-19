@@ -283,6 +283,9 @@ func (h *assistantHandlers) executeGeneration(parent context.Context, req assist
 	defer cancel()
 	rec := newAssistantGenerationRecorder(g, cancel)
 	defer rec.close()
+	if _, resumed := ctx.Value(warmNativeSessionKey{}).(string); resumed {
+		h.restoreWarmDiagnostics(rec, g)
+	}
 	ctx = context.WithValue(ctx, assistantDiagnosticsKey{}, rec.diagnostics)
 	diagUser, _ := h.repo.User(g.UserID)
 	if actor != nil && actor.ID != 0 && actor.ID != g.UserID {
@@ -354,6 +357,8 @@ func (h *assistantHandlers) executeGeneration(parent context.Context, req assist
 			}
 		}
 	}()
+	var parked *warmConversationHandoff
+	ctx = context.WithValue(ctx, warmGenerationHandoffKey{}, &parked)
 	writer := &generationHTTPWriter{header: make(http.Header), status: 200}
 	func() {
 		defer func() {
@@ -363,6 +368,14 @@ func (h *assistantHandlers) executeGeneration(parent context.Context, req assist
 				sink("error", gin.H{"error": failure.Message, "failure": failure})
 			}
 		}()
+		if g.CancelRequested {
+			cancel()
+			return
+		}
+		if err, ok := ctx.Value(warmContinuationErrorKey{}).(error); ok {
+			sink("error", gin.H{"error": err.Error()})
+			return
+		}
 		body, _ := json.Marshal(req)
 		chatCtx := context.WithValue(ctx, assistantGenerationSinkKey{}, sink)
 		chatCtx = context.WithValue(chatCtx, assistantControlScopeKey{}, assistantControlScope{RunID: req.RunID, SessionID: g.SessionID, GenerationID: g.ID, MessageIndex: len(req.Messages) - 1})
@@ -390,6 +403,16 @@ func (h *assistantHandlers) executeGeneration(parent context.Context, req assist
 		}
 	}
 	g = rec.snapshot()
+	if parked != nil && ctx.Err() == nil {
+		if err := h.parkWarmGeneration(g, req, parked, rec.diagnostics.snapshot(g)); err == nil {
+			return
+		} else {
+			g.Error = err.Error()
+			if latest, ok := h.repo.PeekAssistantGeneration(g.UserID, g.SessionID); ok && latest.ID == g.ID && latest.CancelRequested {
+				cancel()
+			}
+		}
+	}
 	if workspaceWarning != "" {
 		g.WorkspaceWarning = workspaceWarning
 	}

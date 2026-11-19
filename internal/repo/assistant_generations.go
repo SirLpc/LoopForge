@@ -22,7 +22,8 @@ type assistantGenerationRow struct {
 	// FinishedAt is set when a turn ends through a checkpoint and cleared when
 	// the next turn starts. Rows that ended before the column existed keep
 	// NULL, which is how read tracking leaves older history unmarked.
-	FinishedAt *time.Time
+	FinishedAt    *time.Time
+	WarmWaitRunID string `gorm:"size:64;index"`
 	// WorkspaceRunID and WorkspaceLease name the foreground workspace lease
 	// this turn holds. Only that exact token is released when the turn is
 	// reaped; a lease another turn took in the meantime never matches.
@@ -33,6 +34,7 @@ type assistantGenerationRow struct {
 // Keep private control state alongside the public generation snapshot.
 type assistantGenerationPayload struct {
 	domain.AssistantGeneration
+	WarmWait        *AssistantWarmWait             `json:"warmWait,omitempty"`
 	NativeApprovals []assistantNativeApprovalState `json:"nativeApprovals,omitempty"`
 	SteeringClosed  bool                           `json:"steeringClosed,omitempty"`
 }
@@ -104,13 +106,13 @@ func (r *AssistantRepo) ReapAssistantGeneration(userID int64, sessionID string) 
 	var lease AssistantGenerationLease
 	// A server that died cannot leave a conversation stuck forever. Never replay
 	// a model turn automatically, because its tools may already have written.
-	if row.Status == "running" && r.heartbeatLate(r.DB, row.UpdatedAt) {
+	if row.Status == "running" && row.WarmWaitRunID == "" && r.heartbeatLate(r.DB, row.UpdatedAt) {
 		g := decodeGeneration(row)
 		g.Status = "interrupted"
 		g.Error = "服务端生成已中断，请检查已执行操作后重试"
 		g.Failure = &domain.AssistantFailure{Code: "EXECUTION_INTERRUPTED", Phase: "server", Message: g.Error, Suggestion: "检查已执行操作后再重试；可下载诊断信息交给管理员排查。"}
 		_ = r.DB.Transaction(func(tx *gorm.DB) error {
-			res := r.lateHeartbeatOnly(tx.Model(&assistantGenerationRow{}).Where("session_id = ? AND generation_id = ? AND status = ? AND updated_at = ?", sessionID, row.GenerationID, "running", row.UpdatedAt)).Updates(map[string]any{"status": g.Status, "payload": mustJSON(g), "updated_at": r.generationClock()})
+			res := r.lateHeartbeatOnly(tx.Model(&assistantGenerationRow{}).Where("session_id = ? AND generation_id = ? AND status = ? AND updated_at = ? AND COALESCE(warm_wait_run_id, '') = ''", sessionID, row.GenerationID, "running", row.UpdatedAt)).Updates(map[string]any{"status": g.Status, "payload": mustJSON(g), "updated_at": r.generationClock()})
 			if res.Error != nil || res.RowsAffected != 1 {
 				return res.Error
 			}
@@ -233,7 +235,7 @@ func (r *AssistantRepo) BeginAssistantGeneration(g domain.AssistantGeneration, p
 				if old.Status == "running" {
 					return fmt.Errorf("此会话正在生成，请等待完成或停止")
 				}
-				if err := tx.Model(&old).Updates(map[string]any{"generation_id": g.ID, "status": "running", "cancel_requested": false, "payload": mustJSON(g), "updated_at": r.generationClock(), "finished_at": nil, "workspace_run_id": "", "workspace_lease": ""}).Error; err != nil {
+				if err := tx.Model(&old).Updates(map[string]any{"generation_id": g.ID, "status": "running", "cancel_requested": false, "payload": mustJSON(g), "updated_at": r.generationClock(), "finished_at": nil, "workspace_run_id": "", "workspace_lease": "", "warm_wait_run_id": ""}).Error; err != nil {
 					return err
 				}
 				return checkpointAssistantDiagnostics(tx, g, nil)
@@ -347,20 +349,25 @@ func (r *AssistantRepo) SteerAssistantGeneration(userID int64, sessionID, id str
 		if payload.SteeringClosed {
 			return errAssistantGenerationEnded
 		}
+		if err := cancelPendingWarmWorkspace(tx, payload); err != nil {
+			return err
+		}
 		payload.Steer = &steer
 		payload.NativeApprovals = nil
 		return tx.Model(&row).Updates(map[string]any{"cancel_requested": true, "payload": mustJSON(payload), "updated_at": r.generationClock()}).Error
 	})
 }
 func (r *AssistantRepo) CancelAssistantGeneration(userID int64, sessionID, id string) error {
-	res := r.DB.Model(&assistantGenerationRow{}).Where("session_id = ? AND user_id = ? AND generation_id = ? AND status = ?", sessionID, userID, id, "running").Update("cancel_requested", true)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected != 1 {
-		return errAssistantGenerationEnded
-	}
-	return nil
+	return r.DB.Transaction(func(tx *gorm.DB) error {
+		row, err := lockRunningAssistantGeneration(tx, userID, sessionID, id)
+		if err != nil {
+			return errAssistantGenerationEnded
+		}
+		if err = cancelPendingWarmWorkspace(tx, generationPayload(row)); err != nil {
+			return err
+		}
+		return tx.Model(&row).UpdateColumn("cancel_requested", true).Error
+	})
 }
 
 // AssistantGenerationState is the latest reply of a conversation as the
@@ -387,15 +394,16 @@ func (r *AssistantRepo) AssistantGenerationStatuses(readerID int64, ids []string
 		return out
 	}
 	var rows []struct {
-		SessionID    string
-		GenerationID string
-		Status       string
-		UpdatedAt    time.Time
-		FinishedAt   *time.Time
-		ReadID       *string
+		SessionID     string
+		GenerationID  string
+		Status        string
+		UpdatedAt     time.Time
+		FinishedAt    *time.Time
+		WarmWaitRunID string
+		ReadID        *string
 	}
 	err := r.DB.Table("assistant_generations AS g").
-		Select("g.session_id, g.generation_id, g.status, g.updated_at, g.finished_at, r.generation_id AS read_id").
+		Select("g.session_id, g.generation_id, g.status, g.updated_at, g.warm_wait_run_id, g.finished_at, r.generation_id AS read_id").
 		Joins("LEFT JOIN assistant_session_reads AS r ON r.session_id = g.session_id AND r.user_id = ?", readerID).
 		Where("g.session_id IN ?", ids).
 		Scan(&rows).Error
@@ -405,7 +413,7 @@ func (r *AssistantRepo) AssistantGenerationStatuses(readerID int64, ids []string
 	now, clockOK := r.heartbeatNow(r.DB)
 	for _, row := range rows {
 		status := row.Status
-		stale := status == "running" && clockOK && now.Sub(row.UpdatedAt) > assistantHeartbeatTimeout
+		stale := row.WarmWaitRunID == "" && status == "running" && clockOK && now.Sub(row.UpdatedAt) > assistantHeartbeatTimeout
 		if stale {
 			status = "interrupted"
 		}

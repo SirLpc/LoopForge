@@ -69,7 +69,15 @@ func (e *Engine) ConversationCloudRunner(projectID string) (string, error) {
 	if !pool.serves(projectID) {
 		return "", nil
 	}
-	for _, runner := range e.repo.Runners() {
+	runners := e.repo.Runners()
+	if p, ok := e.repo.Project(projectID); ok && p.WorkspaceMode == domain.WorkspaceModeWarmPool && p.DefaultRepositoryID != "" {
+		for _, runner := range runners {
+			if poolRunnerEligible(runner, pool.Label) && runner.SupportsConversationCLI() && supportsWarmDemand(runner, projectID, []domain.RepositoryContext{{RepositoryID: p.DefaultRepositoryID}}) {
+				return runner.ID, nil
+			}
+		}
+	}
+	for _, runner := range runners {
 		if poolRunnerEligible(runner, pool.Label) && runner.SupportsConversationCLI() {
 			return runner.ID, nil
 		}

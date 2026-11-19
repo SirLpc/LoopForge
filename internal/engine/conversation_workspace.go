@@ -120,7 +120,11 @@ func (e *Engine) MaterializeConversationWorkspace(ctx context.Context, id string
 		return fmt.Errorf("运行不存在")
 	}
 	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
-		_, err := e.EnsureWarmWorkspace(ctx, run, run.ExecutionContext.ResponsibleUserID)
+		actor := workspaceRestoreActor(ctx)
+		if actor == 0 {
+			actor = run.ExecutionContext.ResponsibleUserID
+		}
+		_, err := e.EnsureWarmWorkspace(ctx, run, actor)
 		return err
 	}
 	if !run.IsWorkspace() || sharesWorkspace(run) || !run.WorkspaceCleanedAt.IsZero() || e.foreignWorkspaceBind(run) {

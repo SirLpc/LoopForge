@@ -97,6 +97,11 @@ func classifyAssistantFailure(ctx context.Context, err error) domain.AssistantFa
 		f.Code, f.Phase, f.Message, f.Suggestion = "EXECUTION_MACHINE_UNAVAILABLE", "setup", "会话绑定的执行机器暂不可用，请等待原机器恢复后重试", "会话已固定在原执行机器上，请确认该 Runner 在线后再重试。"
 		return f
 	}
+	var retained retainedWarmWorkspaceError
+	if errors.As(err, &retained) {
+		f.Code, f.Phase, f.Message, f.Suggestion = "WORKSPACE_RETAINED", "workspace", "原工作区仍在使用，或有尚未交付的改动，已保留原绑定", "请处理未提交或未推送的修改、关闭工作区终端后再切换。"
+		return f
+	}
 	var missing assistantCLIMissingError
 	if errors.As(err, &missing) {
 		f.Code, f.Phase, f.Message, f.Suggestion = "CLI_NOT_INSTALLED", "setup", missing.Error(), "请管理员检查执行器的安装与配置。"
