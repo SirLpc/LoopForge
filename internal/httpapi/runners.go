@@ -842,12 +842,13 @@ func (h *runnersHandlers) runnerTaskClaim(c *gin.Context) {
 	if input.Capacity <= 0 {
 		input.Capacity = 1
 	}
+	warmProtocol := c.GetHeader(domain.WarmWorkspaceProtocolHeader) == domain.WarmWorkspaceProtocolV1
 	claimOrSignal := func() (domain.RunnerTask, bool, error) {
 		if input.Preflight {
-			available, err := h.repo.RunnerTaskAvailable(runner.ID, input.AvailableRuntimes)
+			available, err := h.repo.RunnerTaskAvailable(runner.ID, input.AvailableRuntimes, warmProtocol)
 			return domain.RunnerTask{}, available, err
 		}
-		return h.repo.ClaimRunnerTask(runner.ID, input.AvailableRuntimes, time.Now().UTC(), runnerTaskLeaseTTL)
+		return h.repo.ClaimRunnerTask(runner.ID, input.AvailableRuntimes, time.Now().UTC(), runnerTaskLeaseTTL, warmProtocol)
 	}
 	respond := func(task domain.RunnerTask) {
 		if input.Preflight {

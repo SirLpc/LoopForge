@@ -3,7 +3,11 @@ package runner
 import (
 	"agentflow/internal/gitwork"
 	"agentflow/internal/runtime"
+
 	"encoding/json"
+	"github.com/gorilla/websocket"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,10 +158,22 @@ func TestWarmWorkspaceDockerGitReadAndDelivery(t *testing.T) {
 	}
 	spec := &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}, Dockerfile: &domain.DockerfileDefinition{Content: runtime.IsolatedDockerfile}}
 	req := domain.RunnerWorkspaceRequest{WarmWorkspaceLease: &l, WorkspaceRunID: owner, RunID: owner, WorkspaceLayout: domain.RunnerWorkspaceLayoutShared, Operation: domain.RunnerWorkspaceOperationInfo, Sandbox: spec, Repositories: []domain.RepositoryContext{{WorkspaceDir: "checkout", RepositoryID: "a"}}}
+	spec.Environment = &domain.EnvironmentDefinition{ID: "early-read", InstallScript: "touch /workspace/catalog-install-marker"}
 	got := d.readRunnerWorkspace(t.Context(), req)
+	if _, err := os.Stat(filepath.Join(root, "catalog-install-marker")); !os.IsNotExist(err) || len(d.runSandboxes) != 0 {
+		t.Fatalf("Git view initialized writable sandbox or catalog install: %v", err)
+	}
 	if got.Error != "" || !strings.Contains(string(got.Payload), "only-visible-inside.txt") {
 		t.Fatalf("isolated status: %+v", got)
 	}
+	unprepared := *spec
+	unprepared.Dockerfile = &domain.DockerfileDefinition{Content: "FROM scratch\n# uncached early read fixture " + owner}
+	req.Sandbox = &unprepared
+	missing := d.readRunnerWorkspace(t.Context(), req)
+	if !strings.Contains(missing.Error, "image to be prepared") || len(d.runSandboxes) != 0 {
+		t.Fatalf("missing cached image initialized sandbox: %+v", missing)
+	}
+	req.Sandbox = spec
 	runGitT(t, root, "init", "--bare", "remote.git")
 	runGitT(t, checkout, "remote", "set-url", "origin", "/workspace/remote.git")
 	inv.Repositories[0].CloneURL = "/workspace/remote.git"
@@ -182,5 +198,46 @@ func TestWarmWorkspaceDockerGitReadAndDelivery(t *testing.T) {
 	var result struct{ Checkouts []gitwork.Checkout }
 	if got.Error != "" || json.Unmarshal(got.Payload, &result) != nil || len(result.Checkouts) != 1 {
 		t.Fatalf("isolated checkouts: %+v", got)
+	}
+}
+
+func TestWarmWorkspaceClientAdvertisesClaimsAndControl(t *testing.T) {
+	observed := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed <- r.Header.Get(domain.WarmWorkspaceProtocolHeader)
+		if websocket.IsWebSocketUpgrade(r) {
+			upgrader := websocket.Upgrader{}
+			ws, err := upgrader.Upgrade(w, r, nil)
+			if err == nil {
+				ws.Close()
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	for _, warm := range []bool{false, true} {
+		client := NewClient(server.URL)
+		client.warmProtocol = warm
+		if _, _, err := client.WaitForTask(t.Context(), ClaimRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := client.Claim(t.Context(), ClaimRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		ws, err := client.OpenControl(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws.Close()
+		want := ""
+		if warm {
+			want = domain.WarmWorkspaceProtocolV1
+		}
+		for i := 0; i < 3; i++ {
+			if got := <-observed; got != want {
+				t.Fatalf("capability=%q, want %q", got, want)
+			}
+		}
 	}
 }

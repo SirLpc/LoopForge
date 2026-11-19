@@ -180,7 +180,7 @@ func TestMySQLRunnerTaskCompletionScrubsCredentials(t *testing.T) {
 	if err := s.PutRunnerTask(task); err != nil {
 		t.Fatal(err)
 	}
-	claimed, ok, err := s.ClaimRunnerTask(runnerID, []string{"codex"}, time.Now().UTC(), time.Minute)
+	claimed, ok, err := s.ClaimRunnerTask(runnerID, []string{"codex"}, time.Now().UTC(), time.Minute, false)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}

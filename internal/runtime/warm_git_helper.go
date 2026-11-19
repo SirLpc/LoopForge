@@ -8,19 +8,60 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"agentflow/internal/domain"
 )
 
-type WarmGitAccess struct{ WriteWorkspace, Network bool }
+type warmGitContainer struct {
+	parent, workspace, image, user, network string
+	requirements                            SandboxRequirements
+	writable                                bool
+}
+
+// RunWarmGitOffline inspects a locally prepared frozen image by immutable ID.
+// It cannot build the image, prepare the environment, or start a workflow container.
+func RunWarmGitOffline(ctx context.Context, id, workspace string, requirements SandboxRequirements, dockerfile domain.DockerfileDefinition, input []byte, recoverOutputs bool) ([]byte, error) {
+	if id == "" || len(requirements.GitObjectDirs) == 0 || strings.TrimSpace(dockerfile.Content) == "" {
+		return nil, errors.New("warm Git requires a prepared Docker image and an allocated workspace")
+	}
+	image := isolatedRuntimeImage(dockerfile)
+	if image == "" {
+		image = cachedDockerImageName(dockerfile)
+	}
+	raw, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{json .}}", image).Output()
+	if err != nil {
+		return nil, fmt.Errorf("warm Git view requires the frozen Docker image to be prepared on this runner: %w", err)
+	}
+	var prepared struct {
+		ID     string
+		Config struct{ User string }
+	}
+	if err := json.Unmarshal(raw, &prepared); err != nil || prepared.ID == "" {
+		return nil, errors.New("cannot identify prepared warm Git image")
+	}
+	return (warmGitContainer{parent: dockerContainerName(id), workspace: workspace, image: prepared.ID, user: dockerWorkspaceUser(prepared.Config.User), network: "none", requirements: requirements, writable: recoverOutputs}).run(ctx, input)
+}
+
+// Match the workspace owner's identity when the image defaults to root and
+// Docker drops DAC capabilities. Explicit non-root image users are retained.
+func dockerWorkspaceUser(configured string) string {
+	user, _, _ := strings.Cut(strings.TrimSpace(configured), ":")
+	if os.Geteuid() != 0 && (user == "" || user == "root" || user == "0") {
+		return fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid())
+	}
+	return strings.TrimSpace(configured)
+}
 
 const warmGitExecutable = "/opt/loopforge/warm-git-helper"
 
 // RunWarmGitHelper uses the qualified workspace image in a single-operation
 // container. Killing the container also stops helpers and hooks after a timeout.
 // Inspection is performed before stdin containing delivery credentials is sent.
-func RunWarmGitHelper(ctx context.Context, sandbox Sandbox, input []byte, access WarmGitAccess) (reply []byte, resultErr error) {
+func RunWarmGitHelper(ctx context.Context, sandbox Sandbox, input []byte) (reply []byte, resultErr error) {
 	s, ok := sandbox.(*dockerSandbox)
 	if !ok || len(s.requirements.GitObjectDirs) == 0 {
 		return nil, errors.New("warm Git requires an isolated Docker workspace")
@@ -45,29 +86,29 @@ func RunWarmGitHelper(ctx context.Context, sandbox Sandbox, input []byte, access
 	if err = json.Unmarshal(inspect, &parent); err != nil || parent.Image == "" {
 		return nil, errors.New("cannot identify warm Git sandbox image")
 	}
+	return (warmGitContainer{parent: s.name, workspace: s.workspace, image: parent.Image, user: parent.Config.User, network: parent.HostConfig.NetworkMode, requirements: s.requirements, writable: true}).run(ctx, input)
+}
+
+func (target warmGitContainer) run(ctx context.Context, input []byte) (reply []byte, resultErr error) {
 	helper, err := linuxWorkspaceHelper()
 	if err != nil {
 		return nil, err
 	}
-	name := s.name + "-git-" + rand.Text()
-	network := "none"
-	workspaceMount := s.workspace + ":/workspace:ro"
-	if access.Network {
-		network = parent.HostConfig.NetworkMode
+	name := target.parent + "-git-" + rand.Text()
+	workspaceMount := target.workspace + ":/workspace:ro"
+	if target.writable {
+		workspaceMount = target.workspace + ":/workspace"
 	}
-	if access.WriteWorkspace {
-		workspaceMount = s.workspace + ":/workspace"
+	args := []string{"create", "--name", name, "--label", "io.loopforge.warm-git-parent=" + target.parent, "--pull=never", "--init", "--interactive", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--network", target.network, "-w", "/workspace", "-v", workspaceMount, "-v", helper + ":" + warmGitExecutable + ":ro"}
+	if target.user != "" {
+		args = append(args, "--user", target.user)
 	}
-	args := []string{"create", "--name", name, "--label", "io.loopforge.warm-git-parent=" + s.name, "--pull=never", "--init", "--interactive", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--network", network, "-w", "/workspace", "-v", workspaceMount, "-v", helper + ":" + warmGitExecutable + ":ro"}
-	if parent.Config.User != "" {
-		args = append(args, "--user", parent.Config.User)
-	}
-	binds, err := dockerGitObjectMounts(s.requirements)
+	binds, err := dockerGitObjectMounts(target.requirements)
 	if err != nil {
 		return nil, err
 	}
 	args = append(args, binds...)
-	args = append(args, "--entrypoint", warmGitExecutable, parent.Image, "warm-git-helper")
+	args = append(args, "--entrypoint", warmGitExecutable, target.image, "warm-git-helper")
 	// Even if the CLI loses its create acknowledgement, remove the unique name.
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
@@ -85,10 +126,13 @@ func RunWarmGitHelper(ctx context.Context, sandbox Sandbox, input []byte, access
 	if err = json.Unmarshal(raw, &actual); err != nil {
 		return nil, err
 	}
+	if actual.HostConfig.NetworkMode != target.network {
+		return nil, errors.New("unexpected warm Git network")
+	}
 	if err = actual.validateHost(); err != nil {
 		return nil, err
 	}
-	if err = actual.validateMounts(map[string]string{"/workspace": s.workspace, warmGitExecutable: helper}, s.requirements.GitObjectDirs, "", access.WriteWorkspace); err != nil {
+	if err = actual.validateMounts(map[string]string{"/workspace": target.workspace, warmGitExecutable: helper}, target.requirements.GitObjectDirs, "", target.writable); err != nil {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, "docker", "start", "-ai", name)

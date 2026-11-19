@@ -51,7 +51,7 @@ func TestWarmWorkspaceSOPWaitsBeforeDispatch(t *testing.T) {
 			if dispatchErr != nil {
 				t.Fatal(dispatchErr)
 			}
-			claimed, ok, err := e.repo.ClaimRunnerTask("machine", []string{"terminal"}, now, time.Minute)
+			claimed, ok, err := e.repo.ClaimRunnerTask("machine", []string{"terminal"}, now, time.Minute, true)
 			if err != nil || !ok || claimed.RunID != id || claimed.WarmWorkspaceLease == nil || claimed.WarmWorkspaceLease.Generation != lease.Generation {
 				t.Fatalf("claim %s: %+v %v", id, claimed, err)
 			}
@@ -199,5 +199,39 @@ func TestWarmWorkspaceFreezeRequiresReadableProjectMode(t *testing.T) {
 	ec := domain.TelemetryContext{ProjectID: "missing"}
 	if err := e.freezeWarmWorkspace(&ec, []domain.RepositoryContext{{RepositoryID: "a"}}, domain.SandboxProfile{}); err == nil {
 		t.Fatal("missing project silently used checkout")
+	}
+}
+
+func TestWarmWorkspaceSchedulerDurableCancelBeforeEnqueue(t *testing.T) {
+	e, s := cvEEngine(t)
+	e.instanceID = "test"
+	e.executeRuns = true
+	e.leaseTTL = time.Hour
+	r := cvERunnerRun("durably-cancelled", "machine")
+	r.Status = "running"
+	r.ExecutionContext.WorkspaceMode = domain.WorkspaceModeWarmPool
+	r.ExecutionContext.ProjectID = "p"
+	r.Repository = domain.RepositoryContext{RepositoryID: "repo", WorkspaceDir: "checkout"}
+	r.WorkflowSnapshot.SandboxSnapshot = &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}}
+	if err := s.PutRun(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TryAcquireRunLease(r.ID, e.instanceID, 0, e.leaseTTL); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutRunner(domain.Runner{ID: "machine"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := s.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "p", RepositoryID: "repo", State: "available"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RequestRunCancel(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.execute(t.Context(), r.ID)
+	got, _ := s.RunState(r.ID)
+	if got.Status != "cancelled" {
+		t.Fatalf("durably cancelled worker settled as %q", got.Status)
 	}
 }

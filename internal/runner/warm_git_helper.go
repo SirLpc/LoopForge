@@ -85,16 +85,23 @@ func (d *Daemon) runWarmGit(ctx context.Context, task domain.RunnerTask, command
 	if task.Sandbox == nil || task.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
 		return runnerWorkspaceError(errors.New("warm Git requires the frozen Docker sandbox"))
 	}
-	sandbox, release, err := d.acquireTaskSandbox(ctx, task)
-	if err != nil {
-		return runnerWorkspaceError(err)
-	}
-	defer release()
 	data, err := json.Marshal(command)
 	if err != nil {
 		return runnerWorkspaceError(err)
 	}
-	out, err := runtime.RunWarmGitHelper(ctx, sandbox, data, runtime.WarmGitAccess{Network: command.Action != "", WriteWorkspace: command.Action != "" || command.Outputs != nil && command.Outputs.RecoverOutputs})
+	var out []byte
+	if command.Action == "" {
+		requirements, resources := d.localTaskSandboxSpec(task)
+		_, id, _ := runSandboxKey(task, requirements, resources)
+		out, err = runtime.RunWarmGitOffline(ctx, id, d.taskWorkspace(task), requirements, resources.Dockerfile, data, command.Outputs != nil && command.Outputs.RecoverOutputs)
+	} else {
+		sandbox, release, openErr := d.acquireTaskSandbox(ctx, task)
+		if openErr != nil {
+			return runnerWorkspaceError(openErr)
+		}
+		defer release()
+		out, err = runtime.RunWarmGitHelper(ctx, sandbox, data)
+	}
 	if err != nil {
 		return runnerWorkspaceError(err)
 	}

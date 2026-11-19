@@ -726,9 +726,8 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		if err != nil {
 			return fmt.Errorf("inspect sandbox image user: %w: %s", err, strings.TrimSpace(string(configured)))
 		}
-		user, _, _ := strings.Cut(strings.TrimSpace(string(configured)), ":")
-		if user == "" || user == "root" || user == "0" {
-			args = append(args, "--user", fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()))
+		if user := dockerWorkspaceUser(string(configured)); user != strings.TrimSpace(string(configured)) {
+			args = append(args, "--user", user)
 		}
 	}
 	network := strings.TrimSpace(os.Getenv("AGENTFLOW_DOCKER_NETWORK"))

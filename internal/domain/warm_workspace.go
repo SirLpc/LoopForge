@@ -83,3 +83,8 @@ func IsWorkspaceGitRead(op, ref string) bool {
 	}
 	return false
 }
+
+// Current-process capability for claims and the control socket. An old process
+// may reuse the machine session while its predecessor's heartbeat is still live.
+const WarmWorkspaceProtocolHeader = "X-LoopForge-Warm-Workspace"
+const WarmWorkspaceProtocolV1 = "1"

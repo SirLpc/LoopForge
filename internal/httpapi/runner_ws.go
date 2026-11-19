@@ -81,11 +81,12 @@ type runnerControlHub struct {
 }
 
 type runnerControlConn struct {
-	runnerID string
-	ws       *websocket.Conn
-	send     chan runnerControlMessage
-	done     chan struct{}
-	once     sync.Once
+	warmProtocol bool
+	runnerID     string
+	ws           *websocket.Conn
+	send         chan runnerControlMessage
+	done         chan struct{}
+	once         sync.Once
 }
 
 func newRunnerControlHub() *runnerControlHub {
@@ -223,6 +224,9 @@ func (h *runnerControlHub) reconnectExpectedLocked(runnerID string, now time.Tim
 // send delivers one request; sent reports whether it reached the socket's
 // queue, after which it must not be retried elsewhere.
 func (h *runnerControlHub) send(ctx context.Context, conn *runnerControlConn, request domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, bool, error) {
+	if (request.WarmWorkspaceLease != nil || domain.IsWarmWorkspaceOperation(request.Operation)) && !conn.warmProtocol {
+		return domain.RunnerWorkspaceResponse{}, false, errors.New("connected runner does not support the warm workspace protocol")
+	}
 	h.mu.Lock()
 	h.nextID++
 	requestID := fmt.Sprintf("workspace-%d", h.nextID)
@@ -281,8 +285,8 @@ func (h *runnerControlHub) resolveWorkspace(requestID string, response domain.Ru
 	}
 }
 
-func (h *runnerControlHub) register(runnerID string, ws *websocket.Conn) *runnerControlConn {
-	c := &runnerControlConn{runnerID: runnerID, ws: ws, send: make(chan runnerControlMessage, 64), done: make(chan struct{})}
+func (h *runnerControlHub) register(runnerID string, ws *websocket.Conn, warmProtocol bool) *runnerControlConn {
+	c := &runnerControlConn{runnerID: runnerID, warmProtocol: warmProtocol, ws: ws, send: make(chan runnerControlMessage, 64), done: make(chan struct{})}
 	h.mu.Lock()
 	old := h.conns[runnerID]
 	h.conns[runnerID] = c
@@ -521,7 +525,7 @@ func (h *runnersHandlers) runnerControlConnect(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	conn := h.runnerControls.register(runner.ID, ws)
+	conn := h.runnerControls.register(runner.ID, ws, c.GetHeader(domain.WarmWorkspaceProtocolHeader) == domain.WarmWorkspaceProtocolV1)
 	defer h.runnerControls.unregister(conn)
 	connCtx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()

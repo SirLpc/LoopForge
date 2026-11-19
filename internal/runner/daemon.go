@@ -170,6 +170,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return fmt.Errorf("open warm workspace pool: %w", err)
 		}
 		d.warmWorkspacePool = pool
+		d.client.warmProtocol = (domain.Runner{RunnerVersion: Version()}).SupportsWarmWorkspace()
 		defer pool.close()
 	}
 	if err := d.ensureRegistered(ctx); err != nil {

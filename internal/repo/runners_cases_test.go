@@ -135,22 +135,22 @@ func TestRunnerTaskLeaseEventsExpiryCancellationAndDeregister(t *testing.T) {
 	if err := s.PutRunnerTask(task); err != nil {
 		t.Fatal(err)
 	}
-	if available, err := s.RunnerTaskAvailable("", []string{"codex"}); err != nil || available {
+	if available, err := s.RunnerTaskAvailable("", []string{"codex"}, false); err != nil || available {
 		t.Fatalf("empty availability=%v err=%v", available, err)
 	}
-	if available, err := s.RunnerTaskAvailable(runner.ID, []string{" "}); err != nil || available {
+	if available, err := s.RunnerTaskAvailable(runner.ID, []string{" "}, false); err != nil || available {
 		t.Fatalf("blank availability=%v err=%v", available, err)
 	}
-	if available, err := s.RunnerTaskAvailable(runner.ID, []string{"codex"}); err != nil || !available {
+	if available, err := s.RunnerTaskAvailable(runner.ID, []string{"codex"}, false); err != nil || !available {
 		t.Fatalf("availability=%v err=%v", available, err)
 	}
-	if _, ok, err := s.ClaimRunnerTask("", []string{"codex"}, now, time.Minute); err == nil || ok {
+	if _, ok, err := s.ClaimRunnerTask("", []string{"codex"}, now, time.Minute, false); err == nil || ok {
 		t.Fatalf("empty claim ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := s.ClaimRunnerTask(runner.ID, nil, now, time.Minute); err != nil || ok {
+	if _, ok, err := s.ClaimRunnerTask(runner.ID, nil, now, time.Minute, false); err != nil || ok {
 		t.Fatalf("providerless claim ok=%v err=%v", ok, err)
 	}
-	claimed, ok, err := s.ClaimRunnerTask(runner.ID, []string{"codex"}, now, -time.Second)
+	claimed, ok, err := s.ClaimRunnerTask(runner.ID, []string{"codex"}, now, -time.Second, false)
 	if err != nil || !ok || claimed.Status != domain.RunnerTaskLeased || claimed.Attempt != 1 {
 		t.Fatalf("claimed=%+v ok=%v err=%v", claimed, ok, err)
 	}
@@ -212,13 +212,13 @@ func TestRunnerTaskLeaseEventsExpiryCancellationAndDeregister(t *testing.T) {
 	if err := s.PutRunnerTask(expiring); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.ClaimRunnerTask(runner.ID, []string{"codex"}, now.Add(time.Second), -time.Second); err != nil || !ok {
+	if _, ok, err := s.ClaimRunnerTask(runner.ID, []string{"codex"}, now.Add(time.Second), -time.Second, false); err != nil || !ok {
 		t.Fatalf("first expiry claim ok=%v err=%v", ok, err)
 	}
 	if recovered, err := s.ExpireRunnerTasks(now.Add(2 * time.Second)); err != nil || len(recovered) != 1 || recovered[0].Status != domain.RunnerTaskQueued {
 		t.Fatalf("first recovery=%+v err=%v", recovered, err)
 	}
-	if _, ok, err := s.ClaimRunnerTask(runner.ID, []string{"codex"}, now.Add(3*time.Second), -time.Second); err != nil || !ok {
+	if _, ok, err := s.ClaimRunnerTask(runner.ID, []string{"codex"}, now.Add(3*time.Second), -time.Second, false); err != nil || !ok {
 		t.Fatalf("second expiry claim ok=%v err=%v", ok, err)
 	}
 	if recovered, err := s.ExpireRunnerTasks(now.Add(4 * time.Second)); err != nil || len(recovered) != 1 || recovered[0].Status != domain.RunnerTaskFailed {

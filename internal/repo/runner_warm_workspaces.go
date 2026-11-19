@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -57,7 +58,7 @@ func warmOwnerCanQueue(tx *gorm.DB, id string) error {
 		return err
 	}
 	if owner.CancelRequested || owner.Status == "cancelled" {
-		return errors.New("warm workspace owner cancelled")
+		return fmt.Errorf("warm workspace owner cancelled: %w", context.Canceled)
 	}
 	return nil
 }

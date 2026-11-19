@@ -59,7 +59,7 @@ func TestWarmWorkspaceOldRunnerCannotClaimQueuedTask(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	result, ok, err := s.ClaimRunnerTask("machine", []string{"terminal"}, now, time.Minute)
+	result, ok, err := s.ClaimRunnerTask("machine", []string{"terminal"}, now, time.Minute, true)
 	if err != nil || !ok || result.ID != "b-normal" {
 		t.Fatal("downgraded runner claimed", result.ID, err)
 	}

@@ -515,7 +515,7 @@ func TestDaemonExecuteProcessRunsRealCommand(t *testing.T) {
 	if err := s.PutRunnerTask(task); err != nil {
 		t.Fatal(err)
 	}
-	claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"echo"}, time.Now().UTC(), time.Minute)
+	claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"echo"}, time.Now().UTC(), time.Minute, false)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -575,7 +575,7 @@ func TestExecuteProcessCapturesFastCommandStdout(t *testing.T) {
 		if err := s.PutRunnerTask(task); err != nil {
 			t.Fatal(err)
 		}
-		claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"echo"}, time.Now().UTC(), time.Minute)
+		claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"echo"}, time.Now().UTC(), time.Minute, false)
 		if err != nil || !ok {
 			t.Fatalf("claim %s: ok=%v err=%v", id, ok, err)
 		}
@@ -616,7 +616,7 @@ func TestExecuteProcessStoresVisibleTextNotStreamJSON(t *testing.T) {
 	if err := s.PutRunnerTask(task); err != nil {
 		t.Fatal(err)
 	}
-	claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"codebuddy"}, time.Now().UTC(), time.Minute)
+	claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"codebuddy"}, time.Now().UTC(), time.Minute, false)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -654,7 +654,7 @@ func TestDaemonStreamsAndNormalizesSparseProviderOutput(t *testing.T) {
 	if err := s.PutRunnerTask(task); err != nil {
 		t.Fatal(err)
 	}
-	claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"codex"}, time.Now().UTC(), time.Minute)
+	claimed, ok, err := s.ClaimRunnerTask(daemon.runnerID(), []string{"codex"}, time.Now().UTC(), time.Minute, false)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}

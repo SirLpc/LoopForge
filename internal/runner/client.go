@@ -25,10 +25,11 @@ var ErrUnauthorized = errors.New("runner session rejected by server")
 var ErrTaskLeaseLost = errors.New("task lease lost")
 
 type Client struct {
-	base    string
-	http    *http.Client
-	mu      sync.RWMutex
-	session string
+	warmProtocol bool
+	base         string
+	http         *http.Client
+	mu           sync.RWMutex
+	session      string
 }
 
 func NewClient(serverURL string) *Client {
@@ -67,6 +68,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if path == "/runners/tasks/claim" && c.warmProtocol {
+		req.Header.Set(domain.WarmWorkspaceProtocolHeader, domain.WarmWorkspaceProtocolV1)
 	}
 	if session := c.sessionToken(); session != "" {
 		req.Header.Set("Authorization", "Bearer "+session)
@@ -266,6 +270,9 @@ func (c *Client) OpenControl(ctx context.Context) (*websocket.Conn, error) {
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/runners/connect"
 	header := http.Header{}
+	if c.warmProtocol {
+		header.Set(domain.WarmWorkspaceProtocolHeader, domain.WarmWorkspaceProtocolV1)
+	}
 	if session := c.sessionToken(); session != "" {
 		header.Set("Authorization", "Bearer "+session)
 	}
