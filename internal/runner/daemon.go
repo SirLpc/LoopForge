@@ -86,6 +86,8 @@ type Config struct {
 	ManagedCLIRoot string
 	// WarmWorkspacePoolFile opts the runner into local warm workspace registration.
 	WarmWorkspacePoolFile string
+	// WarmDockerEndpointPinned means the CLI fixed Docker to its startup Unix socket.
+	WarmDockerEndpointPinned bool
 }
 
 type daemonState struct {
@@ -625,6 +627,9 @@ func (d *Daemon) executeTask(ctx context.Context, task domain.RunnerTask) {
 	completeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	req := CompleteRequest{Status: result.status, Result: result.result, Error: result.errMsg, Artifacts: artifacts, Outputs: result.outputs}
+	if task.WarmWorkspaceLease != nil {
+		req.Error = d.publicWarmError(req.Error)
+	}
 	if result.status == domain.RunnerTaskFailed || result.status == domain.RunnerTaskSuccess {
 		exit := result.exitCode
 		req.ExitCode = &exit

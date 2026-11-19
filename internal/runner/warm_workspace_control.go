@@ -45,6 +45,9 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	// Git preparation and release proofs have their own lifetimes. A short
 	// control call may report placement, never readiness from placement alone.
 	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus {
+		if d.warmDockerUnavailable() {
+			return runnerWorkspaceError(errWarmDockerUnavailable)
+		}
 		fence := d.workspaceGate("warm/" + l.OwnerRunID)
 		if !fence.TryLock() {
 			return workspaceBusyResponse("workspace is still in use")

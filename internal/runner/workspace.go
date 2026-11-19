@@ -101,6 +101,9 @@ func (d *Daemon) handleRunnerWorkspaceBrowser(ctx context.Context, request domai
 	}
 	if request.Browser.Ensure && !runtime.BrowserRunning(ctx, request.RunID) {
 		if reason := d.ensureRunnerBrowser(ctx, request); reason != "" {
+			if request.WarmWorkspaceLease != nil {
+				reason = d.publicWarmError(reason)
+			}
 			return runnerWorkspacePayload(domain.BrowserState{Reason: reason})
 		}
 	}
@@ -110,6 +113,9 @@ func (d *Daemon) handleRunnerWorkspaceBrowser(ctx context.Context, request domai
 	state, err := runtime.HandleBrowser(ctx, request.RunID, *request.Browser)
 	if err != nil {
 		return domain.RunnerWorkspaceResponse{Status: 409, Error: err.Error()}
+	}
+	if request.WarmWorkspaceLease != nil {
+		state.Reason = d.publicWarmError(state.Reason)
 	}
 	return runnerWorkspacePayload(state)
 }

@@ -62,6 +62,14 @@ func main() {
 	cfg.MaxConcurrency = concurrencyFromEnv(cfg.MaxConcurrency)
 	cfg.Labels = parseLabels(*labels)
 
+	if cfg.WarmWorkspacePoolFile != "" {
+		if err := pinWarmDockerEndpoint(context.Background()); err != nil {
+			log.Printf("warm slots withheld: %v", err)
+		} else {
+			cfg.WarmDockerEndpointPinned = true
+		}
+	}
+
 	daemon, err := runner.New(cfg)
 	if err != nil {
 		log.Fatal(err)

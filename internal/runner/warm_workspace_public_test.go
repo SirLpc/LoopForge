@@ -63,3 +63,39 @@ func TestWarmWorkspaceControlHidesMissingJournalPath(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestWarmWorkspaceUnsupportedDockerRetainsJournal(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	p := f.open(t)
+	d, err := New(Config{ServerURL: "https://example.invalid", BootstrapToken: "fixture", WarmWorkspacePoolFile: f.config, DefaultWorkspaceRoot: f.workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.warmWorkspacePool = p
+	d.client.warmProtocol = true
+	d.warmHostVisible.Store(true)
+	d.state.RunnerID = "machine"
+	if got := d.warmWorkspaceInventory(func() bool { return true }); len(got) > 0 {
+		t.Errorf("remote Docker advertised %+v", got)
+	}
+	lease := domain.WarmWorkspaceLease{RunnerID: "machine", OwnerRunID: "owner", Epoch: 1, Generation: 1, Slots: map[string]string{"a": "a"}}
+	if err := p.reserve(lease); err != nil {
+		t.Fatal(err)
+	}
+	req := domain.RunnerWorkspaceRequest{RunID: "owner", Operation: domain.RunnerWorkspaceOperationWarmStatus, WarmWorkspaceLease: &lease}
+	if got := d.readRunnerWorkspace(t.Context(), req); got.Error != "" {
+		t.Fatal("journal unavailable", got.Error)
+	}
+	for _, op := range []string{domain.RunnerWorkspaceOperationWarmPrepare, domain.RunnerWorkspaceOperationWarmReleaseCheck, domain.RunnerWorkspaceOperationWarmReleaseCommit, "browser"} {
+		req.Operation = op
+		if got := d.readRunnerWorkspace(t.Context(), req); !strings.Contains(got.Error, "Docker") {
+			t.Errorf("unqualified %s: %+v", op, got)
+		}
+	}
+	if err := d.checkWarmTask(t.Context(), domain.RunnerTask{RunID: "owner", WarmWorkspaceLease: &lease}); err == nil || !strings.Contains(err.Error(), "Docker") {
+		t.Errorf("unqualified task: %v", err)
+	}
+	if err := d.checkWarmTask(t.Context(), domain.RunnerTask{RunID: "ordinary"}); err != nil {
+		t.Errorf("ordinary task: %v", err)
+	}
+}

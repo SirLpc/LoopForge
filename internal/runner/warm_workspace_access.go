@@ -117,6 +117,9 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 }
 
 func (d *Daemon) checkWarmOperation(ctx context.Context, owner, operation string, observed *domain.WarmWorkspaceLease) error {
+	if observed != nil && d.warmDockerUnavailable() {
+		return errWarmDockerUnavailable
+	}
 	p := d.warmWorkspacePool
 	if p == nil {
 		if observed != nil {

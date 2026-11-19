@@ -32,7 +32,7 @@ async function main() {
   const timers=new Map(),listeners={};let nextTimer=0,refreshes=0,view='runs';
   const section={hidden:false};
   const refresh={state:{data:{runs:[{id:'r',status:'queued'}]}},document:{hidden:false,addEventListener:(name,fn)=>listeners[name]=fn},activeViewName:()=>view,$:()=>section,scopedRuns:r=>r,clearInterval:id=>timers.delete(id),setInterval:fn=>{timers.set(++nextTimer,fn);return nextTimer;},refreshRuns:()=>refreshes++};
-  load(refresh,['isSOPRun','sopRuns']);
+  load(refresh,['isSOPRun','sopRuns','runWarmWorkspaceWaiting']);
   vm.runInContext(bundle.slice(bundle.indexOf('let queuedRunRefreshTimer='),bundle.indexOf('let refreshRunsPending=')),refresh);
   refresh.syncQueuedRunRefresh();refresh.syncQueuedRunRefresh();assert.equal(timers.size,1);
   [...timers.values()][0]();assert.equal(refreshes,1);
@@ -41,6 +41,9 @@ async function main() {
   section.hidden=true;refresh.syncQueuedRunRefresh();assert.equal(timers.size,0);
   section.hidden=false;view='issues';refresh.syncQueuedRunRefresh();assert.equal(timers.size,0);
   view='runs';refresh.state.data.runs=[{status:'running'}];refresh.syncQueuedRunRefresh();assert.equal(timers.size,0);
+
+  refresh.state.data.runs=[{status:'running',warmWorkspaceWaiting:true}];refresh.syncQueuedRunRefresh();assert.equal(timers.size,1,'warm wait must refresh the SOP list');
+  refresh.state.data.runs=[{status:'running'}];[...timers.values()][0]();assert.equal(timers.size,0);
 
   const calls=[],messages=[],run={id:'run/1',status:'waiting',pauseRequested:true};
   const control={state:{selectedRun:run.id,activeRun:run,data:{runs:[run],issues:[]},issueDetailData:{run}},api:async(path,opts)=>{calls.push([path,opts?.method||'GET']);return{id:run.id,status:'queued',pauseRequested:false,admissionState:'queued'};},toast:m=>messages.push(m),readHumanContext:()=>'',refreshIssues:async()=>{},refreshRuns:async()=>{},startLiveRun:id=>calls.push(['stream',id]),stopLiveRun:()=>{},renderRunDetail:()=>{},renderRuns:()=>{},renderIssueDetailTab:()=>{}};
@@ -89,8 +92,12 @@ async function main() {
   }
   const liveState={selectedRun:'r',data:{runs:[]}},intervals=new Map();let timer=0,status='queued',applied=[];
   const polling={state:liveState,api:async()=>({id:'r',status}),setInterval:fn=>{intervals.set(++timer,fn);return timer},clearInterval:id=>intervals.delete(id),patchCachedRun:()=>{},applyRunPayload:r=>applied.push(r.status),refreshRunPagesDelta:async()=>{},renderRuns:()=>{},renderIssueDetailTab:()=>{}};
-  load(polling,['startPollingFallback']);polling.startPollingFallback('r');await flush();assert.equal(intervals.size,1);assert.deepEqual(applied,['queued']);
+  load(polling,['patchCachedRun','startPollingFallback']);polling.startPollingFallback('r');await flush();assert.equal(intervals.size,1);assert.deepEqual(applied,['queued']);
+  const waiting={id:'r',status:'running',warmWorkspaceWaiting:true};
+  liveState.activeRun=waiting;liveState.issueDetailData={run:waiting};liveState.data.runs=[waiting];
+  polling.patchCachedRun('r',{pauseRequested:false});assert.equal(liveState.activeRun.warmWorkspaceWaiting,true);
   status='running';[...intervals.values()][0]();await flush();assert.equal(intervals.size,1);
+  for(const cached of [liveState.activeRun,liveState.issueDetailData.run,liveState.data.runs[0]])assert.equal(cached.warmWorkspaceWaiting,false,'complete GET clears omitted wait flag');
   status='succeeded';[...intervals.values()][0]();await flush();assert.equal(intervals.size,0);assert.equal(liveState.poll,null);assert.deepEqual(applied,['queued','running','succeeded']);
 
   const machine=load({state:{runners:[{id:'m',name:'local',ownerUserId:9}]},escapeHTML:String},['runnerConcurrencyLabel','runExecutionChipHTML']);

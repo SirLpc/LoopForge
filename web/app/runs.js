@@ -103,7 +103,7 @@ function startPollingFallback(id){
     if(!relevant()){stop();return}
     busy=true;
     try{
-      const run=await api(`/api/runs/${encodeURIComponent(id)}`,{silent:true});
+      const run={warmWorkspaceWaiting:false,...await api(`/api/runs/${encodeURIComponent(id)}`,{silent:true})};
       if(state.poll!==timer||!relevant())return;
       patchCachedRun(id,run);
       if(state.selectedRun===id){applyRunPayload(run,{list:false});await refreshRunPagesDelta(id)}
@@ -124,7 +124,7 @@ function sortRunsDescending(runs){
 }
 let queuedRunRefreshTimer=null;
 function queuedRunListVisible(){return !document.hidden&&activeViewName()==='runs'&&$('#runsListSection')?.hidden===false}
-function queuedRunRefreshNeeded(){return queuedRunListVisible()&&scopedRuns(sopRuns(state.data.runs)).some(r=>r.status==='queued')}
+function queuedRunRefreshNeeded(){return queuedRunListVisible()&&scopedRuns(sopRuns(state.data.runs)).some(r=>r.status==='queued'||runWarmWorkspaceWaiting(r))}
 function stopQueuedRunRefresh(){clearInterval(queuedRunRefreshTimer);queuedRunRefreshTimer=null}
 function syncQueuedRunRefresh(){
   if(!queuedRunRefreshNeeded()){stopQueuedRunRefresh();return}
@@ -318,7 +318,7 @@ function runStatus(s){return ({queued:'排队中',running:'运行中',waiting:'�
 function runControlSignature(r){return `${r?.status||''}:${Boolean(r?.pauseRequested)}:${Boolean(r?.cancelRequested)}:${r?.admissionState||''}:${Boolean(runWarmWorkspaceWaiting(r))}`}
 function runControlToast(run,message){return run?.status==='queued'?'已进入项目排队，获得名额后自动启动':run?.status==='running'?message:`当前状态：${runDisplayStatus(run)}`}
 async function syncRunControlState(runId){
-  const run=await api(`/api/runs/${encodeURIComponent(runId)}`,{silent:true});
+  const run={warmWorkspaceWaiting:false,...await api(`/api/runs/${encodeURIComponent(runId)}`,{silent:true})};
   patchCachedRun(runId,run);
   if(!(state.data.runs||[]).some(r=>r.id===runId))state.data.runs=sortRunsDescending([run,...(state.data.runs||[])]);
   const relevant=state.selectedRun===runId||(state.drawerOpen&&state.issueDetailData?.run?.id===runId);

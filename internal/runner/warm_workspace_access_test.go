@@ -117,6 +117,57 @@ func TestWarmWorkspaceExactReadyGeneration(t *testing.T) {
 			t.Fatalf("%s reached an active pool", op)
 		}
 	}
+	t.Run("public browser reason", func(t *testing.T) {
+		t.Setenv("AGENTFLOW_BROWSER", "on")
+		// A relative Runner root resolves to the same checkout but fails
+		// workspaceSandboxTask's filepath.Rel and carries its absolute path.
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.cfg.DefaultWorkspaceRoot, err = filepath.Rel(cwd, f.workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { d.cfg.DefaultWorkspaceRoot = f.workspace }()
+		req.Operation = domain.RunnerWorkspaceOperationBrowser
+		req.Browser = &domain.BrowserRequest{Operation: "start", Ensure: true}
+		req.Workflow = &domain.WorkflowDefinition{}
+		got := d.readRunnerWorkspace(t.Context(), req)
+		var state domain.BrowserState
+		if got.Error != "" || json.Unmarshal(got.Payload, &state) != nil || !strings.Contains(state.Reason, "Runner 日志") || strings.Contains(state.Reason, f.workspace) {
+			t.Fatalf("browser reason: %s (%s)", got.Payload, got.Error)
+		}
+	})
+	t.Run("public task completion", func(t *testing.T) {
+		if err := os.Rename(f.workspace, f.workspace+"-moved"); err != nil {
+			t.Fatal(err)
+		}
+		completed := make(chan CompleteRequest, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/complete") {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			var report CompleteRequest
+			if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+				t.Error(err)
+			}
+			completed <- report
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+		d.client = NewClient(server.URL)
+		d.controls = map[string]chan string{}
+		d.pendingControls = map[string]string{}
+		task.ID = "warm-task"
+		task.WarmWorkspaceLease = &l
+		d.executeTask(t.Context(), task)
+		got := <-completed
+		if got.Status != domain.RunnerTaskFailed || !strings.Contains(got.Error, "Runner 日志") || strings.Contains(got.Error, f.workspace) {
+			t.Fatalf("task completion: %+v", got)
+		}
+	})
 }
 
 func TestWarmWorkspacePreviewProtectsPhysicalAliases(t *testing.T) {

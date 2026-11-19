@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"log"
 	"regexp"
 	"strings"
@@ -12,10 +13,16 @@ import (
 	"agentflow/internal/runtime"
 )
 
+var errWarmDockerUnavailable = errors.New("warm workspace requires a pinned local Docker endpoint")
+
+func (d *Daemon) warmDockerUnavailable() bool {
+	return d.cfg.WarmWorkspacePoolFile != "" && !d.cfg.WarmDockerEndpointPinned
+}
+
 // Run on startup and the normal runtime rescan, outside the heartbeat loop.
 // The control protocol remains available for owners already in the journal.
 func (d *Daemon) refreshWarmHostVisibility(ctx context.Context) {
-	if d.warmWorkspacePool == nil {
+	if d.warmWorkspacePool == nil || d.warmDockerUnavailable() {
 		return
 	}
 	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -30,7 +37,7 @@ func (d *Daemon) refreshWarmHostVisibility(ctx context.Context) {
 // Only a configured, protocol-compatible process with a reachable Docker
 // daemon can advertise physical capacity. Admission still checks the sandbox.
 func (d *Daemon) warmWorkspaceInventory(dockerReady func() bool) []domain.WarmWorkspaceSlot {
-	if d.warmWorkspacePool == nil || !d.client.warmProtocol || !d.warmHostVisible.Load() || !dockerReady() {
+	if d.warmWorkspacePool == nil || d.warmDockerUnavailable() || !d.client.warmProtocol || !d.warmHostVisible.Load() || !dockerReady() {
 		return nil
 	}
 	return d.warmWorkspacePool.inventory()
@@ -41,11 +48,16 @@ var warmAbsolutePath = regexp.MustCompile(`(^|[[:space:]="'(:])/[^/]`)
 // Git and the filesystem can include runner paths in diagnostics. Keep those
 // in runner logs while preserving user-actionable relative file blockers.
 func (d *Daemon) publicWarmResponse(res domain.RunnerWorkspaceResponse) domain.RunnerWorkspaceResponse {
-	if res.Error == "" {
-		return res
+	res.Error = d.publicWarmError(res.Error)
+	return res
+}
+
+func (d *Daemon) publicWarmError(message string) string {
+	if message == "" {
+		return ""
 	}
-	containsPath := func(path string) bool { return path != "" && strings.Contains(res.Error, path) }
-	private := warmAbsolutePath.MatchString(res.Error) || containsPath(d.cfg.WarmWorkspacePoolFile)
+	containsPath := func(path string) bool { return path != "" && strings.Contains(message, path) }
+	private := warmAbsolutePath.MatchString(message) || containsPath(d.cfg.WarmWorkspacePoolFile)
 	if p := d.warmWorkspacePool; p != nil {
 		private = private || containsPath(p.workspaceRoot) || containsPath(p.gitRoot) || (p.journalDir != nil && containsPath(p.journalDir.Name()))
 		for _, slot := range p.slots {
@@ -56,8 +68,8 @@ func (d *Daemon) publicWarmResponse(res domain.RunnerWorkspaceResponse) domain.R
 		}
 	}
 	if private {
-		log.Printf("warm workspace: %s", gitwork.Redact(res.Error))
-		res.Error = "预热工作区检查失败，请联系执行机器管理员查看 Runner 日志"
+		log.Printf("warm workspace: %s", gitwork.Redact(message))
+		message = "预热工作区检查失败，请联系执行机器管理员查看 Runner 日志"
 	}
-	return res
+	return message
 }
