@@ -353,10 +353,13 @@ func (p *warmWorkspacePool) move(ctx context.Context, allocation warmWorkspaceAl
 	ids := slices.Sorted(maps.Keys(positions))
 	for _, id := range ids {
 		position := positions[id]
+		if returning && position.atHome {
+			continue
+		}
 		if position.homeErr != nil || position.targetErr != nil {
 			return fmt.Errorf("inspect warm workspace locations for slot %q: %w", id, errors.Join(position.homeErr, position.targetErr))
 		}
-		if position.homeExists && position.targetExists && !(returning && position.atHome) {
+		if position.homeExists && position.targetExists {
 			return fmt.Errorf("warm workspace location for slot %q is occupied", id)
 		}
 		if !returning && !position.atTarget {
@@ -400,9 +403,14 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 	returning := allocation.Phase == warmWorkspaceReturning
 	// The rename may have happened immediately before an interruption. Re-sync
 	// both parents before removing the write-ahead intent, even on recovery.
-	for id := range positions {
+	for id, position := range positions {
 		if err := syncWarmWorkspaceParent(p.slots[id].Path); err != nil {
 			return err
+		}
+		// Cancellation can finish with a verified home inode even when a
+		// blocked target ancestor prevents opening the workspace path.
+		if returning && position.targetErr != nil {
+			continue
 		}
 		if target := allocation.Targets[id]; target != "" {
 			if err := syncWarmWorkspaceTargetParents(p.workspaceRoot, target, (*os.File).Sync); err != nil &&
@@ -422,7 +430,7 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 func warmWorkspaceMoveComplete(allocation warmWorkspaceAllocation, positions map[string]warmWorkspacePosition) bool {
 	for _, position := range positions {
 		if allocation.Phase == warmWorkspaceReturning {
-			if !position.atHome || position.targetErr != nil {
+			if !position.atHome {
 				return false
 			}
 		} else if !position.atTarget || position.homeExists || position.homeErr != nil {

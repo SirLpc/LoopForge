@@ -494,3 +494,111 @@ func TestWarmWorkspacePoolSyncsExistingTargetAncestors(t *testing.T) {
 		t.Fatalf("recovery synced %v, want %v", synced, want)
 	}
 }
+
+func TestWarmWorkspacePoolReturnsSlotsWithBlockedTargetAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		makeObstacle func(string, warmPoolFixture) error
+		interrupt    bool
+	}{
+		{
+			name: "retry cancellation with a regular file",
+			makeObstacle: func(path string, _ warmPoolFixture) error {
+				return os.WriteFile(path, []byte("unrelated contents"), 0o600)
+			},
+		},
+		{
+			name: "recover interrupted cancellation with a symlink",
+			makeObstacle: func(path string, f warmPoolFixture) error {
+				return os.Symlink(f.homeB, path)
+			},
+			interrupt: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWarmPoolFixture(t)
+			pool := f.open(t)
+			lease := domain.WarmWorkspaceLease{
+				OwnerRunID: "owner", RunnerID: "runner", Generation: 1, Slots: map[string]string{"a": "a"},
+			}
+			original := warmPoolStat(t, f.homeA)
+			if err := pool.reserve(lease); err != nil {
+				t.Fatal(err)
+			}
+			workspace := filepath.Join(f.workspace, "runs", lease.OwnerRunID, "workspace")
+			warmPoolMkdir(t, workspace)
+			obstaclePath := filepath.Join(workspace, "blocked")
+			if err := tc.makeObstacle(obstaclePath, f); err != nil {
+				t.Fatal(err)
+			}
+			obstacle, err := os.Lstat(obstaclePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pool.place(t.Context(), lease, map[string]string{"a": "blocked/repo"}); err == nil {
+				t.Fatal("placement traversed the blocked ancestor")
+			}
+			if tc.interrupt {
+				// Simulate exiting after recording the authorized return.
+				allocation := pool.state.Leases[lease.OwnerRunID]
+				allocation.Phase = warmWorkspaceReturning
+				if err := pool.saveAllocation(allocation); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := pool.close(); err != nil {
+				t.Fatal(err)
+			}
+			pool = f.open(t)
+			if !tc.interrupt {
+				if err := pool.returnSlots(t.Context(), lease); err != nil {
+					t.Fatalf("return verified home slot: %v", err)
+				}
+			}
+			next := lease
+			next.OwnerRunID, next.Generation = "next", 2
+			if err := pool.reserve(next); err != nil {
+				t.Fatalf("reserve safely returned slot: %v", err)
+			}
+			warmPoolRequireSame(t, original, f.homeA)
+			retained, err := os.Lstat(obstaclePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(obstacle, retained) {
+				t.Fatal("unrelated obstacle changed inode")
+			}
+		})
+	}
+}
+
+func TestWarmWorkspacePoolKeepsUnverifiedCheckoutWhenTargetAncestorIsBlocked(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	pool := f.open(t)
+	lease := domain.WarmWorkspaceLease{
+		OwnerRunID: "owner", RunnerID: "runner", Generation: 1, Slots: map[string]string{"a": "a"},
+	}
+	original := warmPoolStat(t, f.homeA)
+	if err := pool.reserve(lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.place(t.Context(), lease, map[string]string{"a": "parent/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(f.workspace, "runs", lease.OwnerRunID, "workspace", "parent")
+	detour := filepath.Join(f.root, "detour")
+	if err := os.Rename(parent, detour); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(detour, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.returnSlots(t.Context(), lease); err == nil {
+		t.Fatal("returned a checkout whose home and workspace locations could not be verified")
+	}
+	warmPoolRequireSame(t, original, filepath.Join(detour, "repo"))
+	lease.OwnerRunID, lease.Generation = "next", 2
+	if err := pool.reserve(lease); err == nil {
+		t.Fatal("reallocated a slot without validating the original checkout")
+	}
+}
