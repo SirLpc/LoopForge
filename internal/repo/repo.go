@@ -130,6 +130,7 @@ type AssistantRepo struct {
 // RunsRepo owns runs, their children (nodes/events/telemetry/logs/artifacts),
 // run leases and workflow metrics.
 type RunsRepo struct {
+	runners *RunnersRepo
 	*deps
 	assistant     *AssistantRepo
 	issues        *IssuesRepo
@@ -208,8 +209,8 @@ func newStore(db *gorm.DB) *Store {
 	s.CatalogRepo = &CatalogRepo{deps: d, projects: s.ProjectsRepo, notifications: s.NotificationsRepo}
 	s.IssuesRepo = &IssuesRepo{deps: d, projects: s.ProjectsRepo, users: s.UsersRepo, tasks: s.TasksRepo}
 	s.NotificationsRepo.issues = s.IssuesRepo
-	s.RunsRepo = &RunsRepo{deps: d, assistant: s.AssistantRepo, issues: s.IssuesRepo, catalog: s.CatalogRepo, notifications: s.NotificationsRepo}
 	s.RunnersRepo = &RunnersRepo{deps: d}
+	s.RunsRepo = &RunsRepo{deps: d, runners: s.RunnersRepo, assistant: s.AssistantRepo, issues: s.IssuesRepo, catalog: s.CatalogRepo, notifications: s.NotificationsRepo}
 	s.DeliveryRepo = &DeliveryRepo{deps: d, issues: s.IssuesRepo, tasks: s.TasksRepo, catalog: s.CatalogRepo, runs: s.RunsRepo}
 	s.InsightsRepo = &InsightsRepo{deps: d}
 	s.AnalyticsRepo = &AnalyticsRepo{deps: d, runs: s.RunsRepo, catalog: s.CatalogRepo, delivery: s.DeliveryRepo, issues: s.IssuesRepo, tasks: s.TasksRepo, projects: s.ProjectsRepo, insights: s.InsightsRepo}

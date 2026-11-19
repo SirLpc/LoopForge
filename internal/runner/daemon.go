@@ -134,6 +134,11 @@ func New(cfg Config) (*Daemon, error) {
 		home, _ := os.UserHomeDir()
 		cfg.DefaultWorkspaceRoot = filepath.Join(home, ".agentflow-runner", "workspace")
 	}
+	root, err := filepath.Abs(cfg.DefaultWorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	cfg.DefaultWorkspaceRoot = root
 	if cfg.Name == "" {
 		host, _ := os.Hostname()
 		cfg.Name = host
@@ -154,6 +159,11 @@ func trimTrailingSlash(s string) string {
 func (d *Daemon) Run(ctx context.Context) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	if d.cfg.WarmWorkspacePoolFile == "" {
+		if err := checkDisabledWarmJournal(d.cfg.StatePath + ".warm-workspace.json"); err != nil {
+			return err
+		}
+	}
 	if d.cfg.WarmWorkspacePoolFile != "" {
 		pool, err := openWarmWorkspacePool(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json")
 		if err != nil {
@@ -801,8 +811,7 @@ func (d *Daemon) executeTerminal(ctx context.Context, task domain.RunnerTask) ex
 	} else {
 		result = d.executeProcess(ctx, task, command.Argv, runtime.CommandEnvironment(command))
 	}
-	result.outputs = collectTaskOutputs(workspace, task.Invocation)
-	return result
+	return d.withTaskOutputs(ctx, task, result)
 }
 
 // mcpTarget addresses platform-served MCP servers through this runner's own
@@ -890,7 +899,7 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 			return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("start: %v", err)}, nil
 		}
 		_ = d.client.SendEvents(ctx, task.ID, []domain.RunnerTaskEvent{{Seq: 1, Type: "system", Data: "builtin executor completed in-process", Ts: time.Now().UTC()}})
-		return execResult{status: domain.RunnerTaskSuccess, exitCode: 0, result: prepared.BuiltinResult, outputs: collectTaskOutputs(workspace, inv)}, collectRunnerInvocationArtifacts(workspace, inv)
+		return d.withTaskOutputs(ctx, task, execResult{status: domain.RunnerTaskSuccess, exitCode: 0, result: prepared.BuiltinResult}), collectRunnerInvocationArtifacts(workspace, inv)
 	}
 	argv := prepared.Command.Argv
 	if sandbox == nil || !strings.EqualFold(task.Sandbox.Profile.Driver, "docker") {
@@ -994,7 +1003,7 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 	} else {
 		result = d.executeProcess(ctx, task, argv, commandEnv)
 	}
-	result.outputs = collectTaskOutputs(workspace, inv)
+	result = d.withTaskOutputs(ctx, task, result)
 	if result.status != domain.RunnerTaskSuccess {
 		return result, nil
 	}

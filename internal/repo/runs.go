@@ -1870,12 +1870,21 @@ func finishTelemetryPage(events []domain.TelemetryEvent, seq int64, hasMore bool
 // RequestRunCancel durably flags a live run (running or waiting) for
 // cancellation so any worker observing the heartbeat will settle it.
 func (r *RunsRepo) RequestRunCancel(id string) (domain.Run, error) {
-	return r.requestRunControl(id, true, false)
+	var run domain.Run
+	err := r.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		run, err = r.requestRunControl(tx, id, true, false)
+		if err != nil {
+			return err
+		}
+		return r.runners.cancelWarmOwnerInTx(tx, id)
+	})
+	return run, err
 }
 
 // RequestRunPause flags a running or waiting run for an explicit pause.
 func (r *RunsRepo) RequestRunPause(id string) (domain.Run, error) {
-	return r.requestRunControl(id, false, true)
+	return r.requestRunControl(r.DB, id, false, true)
 }
 
 // RunControlRequested reads only the durable pause/cancel bits. The worker
@@ -1909,10 +1918,10 @@ func (r *RunsRepo) ClearRunControl(id string) error {
 	})
 }
 
-func (r *RunsRepo) requestRunControl(id string, cancelRequested, pauseRequested bool) (domain.Run, error) {
+func (r *RunsRepo) requestRunControl(db *gorm.DB, id string, cancelRequested, pauseRequested bool) (domain.Run, error) {
 	now := time.Now().UTC()
 	allowed := "status IN ('running', 'waiting')"
-	res := r.DB.Model(&runRow{}).Where("id = ? AND "+allowed, id).Updates(map[string]any{
+	res := db.Model(&runRow{}).Where("id = ? AND "+allowed, id).Updates(map[string]any{
 		"cancel_requested": cancelRequested,
 		"pause_requested":  pauseRequested,
 		"revision":         gorm.Expr("revision + 1"),
@@ -1922,12 +1931,12 @@ func (r *RunsRepo) requestRunControl(id string, cancelRequested, pauseRequested 
 		return domain.Run{}, fmt.Errorf("request run control: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {
-		if _, ok := takeRun(r.DB, id); !ok {
+		if _, ok := takeRun(db, id); !ok {
 			return domain.Run{}, fmt.Errorf("run not found")
 		}
 		return domain.Run{}, fmt.Errorf("run is not active")
 	}
-	row, ok := takeRun(r.DB, id)
+	row, ok := takeRun(db, id)
 	if !ok {
 		return domain.Run{}, fmt.Errorf("run not found")
 	}

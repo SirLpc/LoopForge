@@ -29,19 +29,15 @@ type warmDockerInspection struct {
 // attaching. Docker image volumes and inherited containers can add mounts
 // that are absent from the arguments assembled by this process.
 func (i warmDockerInspection) validate(workspace string, objects []string, cli string) error {
-	h := i.HostConfig
-	noNewPrivileges := slices.Contains(h.SecurityOpt, "no-new-privileges") || slices.Contains(h.SecurityOpt, "no-new-privileges:true")
-	if h.Privileged || !slices.Contains(h.CapDrop, "ALL") || !noNewPrivileges || len(h.CapAdd) > 0 {
-		return errors.New("warm Docker sandbox requires restricted capabilities and no new privileges")
-	}
-	if len(h.Devices) > 0 || len(h.DeviceRequests) > 0 || len(h.DeviceCgroupRules) > 0 || len(h.VolumesFrom) > 0 {
-		return errors.New("warm Docker sandbox has host devices or inherited volumes")
-	}
-	if h.PidMode != "" && h.PidMode != "private" || h.UsernsMode == "host" || h.IpcMode == "host" || strings.HasPrefix(h.IpcMode, "container:") || h.NetworkMode == "host" || strings.HasPrefix(h.NetworkMode, "container:") {
-		return errors.New("warm Docker sandbox shares an unsafe host namespace")
+	if err := i.validateHost(); err != nil {
+		return err
 	}
 
 	allowed := map[string]string{"/workspace": workspace}
+	return i.validateMounts(allowed, objects, cli, true)
+}
+
+func (i warmDockerInspection) validateMounts(allowed map[string]string, objects []string, cli string, writable bool) error {
 	for _, dir := range objects {
 		allowed[dir] = dir
 	}
@@ -54,7 +50,7 @@ func (i warmDockerInspection) validate(workspace string, objects []string, cli s
 		}
 		expected, ok := allowed[m.Destination]
 		private := m.Propagation == "" || m.Propagation == "rprivate" || m.Propagation == "private"
-		if !ok || m.Type != "bind" || m.Source != expected || m.RW != (m.Destination == "/workspace") || !private {
+		if !ok || m.Type != "bind" || m.Source != expected || m.RW != (writable && m.Destination == "/workspace") || !private {
 			return fmt.Errorf("unexpected warm Docker mount at %s", m.Destination)
 		}
 		delete(allowed, m.Destination)
@@ -62,6 +58,22 @@ func (i warmDockerInspection) validate(workspace string, objects []string, cli s
 	if len(allowed) != 0 {
 		return errors.New("warm Docker sandbox is missing expected mounts")
 	}
+	return nil
+}
+
+func (i warmDockerInspection) validateHost() error {
+	h := i.HostConfig
+	noNewPrivileges := slices.Contains(h.SecurityOpt, "no-new-privileges") || slices.Contains(h.SecurityOpt, "no-new-privileges:true")
+	if h.Privileged || !slices.Contains(h.CapDrop, "ALL") || !noNewPrivileges || len(h.CapAdd) > 0 {
+		return errors.New("warm Docker sandbox requires restricted capabilities and no new privileges")
+	}
+	if len(h.Devices) > 0 || len(h.DeviceRequests) > 0 || len(h.DeviceCgroupRules) > 0 || len(h.VolumesFrom) > 0 {
+		return errors.New("warm Docker sandbox has host devices or inherited volumes")
+	}
+	if h.PidMode != "" && h.PidMode != "private" || h.UsernsMode == "host" || h.IpcMode == "host" || strings.HasPrefix(h.IpcMode, "container:") || h.NetworkMode == "host" || strings.HasPrefix(h.NetworkMode, "container:") {
+		return errors.New("warm Docker sandbox shares an unsafe host namespace")
+	}
+
 	return nil
 }
 

@@ -21,7 +21,13 @@ func (d *Daemon) executeIntegrate(ctx context.Context, task domain.RunnerTask) e
 	if err := d.client.StartTask(ctx, task.ID); err != nil {
 		return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("start: %v", err)}
 	}
-	results, err := integrateTaskRepositories(ctx, d.taskWorkspace(task), task.Invocation, task.IntegrationLabel)
+	var results []domain.RunnerIntegrationResult
+	var err error
+	if task.WarmWorkspaceLease != nil {
+		err = d.executeWarmGitDelivery(ctx, task, &results)
+	} else {
+		results, err = integrateTaskRepositories(ctx, d.taskWorkspace(task), task.Invocation, task.IntegrationLabel)
+	}
 	var lines []domain.RunnerTaskEvent
 	for i, r := range results {
 		msg := fmt.Sprintf("integrated %s: %s ← %s @ %s", r.Name, r.WorkBranch, r.IntegrateBranch, r.Head)

@@ -21,7 +21,13 @@ func (d *Daemon) executeWorkBranchSync(ctx context.Context, task domain.RunnerTa
 		return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("start: %v", err)}
 	}
 	push := task.Action == domain.RunnerTaskActionPushWorkBranch
-	heads, err := syncTaskWorkBranches(ctx, d.taskWorkspace(task), task.Invocation, push, task.WorkBranchMessage)
+	var heads []domain.RunnerWorkBranchHead
+	var err error
+	if task.WarmWorkspaceLease != nil {
+		err = d.executeWarmGitDelivery(ctx, task, &heads)
+	} else {
+		heads, err = syncTaskWorkBranches(ctx, d.taskWorkspace(task), task.Invocation, push, task.WorkBranchMessage)
+	}
 	var lines []domain.RunnerTaskEvent
 	for i, head := range heads {
 		verb := "pulled"

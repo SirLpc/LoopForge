@@ -44,14 +44,46 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 // possible point, including messages relayed during a process handover.
 func (e *Engine) AuthorizeWarmWorkspaceControl(runnerID string, req *domain.RunnerWorkspaceRequest) error {
 	owner, ok := e.repo.RunState(req.RunID)
+	if req.WarmWorkspaceLease == nil && !domain.IsWarmWorkspaceOperation(req.Operation) {
+		if target := req.WorkspaceRunID; target != "" && (!ok || target != workspaceRunID(owner)) {
+			_, _, found, err := e.repo.WarmWorkspaceAllocation(target)
+			if err != nil {
+				return err
+			}
+			if found {
+				return errors.New("workspace target requires an observed warm lease")
+			}
+		}
+		if req.RunID == "" {
+			return nil
+		}
+		if !ok {
+			_, _, found, err := e.repo.WarmWorkspaceAllocation(req.RunID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return nil
+			}
+		} else {
+			return e.verifyObservedWarmRequest(owner, req)
+		}
+	}
 	if !ok || e.defaultExecutionRunner(owner) != runnerID {
 		return errors.New("warm workspace owner or runner changed")
 	}
 	if !domain.IsWarmWorkspaceOperation(req.Operation) {
-		if err := e.guardWarmRequest(owner, req); err != nil {
+		if err := e.verifyObservedWarmRequest(owner, req); err != nil {
 			return err
 		}
 		req.Repositories = owner.RepositoryContexts()
+		if domain.IsWorkspaceGitRead(req.Operation, req.Ref) {
+			spec, err := e.runnerSandboxSpec(owner)
+			if err != nil {
+				return err
+			}
+			req.Sandbox = spec
+		}
 		switch req.Operation {
 		case domain.RunnerWorkspaceOperationPrepare, domain.RunnerWorkspaceOperationPreparationRecord, domain.RunnerWorkspaceOperationPreparationStatus, domain.RunnerWorkspaceOperationTerminal, domain.RunnerWorkspaceOperationBrowser:
 			if req.Operation == domain.RunnerWorkspaceOperationTerminal && req.Terminal == nil {

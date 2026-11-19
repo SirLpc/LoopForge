@@ -303,6 +303,16 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 			return domain.RunnerWorkspaceResponse{Status: 409, Error: err.Error()}
 		}
 		return runnerWorkspacePayload(map[string]any{"sha256": sha})
+	default:
+		if request.WarmWorkspaceLease != nil && domain.IsWorkspaceGitRead(request.Operation, request.Ref) {
+			return d.readWarmWorkspaceGit(ctx, root, request)
+		}
+		return readWorkspaceContent(ctx, root, request)
+	}
+}
+
+func readWorkspaceContent(ctx context.Context, root string, request domain.RunnerWorkspaceRequest) domain.RunnerWorkspaceResponse {
+	switch request.Operation {
 	case domain.RunnerWorkspaceOperationInfo:
 		changes, warning := runnerCollectWorkspaceChanges(ctx, root, request.Repositories)
 		payload := map[string]any{

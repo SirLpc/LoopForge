@@ -1,6 +1,8 @@
 package repo
 
 import (
+	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -66,6 +68,38 @@ func (r *ProjectsRepo) Projects() []domain.Project {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// WorkspaceMode reads the placement policy before a repository-backed owner is created.
+func (r *ProjectsRepo) WorkspaceMode(id string) (domain.WorkspaceMode, error) {
+	if id == "" {
+		return domain.WorkspaceModeCheckout, nil
+	}
+	var row projectRow
+	if err := r.DB.Select("payload").Take(&row, "id = ?", id).Error; err != nil {
+		return "", fmt.Errorf("read project workspace mode: %w", err)
+	}
+	var policy *struct {
+		Mode json.RawMessage `json:"workspaceMode"`
+	}
+	if err := json.Unmarshal(row.Payload, &policy); err != nil {
+		return "", fmt.Errorf("decode project workspace policy: %w", err)
+	}
+	if policy == nil {
+		return "", fmt.Errorf("missing project workspace policy object")
+	}
+	if policy.Mode == nil {
+		return domain.WorkspaceModeCheckout, nil
+	}
+	var mode domain.WorkspaceMode
+	if err := json.Unmarshal(policy.Mode, &mode); err != nil {
+		return "", err
+	}
+	switch mode {
+	case domain.WorkspaceModeCheckout, domain.WorkspaceModeWarmPool:
+		return mode, nil
+	}
+	return "", fmt.Errorf("invalid project workspace mode %q", mode)
 }
 
 func (r *ProjectsRepo) Project(id string) (domain.Project, bool) {

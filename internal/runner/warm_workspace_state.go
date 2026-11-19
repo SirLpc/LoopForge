@@ -448,3 +448,44 @@ func (p *warmWorkspacePool) close() error {
 	}
 	return errors.Join(lockErr, dirErr)
 }
+
+func checkDisabledWarmJournal(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	path = absolute
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	dir, err := openWarmWorkspaceDir(filepath.Dir(path), false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	p := warmWorkspacePool{journalDir: dir}
+	file, err := p.openJournalFile(filepath.Base(path), unix.O_RDONLY)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect disabled warm workspace pool: %w", err)
+	}
+	defer file.Close()
+	var journal warmWorkspaceJournal
+	if err := decodeWarmWorkspaceJSON(file, &journal); err != nil {
+		return fmt.Errorf("invalid warm workspace journal: %w", err)
+	}
+	if journal.Version != 1 || journal.Leases == nil || journal.Slots == nil {
+		return errors.New("invalid disabled warm workspace pool journal")
+	}
+	for _, a := range journal.Leases {
+		if a.Phase != warmWorkspaceReleased {
+			return errors.New("active warm workspace leases require the registered pool configuration")
+		}
+	}
+	return nil
+}

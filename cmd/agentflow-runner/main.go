@@ -24,6 +24,9 @@ func main() {
 	if runtime.RunMCPCallCLI(os.Args[1:]) {
 		return
 	}
+	if runner.RunWarmGitHelperCLI(os.Args[1:]) {
+		return
+	}
 	if runtime.RunGitHelperCLI(os.Args[1:]) {
 		return
 	}

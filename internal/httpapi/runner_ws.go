@@ -135,7 +135,7 @@ func (h *runnerControlHub) request(ctx context.Context, runnerID string, request
 	var waitUntil time.Time
 	for attempt := 0; attempt < 4; attempt++ {
 		conn, relay, err := h.connFor(ctx, runnerID, mayRelay, expectReconnect, &waitUntil)
-		if warm && (relay != nil || err == nil) {
+		if (warm || !mayRelay && h.authorizeWarm != nil) && (relay != nil || err == nil) {
 			authorize := h.authorizeWarm
 			if scoped, ok := ctx.Value(workspaceWriterEngineKey{}).(*engine.Engine); ok && !domain.IsWarmWorkspaceOperation(request.Operation) {
 				authorize = scoped.AuthorizeWarmWorkspaceControl

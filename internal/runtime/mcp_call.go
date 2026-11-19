@@ -172,9 +172,20 @@ func installMCPCallHelperForSandbox(sandbox Sandbox, workspace, dest string) err
 	if sandboxDriver(sandbox) != "docker" || goruntime.GOOS == "linux" {
 		return installMCPCallHelper(workspace, dest)
 	}
-	self, err := os.Executable()
+	src, err := linuxWorkspaceHelper()
 	if err != nil {
 		return err
+	}
+	return installMCPCallHelperFrom(workspace, src, dest)
+}
+
+func linuxWorkspaceHelper() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if goruntime.GOOS == "linux" {
+		return self, nil
 	}
 	pattern := strings.TrimSpace(os.Getenv("AGENTFLOW_RUNNER_BINARY"))
 	if !strings.Contains(pattern, "{os}") {
@@ -182,9 +193,9 @@ func installMCPCallHelperForSandbox(sandbox Sandbox, workspace, dest string) err
 	}
 	src := strings.NewReplacer("{os}", "linux", "{arch}", goruntime.GOARCH).Replace(pattern)
 	if _, err := os.Stat(src); err != nil {
-		return fmt.Errorf("Docker Git/MCP helper requires a Linux runner binary: set AGENTFLOW_RUNNER_BINARY with {os} and {arch}: %w", err)
+		return "", fmt.Errorf("Docker Git/MCP helper requires a Linux runner binary: set AGENTFLOW_RUNNER_BINARY with {os} and {arch}: %w", err)
 	}
-	return installMCPCallHelperFrom(workspace, src, dest)
+	return src, nil
 }
 
 func installMCPCallHelperFrom(workspace, src, dest string) error {

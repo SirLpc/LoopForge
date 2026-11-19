@@ -525,7 +525,11 @@ func (r *RunnersRepo) RunnerTaskAvailable(runnerID string, providers []string) (
 		return false, nil
 	}
 	var rows []runnerTaskRow
-	err := r.DB.Select("id").Where("status = ? AND (runner_id = '' OR runner_id = ?) AND provider IN ?", domain.RunnerTaskQueued, runnerID, allowed).Limit(1).Find(&rows).Error
+	query, err := r.compatibleRunnerTaskQuery(r.DB, runnerID, false)
+	if err != nil {
+		return false, err
+	}
+	err = query.Select("id").Where("status = ? AND (runner_id = '' OR runner_id = ?) AND provider IN ?", domain.RunnerTaskQueued, runnerID, allowed).Limit(1).Find(&rows).Error
 	return len(rows) > 0, err
 }
 
@@ -552,8 +556,12 @@ func (r *RunnersRepo) ClaimRunnerTask(runnerID string, providers []string, now t
 	var claimed domain.RunnerTask
 	var found bool
 	err := r.DB.Transaction(func(tx *gorm.DB) error {
+		query, err := r.compatibleRunnerTaskQuery(tx, runnerID, true)
+		if err != nil {
+			return err
+		}
 		var rows []runnerTaskRow
-		if err := r.locking(tx).
+		if err := query.
 			Where("status = ? AND (runner_id = '' OR runner_id = ?) AND provider IN ?", domain.RunnerTaskQueued, runnerID, allowed).
 			Order("created_at").Limit(1).
 			Find(&rows).Error; err != nil {
@@ -945,4 +953,24 @@ func (r *RunnersRepo) CancelRunnerTasksForRun(runID string, now time.Time) ([]st
 		ids = append(ids, task.ID)
 	}
 	return ids, nil
+}
+
+// Older daemons ignore unknown JSON fields, so never send them tasks whose
+// isolation depends on the typed warm lease. Unrelated work stays claimable.
+func (r *RunnersRepo) compatibleRunnerTaskQuery(db *gorm.DB, runnerID string, lock bool) (*gorm.DB, error) {
+	lookup := db
+	query := db
+	if lock {
+		lookup = r.locking(db)
+		query = r.locking(db)
+	}
+	var machine runnerRow
+	err := lookup.Select("runner_version").Take(&machine, "id = ?", runnerID).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if !(domain.Runner{RunnerVersion: machine.RunnerVersion}).SupportsWarmWorkspace() {
+		query = query.Where("JSON_EXTRACT(payload, '$.warmWorkspaceLease') IS NULL")
+	}
+	return query, nil
 }

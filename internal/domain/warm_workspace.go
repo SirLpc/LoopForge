@@ -72,3 +72,14 @@ func IsWarmWorkspaceOperation(op string) bool {
 	}
 	return false
 }
+
+// IsWorkspaceGitRead identifies views that invoke Git on worktree metadata.
+func IsWorkspaceGitRead(op, ref string) bool {
+	switch op {
+	case RunnerWorkspaceOperationInfo, RunnerWorkspaceOperationCheckouts, RunnerWorkspaceOperationLog, RunnerWorkspaceOperationCommit, RunnerWorkspaceOperationDiff:
+		return true
+	case RunnerWorkspaceOperationFile:
+		return ref != ""
+	}
+	return false
+}

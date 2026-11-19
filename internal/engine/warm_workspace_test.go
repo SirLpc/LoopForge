@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"slices"
 	"testing"
 	"time"
@@ -114,6 +117,17 @@ func TestWarmWorkspaceSharedOwnerAndNoFallback(t *testing.T) {
 	if err := e.repo.SettleWarmWorkspace(l, domain.WarmWorkspaceReady); err != nil {
 		t.Fatal(err)
 	}
+	observed := domain.RunnerWorkspaceRequest{RunID: child.ID, Operation: domain.RunnerWorkspaceOperationFile}
+	if err := e.AuthorizeWarmWorkspaceControl("machine", &observed); err == nil {
+		t.Error("inbound request minted current lease")
+	}
+	if observed.WarmWorkspaceLease != nil {
+		t.Fatal("failed last-hop check mutated inbound lease")
+	}
+	foreign := domain.RunnerWorkspaceRequest{RunID: "unknown", WorkspaceRunID: owner.ID, Operation: domain.RunnerWorkspaceOperationFile}
+	if err := e.AuthorizeWarmWorkspaceControl("machine", &foreign); err == nil {
+		t.Fatal("untracked run reached allocated workspace")
+	}
 	for _, op := range []string{domain.RunnerWorkspaceOperationFile, domain.RunnerWorkspaceOperationTerminal} {
 		req := domain.RunnerWorkspaceRequest{RunID: child.ID, Operation: op, Terminal: &domain.WorkspaceTerminalRequest{Operation: "input"}}
 		if err := e.BindWorkspaceLease(child, &req); err != nil {
@@ -134,6 +148,42 @@ func TestWarmWorkspaceSharedOwnerAndNoFallback(t *testing.T) {
 	if queued.WarmWorkspaceLease == nil || queued.WarmWorkspaceLease.OwnerRunID != owner.ID {
 		t.Fatal(queued)
 	}
+	browser := domain.RunnerWorkspaceRequest{RunID: child.ID, Operation: domain.RunnerWorkspaceOperationBrowser, Browser: &domain.BrowserRequest{}, WarmWorkspaceLease: &l}
+	e.controlToken = "test-internal"
+	var seen *domain.WarmWorkspaceLease
+	e.WorkspaceCheckpointTransport = func(_ context.Context, _ domain.Run, request domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		seen = request.WarmWorkspaceLease
+		return domain.RunnerWorkspaceResponse{}, nil
+	}
+	sendBrowser := func() int {
+		data, err := json.Marshal(browser)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/", bytes.NewReader(data))
+		req.Header.Set(controlTokenHeader, e.controlToken)
+		rec := httptest.NewRecorder()
+		e.HandleWorkspaceCheckpoint(rec, req)
+		return rec.Code
+	}
+	if status := sendBrowser(); status != 200 || seen == nil || seen.Generation != l.Generation {
+		t.Fatalf("browser checkpoint lost its observed generation: status=%d lease=%v", status, seen)
+	}
+	browser.WarmWorkspaceLease = nil
+	seen = nil
+	if status := sendBrowser(); status == 200 || seen != nil {
+		t.Fatal("browser accepted missing generation")
+	}
+	if err := e.repo.RunnerHeartbeat("machine", nil, "0.11.0", now, now.Add(time.Hour), nil); err != nil {
+		t.Fatal(err)
+	}
+	browser.WarmWorkspaceLease = &l
+	if err := e.AuthorizeWarmWorkspaceControl("machine", &browser); err == nil {
+		t.Fatal("ready operation delivered to downgraded runner")
+	}
+	if err := e.putWorkspaceRunnerTask(task); err == nil {
+		t.Fatal("warm task submitted to downgraded runner")
+	}
 	task.RunnerID = "other-machine"
 	if err := e.putWorkspaceRunnerTask(task); err == nil {
 		t.Fatal("dispatched to a different runner")
@@ -141,5 +191,13 @@ func TestWarmWorkspaceSharedOwnerAndNoFallback(t *testing.T) {
 	queued, _ = e.repo.RunnerTask(task.ID)
 	if queued.RunnerID != "machine" {
 		t.Fatal("existing task switched machines")
+	}
+}
+
+func TestWarmWorkspaceFreezeRequiresReadableProjectMode(t *testing.T) {
+	e, _ := cvEEngine(t)
+	ec := domain.TelemetryContext{ProjectID: "missing"}
+	if err := e.freezeWarmWorkspace(&ec, []domain.RepositoryContext{{RepositoryID: "a"}}, domain.SandboxProfile{}); err == nil {
+		t.Fatal("missing project silently used checkout")
 	}
 }

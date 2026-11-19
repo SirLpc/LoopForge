@@ -454,6 +454,9 @@ func (r *RunsRepo) CancelQueuedRun(id string) (bool, error) {
 			return nil
 		}
 		cancelled = true
+		if err := r.runners.cancelWarmOwnerInTx(tx, id); err != nil {
+			return err
+		}
 		return tx.Model(&runRow{}).Where("id = ?", id).Updates(map[string]any{"status": "cancelled", "admission_state": "unstarted", "revision": gorm.Expr("revision + 1"), "updated_at": time.Now().UTC()}).Error
 	})
 	return cancelled, err

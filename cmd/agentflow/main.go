@@ -23,6 +23,7 @@ import (
 	"agentflow/internal/notification"
 	"agentflow/internal/preview"
 	"agentflow/internal/repo"
+	"agentflow/internal/runner"
 	"agentflow/internal/runtime"
 	"agentflow/internal/tracker"
 	"github.com/gin-gonic/gin"
@@ -76,6 +77,9 @@ func loadDotEnv() {
 
 func main() {
 	if runtime.RunMCPCallCLI(os.Args[1:]) {
+		return
+	}
+	if runner.RunWarmGitHelperCLI(os.Args[1:]) {
 		return
 	}
 	if runtime.RunGitHelperCLI(os.Args[1:]) {

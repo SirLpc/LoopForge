@@ -64,23 +64,9 @@ func (e *Engine) Cancel(runID string) error {
 		}
 		return fmt.Errorf("run is not active")
 	}
-	// Observe the demand before recording this cancellation. A delayed cancel
-	// must never invalidate a later requeue of the same workspace owner.
-	var observed domain.WarmWorkspaceLease
-	if !sharesWorkspace(r) && r.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
-		observed, _, _, err = e.repo.WarmWorkspaceAllocation(runID)
-		if err != nil {
-			return err
-		}
-	}
 	r, err = e.repo.RequestRunCancel(runID)
 	if err != nil {
 		return err
-	}
-	if observed.Epoch != 0 {
-		if err := e.repo.CancelWarmWorkspaceEpoch(runID, observed.Epoch, time.Now()); err != nil {
-			return err
-		}
 	}
 	full, _ := e.repo.RunState(runID)
 	for _, childID := range childRunIDs(full) {

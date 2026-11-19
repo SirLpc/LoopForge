@@ -72,7 +72,8 @@ func (e *Engine) readyWarmLease(run domain.Run) (*domain.WarmWorkspaceLease, err
 	if err != nil {
 		return nil, err
 	}
-	if !found || state != domain.WarmWorkspaceReady || l.RunnerID != e.defaultExecutionRunner(run) {
+	runner, ok := e.repo.Runner(l.RunnerID)
+	if !found || !ok || !runner.SupportsWarmWorkspace() || state != domain.WarmWorkspaceReady || l.RunnerID != e.defaultExecutionRunner(run) {
 		return nil, errors.New("warm workspace is not ready on the bound runner")
 	}
 	return &l, nil
@@ -106,6 +107,19 @@ func (e *Engine) guardWarmRequest(run domain.Run, req *domain.RunnerWorkspaceReq
 	return nil
 }
 
+// Incoming work must present the generation the sending authority observed.
+func (e *Engine) verifyObservedWarmRequest(run domain.Run, req *domain.RunnerWorkspaceRequest) error {
+	checked := *req
+	if err := e.guardWarmRequest(run, &checked); err != nil {
+		return err
+	}
+	if checked.WarmWorkspaceLease != nil && req.WarmWorkspaceLease == nil {
+		return errors.New("missing observed warm workspace lease")
+	}
+	*req = checked
+	return nil
+}
+
 func (e *Engine) putWorkspaceRunnerTask(task domain.RunnerTask) error {
 	if task.RunID != "" {
 		if run, ok := e.repo.RunState(task.RunID); ok {
@@ -117,6 +131,12 @@ func (e *Engine) putWorkspaceRunnerTask(task domain.RunnerTask) error {
 				return errors.New("invalid pooled workspace task")
 			}
 			task.WarmWorkspaceLease = l
+			if l != nil && task.Sandbox == nil {
+				task.Sandbox, err = e.runnerSandboxSpec(run)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return e.repo.PutRunnerTask(task)
@@ -182,7 +202,11 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 		}
 		switch state {
 		case domain.WarmWorkspaceReady:
-			return l, nil
+			verified, err := e.readyWarmLease(run)
+			if err != nil {
+				return empty, err
+			}
+			return *verified, nil
 		case domain.WarmWorkspaceQueued:
 			var allocated domain.WarmWorkspaceLease
 			var ok bool
@@ -252,9 +276,11 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	if len(repositories) == 0 {
 		return nil
 	}
-	if project, ok := e.repo.Project(ec.ProjectID); ok {
-		ec.WorkspaceMode = project.WorkspaceMode
+	mode, err := e.repo.WorkspaceMode(ec.ProjectID)
+	if err != nil {
+		return err
 	}
+	ec.WorkspaceMode = mode
 	if ec.WorkspaceMode != domain.WorkspaceModeWarmPool {
 		return nil
 	}

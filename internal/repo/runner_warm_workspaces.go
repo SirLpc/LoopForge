@@ -45,6 +45,35 @@ func matchesWarmLease(row warmWorkspaceRow, l domain.WarmWorkspaceLease) bool {
 	return row.OwnerRunID == l.OwnerRunID && row.RunnerID == l.RunnerID && row.Epoch == l.Epoch && row.Generation != 0 && row.Generation == l.Generation && maps.Equal(row.Slots, l.Slots)
 }
 
+// A run-backed demand and its cancellation take the owner row first.
+func warmOwnerCanQueue(tx *gorm.DB, id string) error {
+	var owner runRow
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("status", "cancel_requested").Take(&owner, "id = ?", id).Error
+	// Allocator-only owners have no run control row.
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if owner.CancelRequested || owner.Status == "cancelled" {
+		return errors.New("warm workspace owner cancelled")
+	}
+	return nil
+}
+
+func (r *RunnersRepo) cancelWarmOwnerInTx(tx *gorm.DB, owner string) error {
+	var row warmWorkspaceRow
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("owner_run_id", "epoch").Take(&row, "owner_run_id = ?", owner).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return cancelWarmEpoch(tx, owner, row.Epoch)
+}
+
 func (r *RunnersRepo) EnqueueWarmWorkspace(d domain.WarmWorkspaceDemand, now time.Time) error {
 	ids := slices.Clone(d.RepositoryIDs)
 	slices.Sort(ids)
@@ -53,6 +82,9 @@ func (r *RunnersRepo) EnqueueWarmWorkspace(d domain.WarmWorkspaceDemand, now tim
 	}
 	row := warmWorkspaceRow{OwnerRunID: d.OwnerRunID, RunnerID: d.RunnerID, ProjectID: d.ProjectID, RepositoryIDs: ids, QueuedAt: now, State: domain.WarmWorkspaceQueued}
 	return r.DB.Transaction(func(tx *gorm.DB) error {
+		if err := warmOwnerCanQueue(tx, d.OwnerRunID); err != nil {
+			return err
+		}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 			return err
 		}
@@ -72,6 +104,9 @@ func (r *RunnersRepo) EnqueueWarmWorkspace(d domain.WarmWorkspaceDemand, now tim
 // retries do not resurrect completed or canceled work.
 func (r *RunnersRepo) RequeueWarmWorkspace(previous domain.WarmWorkspaceLease, now time.Time) error {
 	return r.DB.Transaction(func(tx *gorm.DB) error {
+		if err := warmOwnerCanQueue(tx, previous.OwnerRunID); err != nil {
+			return err
+		}
 		var row warmWorkspaceRow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "owner_run_id = ?", previous.OwnerRunID).Error; err != nil {
 			return err
@@ -178,8 +213,11 @@ func (r *RunnersRepo) CancelWarmWorkspace(ownerRunID string, now time.Time) erro
 }
 
 func (r *RunnersRepo) CancelWarmWorkspaceEpoch(ownerRunID string, epoch uint64, now time.Time) error {
+	return cancelWarmEpoch(r.DB, ownerRunID, epoch)
+}
+func cancelWarmEpoch(tx *gorm.DB, ownerRunID string, epoch uint64) error {
 	// A reservation may already be on disk, even if its acknowledgement was lost.
-	return r.DB.Model(&warmWorkspaceRow{}).Where("owner_run_id = ? AND epoch = ? AND state IN ?", ownerRunID, epoch, []domain.WarmWorkspaceState{domain.WarmWorkspaceQueued, domain.WarmWorkspaceReserved, domain.WarmWorkspaceReady, domain.WarmWorkspaceBlocked}).Update("state", gorm.Expr("CASE WHEN state = ? THEN ? ELSE ? END", domain.WarmWorkspaceQueued, domain.WarmWorkspaceCanceled, domain.WarmWorkspaceReleasing)).Error
+	return tx.Model(&warmWorkspaceRow{}).Where("owner_run_id = ? AND epoch = ? AND state IN ?", ownerRunID, epoch, []domain.WarmWorkspaceState{domain.WarmWorkspaceQueued, domain.WarmWorkspaceReserved, domain.WarmWorkspaceReady, domain.WarmWorkspaceBlocked}).Update("state", gorm.Expr("CASE WHEN state = ? THEN ? ELSE ? END", domain.WarmWorkspaceQueued, domain.WarmWorkspaceCanceled, domain.WarmWorkspaceReleasing)).Error
 }
 
 func (r *RunnersRepo) SettleWarmWorkspace(l domain.WarmWorkspaceLease, state domain.WarmWorkspaceState) error {

@@ -157,13 +157,30 @@ func (e *Engine) HandleWorkspaceCheckpoint(w http.ResponseWriter, r *http.Reques
 		e.handleWarmWorkspaceCheckpoint(w, r, run, request)
 		return
 	}
-	if err := e.guardWarmRequest(run, &request); err != nil {
+	if err := e.verifyObservedWarmRequest(run, &request); err != nil {
 		http.Error(w, "unexpected warm workspace lease", 400)
 		return
 	}
 	if request.Operation == domain.RunnerWorkspaceOperationBrowser {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(e.HandleBrowserRequest(r.Context(), run, request.Browser))
+		if request.WarmWorkspaceLease != nil {
+			if e.WorkspaceCheckpointTransport == nil || request.Browser == nil {
+				http.Error(w, "invalid browser transport", 409)
+				return
+			}
+			if err := e.AuthorizeWarmWorkspaceControl(e.defaultExecutionRunner(run), &request); err != nil {
+				http.Error(w, err.Error(), 409)
+				return
+			}
+			result, err := e.WorkspaceCheckpointTransport(r.Context(), run, request)
+			if err != nil {
+				http.Error(w, err.Error(), 503)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(result)
+		} else {
+			_ = json.NewEncoder(w).Encode(e.HandleBrowserRequest(r.Context(), run, request.Browser))
+		}
 		return
 	}
 	transfer := domain.IsWorkspaceCheckpointTransferOperation(request.Operation)
