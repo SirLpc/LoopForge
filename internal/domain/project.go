@@ -24,6 +24,7 @@ type Project struct {
 	OwnerID             int64             `json:"ownerId,omitempty"`
 	Members             []ProjectMember   `json:"members,omitempty"`
 	RunEval             RunEvalPolicy     `json:"runEval,omitempty"`
+	WorkspaceMode       WorkspaceMode     `json:"workspaceMode,omitempty"`
 	// Deprecated project-level credential fields are kept only so old payloads
 	// can be decoded and scrubbed by the schema migration.
 	GitToken                     string    `json:"-"`

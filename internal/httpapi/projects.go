@@ -3,6 +3,7 @@ package httpapi
 import (
 	"agentflow/internal/domain"
 	"agentflow/internal/repo"
+	"encoding/json"
 	"errors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -24,7 +25,8 @@ func (h *projectsHandlers) projects(c *gin.Context) {
 	if r.Method == http.MethodPut || r.Method == http.MethodPost {
 		var body struct {
 			domain.Project
-			TAPDClear bool `json:"tapdClear"`
+			TAPDClear     bool            `json:"tapdClear"`
+			WorkspaceMode json.RawMessage `json:"workspaceMode"`
 		}
 		if !decode(c, &body) {
 			return
@@ -67,6 +69,13 @@ func (h *projectsHandlers) projects(c *gin.Context) {
 						return
 					}
 				}
+			}
+		}
+		if len(body.WorkspaceMode) > 0 {
+			if err := json.Unmarshal(body.WorkspaceMode, &v.WorkspaceMode); err != nil ||
+				(v.WorkspaceMode != domain.WorkspaceModeCheckout && v.WorkspaceMode != domain.WorkspaceModeWarmPool) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "workspaceMode must be checkout or warm_pool"})
+				return
 			}
 		}
 		isNew := true

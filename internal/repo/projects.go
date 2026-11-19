@@ -17,6 +17,17 @@ func (r *ProjectsRepo) lockProjectInTx(tx *gorm.DB, id string) error {
 	return r.locking(tx).Select("id").Where("id = ?", id).First(&row).Error
 }
 
+func decodeProjectPayload(payload []byte) (domain.Project, error) {
+	var project domain.Project
+	if err := jsonUnmarshal(payload, &project); err != nil {
+		return domain.Project{}, err
+	}
+	if project.WorkspaceMode == "" {
+		project.WorkspaceMode = domain.WorkspaceModeCheckout
+	}
+	return project, nil
+}
+
 // Projects lists live projects; deleted (archived) ones are left out. Project
 // still returns an archived project so its history and restore keep working.
 func (r *ProjectsRepo) Projects() []domain.Project {
@@ -34,8 +45,8 @@ func (r *ProjectsRepo) Projects() []domain.Project {
 	}
 	out := make([]domain.Project, 0, len(rows))
 	for _, row := range rows {
-		var project domain.Project
-		if jsonUnmarshal(row.Payload, &project) != nil || project.ArchivedAt != nil {
+		project, err := decodeProjectPayload(row.Payload)
+		if err != nil || project.ArchivedAt != nil {
 			continue
 		}
 		if row.OwnerUserID != nil {
@@ -62,8 +73,8 @@ func (r *ProjectsRepo) Project(id string) (domain.Project, bool) {
 	if err := r.DB.Where("id = ?", id).Take(&row).Error; err != nil {
 		return domain.Project{}, false
 	}
-	var project domain.Project
-	if jsonUnmarshal(row.Payload, &project) != nil {
+	project, err := decodeProjectPayload(row.Payload)
+	if err != nil {
 		return domain.Project{}, false
 	}
 	if row.OwnerUserID != nil {
@@ -177,6 +188,17 @@ func (r *ProjectsRepo) writeProject(v domain.Project) error {
 		err := r.locking(tx).Where("id = ?", v.ID).Take(&current).Error
 		if err != nil && err != gorm.ErrRecordNotFound {
 			return err
+		}
+		// An omitted mode keeps the value from the row locked for this write.
+		if payload.WorkspaceMode == "" {
+			payload.WorkspaceMode = domain.WorkspaceModeCheckout
+			if err == nil {
+				previous, err := decodeProjectPayload(current.Payload)
+				if err != nil {
+					return err
+				}
+				payload.WorkspaceMode = previous.WorkspaceMode
+			}
 		}
 		// Only SetProjectBusinessDomain owns the assignment, even for stale project payloads.
 		v.BusinessDomainID = current.BusinessDomainID
