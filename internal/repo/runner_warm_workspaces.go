@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/gitwork"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -26,6 +27,31 @@ type warmWorkspaceRow struct {
 	LastActorID     int64
 	ReadyGeneration uint64
 	Slots           map[string]string `gorm:"serializer:json;type:json"`
+}
+
+// WarmSlotMatchesRepository binds a frozen checkout to the same origin the runner
+// inspected. An ID-only lookup is retained for callers without a frozen URL.
+func WarmSlotMatchesRepository(slot domain.WarmWorkspaceSlot, projectID string, repository domain.RepositoryContext) bool {
+	return slot.ProjectID == projectID && slot.RepositoryID == repository.RepositoryID &&
+		(repository.CloneURL == "" || slot.OriginSHA256 == gitwork.RemoteFingerprint(repository.CloneURL))
+}
+
+// CheckWarmWorkspaceRegistration accepts occupied slots. The allocator checks availability.
+func CheckWarmWorkspaceRegistration(r domain.Runner, projectID string, repositories []domain.RepositoryContext) error {
+	if !r.SupportsWarmWorkspace() {
+		return fmt.Errorf("当前执行机器需升级至 %s，或在已登记仓库的机器新开对话", domain.RunnerVersionWarmWorkspace)
+	}
+	for _, repository := range repositories {
+		if !slices.ContainsFunc(r.WarmWorkspaceSlots, func(slot domain.WarmWorkspaceSlot) bool {
+			return slot.State != "blocked" && WarmSlotMatchesRepository(slot, projectID, repository)
+		}) {
+			return fmt.Errorf("请在当前执行机器登记仓库 %s 的预热工作区，或在已登记的机器新开对话", repository.RepositoryID)
+		}
+	}
+	if len(repositories) == 0 {
+		return fmt.Errorf("请指定已登记的项目仓库")
+	}
+	return nil
 }
 
 func validateWarmInventory(slots []domain.WarmWorkspaceSlot) error {
@@ -148,23 +174,46 @@ func (r *RunnersRepo) ReserveNextWarmWorkspace(runnerID string, now time.Time) (
 		if machine.Status != domain.RunnerStatusOnline || !(domain.Runner{RunnerVersion: machine.RunnerVersion}).SupportsWarmWorkspace() {
 			return nil
 		}
-		var rows []warmWorkspaceRow
-		if err := tx.Where("runner_id = ? AND state NOT IN ?", runnerID, []domain.WarmWorkspaceState{domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled}).Order("queued_at,owner_run_id").Find(&rows).Error; err != nil {
+		// Any poller can reserve the oldest eligible owner. Read each queued
+		// owner's frozen repository projection, including pre-upgrade demands.
+		var rows []struct {
+			Demand                   warmWorkspaceRow `gorm:"embedded"`
+			Repository, Repositories []byte
+		}
+		err := tx.Table("runner_warm_workspaces AS demand").Select("demand.*, frozen_run.repository, frozen_run.repositories").
+			Joins("LEFT JOIN runs AS frozen_run ON frozen_run.id = demand.owner_run_id AND demand.state = ?", domain.WarmWorkspaceQueued).
+			Where("demand.runner_id = ? AND demand.state NOT IN ?", runnerID, []domain.WarmWorkspaceState{domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled}).
+			Order("demand.queued_at,demand.owner_run_id").Find(&rows).Error
+		if err != nil {
 			return err
 		}
 		used := map[string]bool{}
 		for _, row := range rows {
-			for _, id := range row.Slots {
+			for _, id := range row.Demand.Slots {
 				used[id] = true
 			}
 		}
-		for _, row := range rows {
+		for _, entry := range rows {
+			row := entry.Demand
 			if row.State != domain.WarmWorkspaceQueued {
 				continue
 			}
+			frozen := runFromRow(runRow{Repository: entry.Repository, Repositories: entry.Repositories}).RepositoryContexts()
+			required := make(map[string]domain.RepositoryContext, len(row.RepositoryIDs))
+			for _, repository := range frozen {
+				if slices.Contains(row.RepositoryIDs, repository.RepositoryID) {
+					required[repository.RepositoryID] = repository
+				}
+			}
+			if len(frozen) == 0 {
+				for _, id := range row.RepositoryIDs {
+					required[id] = domain.RepositoryContext{RepositoryID: id}
+				}
+			}
 			slots := map[string]string{}
 			for _, slot := range machine.WarmSlots {
-				if slot.State == "available" && slot.ProjectID == row.ProjectID && !used[slot.ID] && slices.Contains(row.RepositoryIDs, slot.RepositoryID) && slots[slot.RepositoryID] == "" {
+				repository, needed := required[slot.RepositoryID]
+				if needed && slot.State == "available" && !used[slot.ID] && slots[slot.RepositoryID] == "" && WarmSlotMatchesRepository(slot, row.ProjectID, repository) {
 					slots[slot.RepositoryID] = slot.ID
 				}
 			}
@@ -361,7 +410,7 @@ func (r *RunnersRepo) CheckWarmTarget(run domain.Run, state domain.WarmWorkspace
 	if machine.Status != domain.RunnerStatusOnline && state == domain.WarmWorkspaceQueued {
 		return nil // preserve an existing wait across a temporary disconnect
 	}
-	if err := runnerFromRow(machine).CheckWarmWorkspaceRegistration(run.ExecutionContext.ProjectID, run.RepositoryContexts()); err != nil {
+	if err := CheckWarmWorkspaceRegistration(runnerFromRow(machine), run.ExecutionContext.ProjectID, run.RepositoryContexts()); err != nil {
 		return errors.Join(errWarmTargetIncompatible, err)
 	}
 	return nil

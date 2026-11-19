@@ -10,6 +10,7 @@ import (
 
 	"agentflow/internal/domain"
 	"agentflow/internal/engine"
+	"agentflow/internal/repo"
 )
 
 type warmConversationHandoff struct {
@@ -199,7 +200,7 @@ func (h *agentToolGateway) hasOtherWarmSlot(run domain.Run, old domain.WarmWorks
 		return false
 	}
 	for _, slot := range r.WarmWorkspaceSlots {
-		if slot.ProjectID == run.ExecutionContext.ProjectID && slot.RepositoryID == repos[0].RepositoryID && slot.State != "blocked" && old.Slots[slot.RepositoryID] != slot.ID {
+		if repo.WarmSlotMatchesRepository(slot, run.ExecutionContext.ProjectID, repos[0]) && slot.State != "blocked" && old.Slots[slot.RepositoryID] != slot.ID {
 			return true
 		}
 	}

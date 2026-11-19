@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/repo"
 )
 
 func (e *Engine) warmWorkspaceOwner(run domain.Run) (domain.Run, error) {
@@ -312,7 +313,7 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 		e.mu.Unlock()
 		if pool.serves(ec.ProjectID) {
 			for _, r := range e.eligiblePoolRunners(pool.Label) {
-				if r.CheckWarmWorkspaceRegistration(ec.ProjectID, repositories) == nil {
+				if repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
 					ec.ExecutionRunnerID = r.ID
 					ec.ExecutionPool = domain.ExecutionModeCloud
 					break
@@ -324,7 +325,7 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	if !ok {
 		return errors.New("请在当前执行机器登记项目仓库的预热工作区，或在已登记的机器新开对话")
 	}
-	return r.CheckWarmWorkspaceRegistration(ec.ProjectID, repositories)
+	return repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories)
 }
 
 var errWarmControlRejected = errors.New("warm workspace control rejected")

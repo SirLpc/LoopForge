@@ -303,7 +303,8 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		}
 	}
 	allowedBranch := ""
-	if previous != nil && previous.RepositoryID == repo.RepositoryID && previous.Commit == head && previous.Branch != "" {
+	returnedHead := previous != nil && previous.RepositoryID == repo.RepositoryID && previous.Commit == head
+	if returnedHead && previous.Branch != "" {
 		raw, err := os.ReadFile(filepath.Join(old, "HEAD"))
 		if err != nil {
 			return "", err
@@ -313,10 +314,16 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		}
 	}
 	if err := verifyWarmRefs(local, old, db, allowedBranch, previous != nil); err != nil {
+		if returnedHead && errors.Is(err, errWarmRemoteTrackingChanged) {
+			return "", errors.Join(errWarmCheckoutRetryable, err)
+		}
 		return "", err
 	}
 	if !fresh {
 		if err := authorizeWarmRestore(local, auth, private, db, repo, head); err != nil {
+			if returnedHead {
+				return "", errors.Join(errWarmCheckoutRetryable, err)
+			}
 			return "", err
 		}
 	}

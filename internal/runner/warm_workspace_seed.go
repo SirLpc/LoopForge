@@ -13,6 +13,16 @@ import (
 	"agentflow/internal/gitwork"
 )
 
+var errWarmRemoteTrackingChanged = errors.New("remote tracking reference differs from advertised origin")
+
+func warmRefMismatch(name, reason string) error {
+	err := fmt.Errorf("warm seed ref %s %s", name, reason)
+	if strings.HasPrefix(name, "refs/remotes/origin/") {
+		return errors.Join(errWarmRemoteTrackingChanged, err)
+	}
+	return err
+}
+
 // Read ref files as data without letting the seed select Git configuration.
 // A local ref must have a corresponding remote name before its metadata
 // can be exchanged, even when its object also belongs to another branch.
@@ -83,7 +93,10 @@ func verifyWarmRefs(ctx context.Context, meta, db, current string, returning boo
 		}
 	}
 	for name, oid := range refs {
-		if name == "refs/remotes/origin/HEAD" && strings.HasPrefix(oid, "ref: refs/remotes/origin/") && remote[strings.TrimPrefix(oid, "ref: ")] != "" {
+		if name == "refs/remotes/origin/HEAD" && strings.HasPrefix(oid, "ref: refs/remotes/origin/") {
+			if remote[strings.TrimPrefix(oid, "ref: ")] == "" {
+				return warmRefMismatch(name, "has no remote counterpart")
+			}
 			continue
 		}
 		if current != "" && name == "refs/heads/"+current {
@@ -98,8 +111,11 @@ func verifyWarmRefs(ctx context.Context, meta, db, current string, returning boo
 			return fmt.Errorf("warm seed has private Git ref %s", name)
 		}
 		tip := remote[peer]
-		if !warmCommitID.MatchString(oid) || tip == "" {
-			return fmt.Errorf("warm seed ref %s has no remote counterpart", name)
+		if !warmCommitID.MatchString(oid) {
+			return fmt.Errorf("invalid warm seed ref %s", name)
+		}
+		if tip == "" {
+			return warmRefMismatch(name, "has no remote counterpart")
 		}
 		if oid == tip {
 			continue
@@ -108,7 +124,7 @@ func verifyWarmRefs(ctx context.Context, meta, db, current string, returning boo
 			return fmt.Errorf("warm seed tag %s differs from the remote", name)
 		}
 		if _, err := gitwork.C(ctx, db, "merge-base", "--is-ancestor", oid, tip); err != nil {
-			return fmt.Errorf("warm seed ref %s has unpublished work", name)
+			return warmRefMismatch(name, "has unpublished work")
 		}
 	}
 	return nil

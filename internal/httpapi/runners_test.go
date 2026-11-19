@@ -975,7 +975,7 @@ func TestRunnerHeartbeatQualifiesWarmOrigin(t *testing.T) {
 		if len(m.WarmWorkspaceSlots) != 1 || m.WarmWorkspaceSlots[0].Generation != 7 {
 			t.Fatal(m.WarmWorkspaceSlots)
 		}
-		valid := m.CheckWarmWorkspaceRegistration("p", []domain.RepositoryContext{{RepositoryID: "code"}}) == nil
+		valid := repo.CheckWarmWorkspaceRegistration(m, "p", []domain.RepositoryContext{{RepositoryID: "code"}}) == nil
 		if valid != (fingerprint == hex.EncodeToString(good[:])) {
 			t.Errorf("wrong registration for evidence %q: %+v", fingerprint, m.WarmWorkspaceSlots)
 		}

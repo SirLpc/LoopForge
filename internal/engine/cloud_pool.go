@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/repo"
 )
 
 // CloudRunnerPool routes runs whose responsible user has no default
@@ -71,9 +72,12 @@ func (e *Engine) ConversationCloudRunner(projectID string) (string, error) {
 	}
 	runners := e.repo.Runners()
 	if p, ok := e.repo.Project(projectID); ok && p.WorkspaceMode == domain.WorkspaceModeWarmPool && p.DefaultRepositoryID != "" {
-		for _, runner := range runners {
-			if poolRunnerEligible(runner, pool.Label) && runner.SupportsConversationCLI() && runner.CheckWarmWorkspaceRegistration(projectID, []domain.RepositoryContext{{RepositoryID: p.DefaultRepositoryID}}) == nil {
-				return runner.ID, nil
+		if repository, found := e.repo.Repository(p.DefaultRepositoryID); found && repository.ProjectID == projectID && repository.CloneURL != "" {
+			frozen := []domain.RepositoryContext{{RepositoryID: repository.ID, CloneURL: repository.CloneURL}}
+			for _, runner := range runners {
+				if poolRunnerEligible(runner, pool.Label) && runner.SupportsConversationCLI() && repo.CheckWarmWorkspaceRegistration(runner, projectID, frozen) == nil {
+					return runner.ID, nil
+				}
 			}
 		}
 	}

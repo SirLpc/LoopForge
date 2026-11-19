@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/gitwork"
 )
 
 func warmQueueRunner(t *testing.T, s *Store, id string) time.Time {
@@ -227,5 +228,48 @@ func TestWarmWorkspaceQueueUsesNewRunnerJournalFloor(t *testing.T) {
 	next, ok, err := s.ReserveNextWarmWorkspace("new", now)
 	if err != nil || !ok || next.Generation <= 10 {
 		t.Fatalf("reservation used old journal generation %+v %v", next, err)
+	}
+}
+
+func TestWarmGrantRequiresFrozenOriginAfterRebind(t *testing.T) {
+	s := newTestRunner(t)
+	now := warmQueueRunner(t, s, "machine")
+	a := domain.RepositoryContext{RepositoryID: "code", CloneURL: "https://git.example.org/team/a.git"}
+	b := a
+	b.CloneURL = "https://git.example.org/team/b.git"
+	old := domain.Run{ID: "old", Status: "running", Repository: a, ExecutionContext: domain.TelemetryContext{ProjectID: "project", ExecutionRunnerID: "machine", WorkspaceMode: domain.WorkspaceModeWarmPool}}
+	if err := s.PutRun(old); err != nil {
+		t.Fatal(err)
+	}
+	slots := []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "project", RepositoryID: "code", State: "available", OriginSHA256: gitwork.RemoteFingerprint(a.CloneURL)}}
+	if err := s.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := s.Runner("machine")
+	if CheckWarmWorkspaceRegistration(m, "project", []domain.RepositoryContext{b}) == nil {
+		t.Error("new origin selected old seed heartbeat")
+	}
+	m.WarmWorkspaceSlots[0].OriginSHA256 = ""
+	if CheckWarmWorkspaceRegistration(m, "project", []domain.RepositoryContext{a}) == nil {
+		t.Fatal("digest-less heartbeat accepted for a frozen origin")
+	}
+	warmDemand(t, s, now, "machine", "old", "code")
+	slots[0].OriginSHA256 = gitwork.RemoteFingerprint(b.CloneURL)
+	if err := s.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err != nil {
+		t.Fatal(err)
+	}
+	fresh := old
+	fresh.ID = "new"
+	fresh.Repository = b
+	if err := s.PutRun(fresh); err != nil {
+		t.Fatal(err)
+	}
+	warmDemand(t, s, now.Add(time.Second), "machine", "new", "code")
+	l, ok, err := s.ReserveNextWarmWorkspace("machine", now)
+	if err != nil || !ok || l.OwnerRunID != "new" {
+		t.Errorf("rebound seed granted to %q: %v", l.OwnerRunID, err)
+	}
+	if err = s.CheckQueuedWarmTarget(old, domain.WarmWorkspaceLease{OwnerRunID: "old", Epoch: 1}); err == nil {
+		t.Error("old queued owner considered compatible")
 	}
 }

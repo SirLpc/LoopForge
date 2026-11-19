@@ -3,6 +3,7 @@ package httpapi
 import (
 	"agentflow/internal/domain"
 	"agentflow/internal/engine"
+	"agentflow/internal/gitwork"
 	"bytes"
 	"context"
 	"github.com/gin-gonic/gin"
@@ -29,7 +30,7 @@ func TestReadyWarmWorkspaceUsesOpeningActor(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	if err := a.repo.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "workbench", RepositoryID: "code", State: "available"}}); err != nil {
+	if err := a.repo.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "workbench", RepositoryID: "code", State: "available", OriginSHA256: gitwork.RemoteFingerprint(run.Repository.CloneURL)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.repo.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: run.ID, RunnerID: "machine", ProjectID: "workbench", RepositoryIDs: []string{"code"}}, now); err != nil {

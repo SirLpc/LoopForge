@@ -12,9 +12,12 @@ import (
 
 	"agentflow/internal/domain"
 	"agentflow/internal/engine"
+	"agentflow/internal/gitwork"
 	"agentflow/internal/repo"
 	"agentflow/internal/runtime"
 )
+
+const warmChatFixtureURL = "https://example.org/team/code.git"
 
 func warmChatFixture(t *testing.T) (*assistantHandlers, *AgentToolSession, domain.AssistantGeneration, assistantRequest) {
 	t.Helper()
@@ -26,14 +29,14 @@ func warmChatFixture(t *testing.T) (*assistantHandlers, *AgentToolSession, domai
 	if err := h.repo.PutProject(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.repo.PutRepository(domain.Repository{ID: "code", ProjectID: p.ID, Name: "code", CloneURL: "https://example.org/team/code.git", DefaultBranch: "main"}); err != nil {
+	if err := h.repo.PutRepository(domain.Repository{ID: "code", ProjectID: p.ID, Name: "code", CloneURL: warmChatFixtureURL, DefaultBranch: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.repo.PutRunner(domain.Runner{ID: "machine"}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	if err := h.repo.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: p.ID, RepositoryID: "code", State: "available"}}); err != nil {
+	if err := h.repo.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: p.ID, RepositoryID: "code", State: "available", OriginSHA256: gitwork.RemoteFingerprint(warmChatFixtureURL)}}); err != nil {
 		t.Fatal(err)
 	}
 	req := assistantRequest{ExecutionTarget: &domain.AssistantExecutionTarget{Pool: "cloud", RunnerID: "machine"}, SessionID: "chat", ProjectID: p.ID, Model: "codebuddy", Messages: []assistantMessage{{Role: "user", Content: "inspect registered code"}}, ApprovalMode: "request"}
@@ -50,8 +53,8 @@ func TestWarmWorkspaceConversationQueuesAndResumes(t *testing.T) {
 	h, s, g, req := warmChatFixture(t)
 	now := time.Now()
 	slots := []domain.WarmWorkspaceSlot{
-		{ID: "slot", ProjectID: s.ProjectID, RepositoryID: "code", State: "available"},
-		{ID: "other", ProjectID: s.ProjectID, RepositoryID: "code", State: "available"},
+		{ID: "slot", ProjectID: s.ProjectID, RepositoryID: "code", State: "available", OriginSHA256: gitwork.RemoteFingerprint(warmChatFixtureURL)},
+		{ID: "other", ProjectID: s.ProjectID, RepositoryID: "code", State: "available", OriginSHA256: gitwork.RemoteFingerprint(warmChatFixtureURL)},
 	}
 	if err := h.repo.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err != nil {
 		t.Fatal(err)
@@ -390,12 +393,19 @@ func TestWarmWorkspaceConversationRecoveryRetriesTransientAccess(t *testing.T) {
 func TestWarmWorkspaceConversationCloudPrefersDefaultRepo(t *testing.T) {
 	h, s, _, _ := warmChatFixture(t)
 	h.engine.ConfigureCloudRunnerPool(engine.CloudRunnerPool{Label: "cloud", Projects: []string{s.ProjectID}})
+	defaultRepo, _ := h.repo.Repository("code")
+	previousURL := defaultRepo.CloneURL
+	defaultRepo.CloneURL = "https://example.org/team/rebound.git"
+	if err := h.repo.PutRepository(defaultRepo); err != nil {
+		t.Fatal(err)
+	}
 	for _, machine := range []struct {
 		id, version string
 		slots       []domain.WarmWorkspaceSlot
 	}{
 		{"legacy", "0.11.0", nil},
-		{"warm", domain.RunnerVersionWarmWorkspace, []domain.WarmWorkspaceSlot{{ID: "slot2", RepositoryID: "code", ProjectID: s.ProjectID, State: "reserved"}}},
+		{"stale", domain.RunnerVersionWarmWorkspace, []domain.WarmWorkspaceSlot{{ID: "slot-stale", RepositoryID: "code", ProjectID: s.ProjectID, State: "available", OriginSHA256: gitwork.RemoteFingerprint(previousURL)}}},
+		{"warm", domain.RunnerVersionWarmWorkspace, []domain.WarmWorkspaceSlot{{ID: "slot2", RepositoryID: "code", ProjectID: s.ProjectID, State: "reserved", OriginSHA256: gitwork.RemoteFingerprint(defaultRepo.CloneURL)}}},
 	} {
 		if err := h.repo.PutRunner(domain.Runner{ID: machine.id, Labels: []string{"cloud"}}); err != nil {
 			t.Fatal(err)

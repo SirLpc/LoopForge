@@ -574,3 +574,61 @@ func TestWarmCheckoutReusesLegacyReturnedBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWarmCheckoutReturnedPinRecoversOnSameLease(t *testing.T) {
+	for _, pruneTracking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pruned=%t", pruneTracking), func(t *testing.T) {
+			f, p, l, g := warmReturnFixture(t)
+			old := runGitT(t, g.checkout, "rev-parse", "HEAD")
+			warmGitWrite(t, g.checkout, "new-file", "published")
+			runGitT(t, g.checkout, "add", "new-file")
+			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.org", "commit", "-qm", "new pin")
+			runGitT(t, g.checkout, "push", "origin", "HEAD")
+			refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = p.commitReturn(t.Context(), l, refs); err != nil {
+				t.Fatal(err)
+			}
+			// Substitute a remote with the same frozen URL and only the earlier history.
+			runGitT(t, g.source, "push", "--force", "origin", old+":refs/heads/master")
+			remote := g.repo.CloneURL
+			copy := filepath.Join(t.TempDir(), "replacement.git")
+			runGitT(t, g.source, "clone", "--bare", "--no-local", remote, copy)
+			if err = os.Rename(remote, remote+".original"); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.Rename(copy, remote); err != nil {
+				t.Fatal(err)
+			}
+			if pruneTracking {
+				runGitT(t, p.slots["a"].Path, "update-ref", "-d", "refs/remotes/origin/master")
+			}
+			l.Generation++
+			l.Epoch++
+			if err = p.reserve(l); err != nil {
+				t.Fatal(err)
+			}
+			if err = p.place(t.Context(), l, map[string]string{"a": "checkout"}); err != nil {
+				t.Fatal(err)
+			}
+			before := warmGitStat(t, filepath.Join(g.checkout, ".git"))
+			d := Daemon{cfg: Config{DefaultWorkspaceRoot: f.workspace}, state: daemonState{RunnerID: l.RunnerID}, warmWorkspacePool: p}
+			req := domain.RunnerWorkspaceRequest{RunID: l.OwnerRunID, Operation: domain.RunnerWorkspaceOperationWarmCheckout, WarmWorkspaceLease: &l, Sandbox: &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}}, PreparationInvocation: &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}, WarmWorkspaceRefs: refs}}
+			if res := d.readRunnerWorkspace(t.Context(), req); res.Code != domain.WorkspaceErrorWarmCheckoutRetryable || res.Error == "" {
+				t.Fatalf("missing pin should retain retryable lease: %+v", res)
+			}
+			if !os.SameFile(before, warmGitStat(t, filepath.Join(g.checkout, ".git"))) {
+				t.Fatal("metadata changed while pin unavailable")
+			}
+			runGitT(t, remote+".original", "push", remote, refs[0].Commit+":refs/heads/master")
+			if res := d.readRunnerWorkspace(t.Context(), req); res.Error != "" || !strings.Contains(string(res.Payload), "ready") {
+				t.Fatalf("restored pin: %+v", res)
+			}
+			if got := runGitT(t, g.checkout, "rev-parse", "HEAD"); got != refs[0].Commit {
+				t.Fatal(got)
+			}
+		})
+	}
+}
