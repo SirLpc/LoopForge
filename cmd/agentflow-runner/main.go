@@ -32,6 +32,7 @@ func main() {
 	name := flag.String("name", "", "runner display name (default: hostname)")
 	statePath := flag.String("state", "", "state file path (default: ~/.agentflow-runner/state.json)")
 	workspace := flag.String("workspace", "", "default workspace root for tasks without their own path")
+	warmWorkspacePoolFile := flag.String("warm-workspace-pool-file", "", "local warm workspace pool config (or AGENTFLOW_RUNNER_WORKSPACE_POOL_FILE)")
 	concurrency := flag.Int("concurrency", 1, "maximum concurrent tasks")
 	heartbeat := flag.Duration("heartbeat", 30*time.Second, "heartbeat interval")
 	longPoll := flag.Duration("long-poll", 35*time.Second, "client-side long-poll timeout; must exceed the server's")
@@ -47,6 +48,7 @@ func main() {
 		StatePath:              firstNonEmpty(*statePath, os.Getenv("AGENTFLOW_RUNNER_STATE_PATH")),
 		Name:                   firstNonEmpty(*name, os.Getenv("AGENTFLOW_RUNNER_NAME")),
 		DefaultWorkspaceRoot:   firstNonEmpty(*workspace, os.Getenv("AGENTFLOW_RUNNER_WORKSPACE")),
+		WarmWorkspacePoolFile:  firstNonEmpty(*warmWorkspacePoolFile, os.Getenv("AGENTFLOW_RUNNER_WORKSPACE_POOL_FILE")),
 		MaxConcurrency:         *concurrency,
 		HeartbeatInterval:      *heartbeat,
 		LongPollTimeout:        *longPoll,

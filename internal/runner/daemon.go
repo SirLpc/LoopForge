@@ -58,6 +58,7 @@ type Daemon struct {
 	workspacePreparation sync.Map
 	workspaceTerminals   runtime.TerminalPool
 	checkpointTransfers  runtime.CheckpointTransfers
+	warmWorkspacePool    *warmWorkspacePool
 	workspaceGates       sync.Map // run ID -> *sync.RWMutex; fences manual writes locally
 }
 
@@ -82,6 +83,8 @@ type Config struct {
 	// ManagedCLIRoot explicitly opts platform runners into managed CLI coordination.
 	// Empty leaves ordinary user runners unchanged; it is never inferred from PATH.
 	ManagedCLIRoot string
+	// WarmWorkspacePoolFile opts the runner into local warm workspace registration.
+	WarmWorkspacePoolFile string
 }
 
 type daemonState struct {
@@ -100,6 +103,7 @@ func DefaultStatePath() (string, error) {
 
 func New(cfg Config) (*Daemon, error) {
 	cfg.ManagedCLIRoot = strings.TrimSpace(cfg.ManagedCLIRoot)
+	cfg.WarmWorkspacePoolFile = strings.TrimSpace(cfg.WarmWorkspacePoolFile)
 	cfg.ServerURL = trimTrailingSlash(cfg.ServerURL)
 	if cfg.ServerURL == "" {
 		return nil, errors.New("server URL is required")
@@ -150,6 +154,14 @@ func trimTrailingSlash(s string) string {
 func (d *Daemon) Run(ctx context.Context) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	if d.cfg.WarmWorkspacePoolFile != "" {
+		pool, err := openWarmWorkspacePool(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json")
+		if err != nil {
+			return fmt.Errorf("open warm workspace pool: %w", err)
+		}
+		d.warmWorkspacePool = pool
+		defer pool.close()
+	}
 	if err := d.ensureRegistered(ctx); err != nil {
 		return err
 	}
