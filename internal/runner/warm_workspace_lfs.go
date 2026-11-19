@@ -186,7 +186,7 @@ func fetchWarmLFS(local, auth context.Context, db, scope, head string, repo doma
 		return err
 	}
 	if _, err := gitwork.C(auth, scope, "-c", "lfs.storage=lfs", "-c", "remote.origin.url="+repo.CloneURL, "-c", "lfs.fetchrecentalways=false", "lfs", "fetch", "--include=*", "--exclude=", "origin", head); err != nil {
-		return fmt.Errorf("cannot recover Git LFS objects: %w", err)
+		return fmt.Errorf("%w: cannot recover Git LFS objects: %w", errWarmCheckoutRetryable, err)
 	}
 	return nil
 }

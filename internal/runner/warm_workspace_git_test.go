@@ -443,7 +443,7 @@ func TestWarmCheckoutRevalidatesSeedAfterCachePromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := warmObjectCache(t.Context(), t.Context(), private, f.cache, f.checkout, head, f.repo)
+	db, err := warmObjectCache(t.Context(), t.Context(), private, f.cache, f.checkout, head, f.repo, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,4 +469,13 @@ func TestWarmCheckoutStopsOnLegacyExchangeResidue(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(legacy, ".git/config")); err != nil {
 		t.Fatal("ambiguous legacy directory must be retained for inspection")
 	}
+}
+
+func TestWarmCheckoutAfterIdleFastForward(t *testing.T) {
+	g := newWarmGitFixture(t)
+	g.prepare(t, nil)
+	warmGitWrite(t, g.source, "added", "incoming")
+	g.publish(t)
+	runGitT(t, g.checkout, "pull", "--ff-only")
+	g.prepare(t, nil)
 }

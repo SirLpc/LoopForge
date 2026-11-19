@@ -30,9 +30,6 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 		actor := run.ExecutionContext.ResponsibleUserID
 		if req.Operation == domain.RunnerWorkspaceOperationWarmVerifyAccess || req.Operation == domain.RunnerWorkspaceOperationWarmCheckout && req.WarmWorkspaceActorID != 0 {
 			actor = req.WarmWorkspaceActorID
-			if err := e.authorizeWarmActor(run, actor); err != nil {
-				return req, err
-			}
 		} else if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || run.IsWorkspace() {
 			selected, err := e.repo.WarmWorkspaceActor(*req.WarmWorkspaceLease)
 			if err != nil {
@@ -41,9 +38,9 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 			if selected != 0 {
 				actor = selected
 			}
-			if err = e.authorizeWarmActor(run, actor); err != nil {
-				return req, err
-			}
+		}
+		if err := e.authorizeWarmActor(run, actor); err != nil {
+			return req, errors.Join(errWarmControlRejected, err)
 		}
 		identity := resolveGitIdentity(e.repo, actor)
 		bindRunnerRepositories(inv, run, identity.name, identity.email)

@@ -69,6 +69,9 @@ func (h *browserHandlers) stream(c *gin.Context) {
 		c.JSON(401, gin.H{"error": "请先登录"})
 		return
 	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return
+	}
 	control := h.canControl(c.Request, run, user.ID)
 	ws, err := browserStreamUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {

@@ -17,21 +17,53 @@ func (p *warmWorkspacePool) inventory() []domain.WarmWorkspaceSlot {
 		return nil
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if err := p.ready(); err != nil {
+		p.mu.Unlock()
 		return nil
 	}
+	records := maps.Clone(p.state.Slots)
 	active := p.state.activeSlots()
-	var inventory []domain.WarmWorkspaceSlot
-	for _, id := range slices.Sorted(maps.Keys(p.slots)) {
-		slot := p.slots[id]
-		state := "blocked"
-		if active[id] {
-			state = "reserved"
-		} else if !p.state.Slots[id].NeedsInspection && p.inspectSlot(id, "").atHome {
-			state = "available"
+	journal := p.journalDir.Name()
+	p.mu.Unlock()
+
+	origins := make(map[string]string, len(records))
+	for id, record := range records {
+		if !active[id] && !record.NeedsInspection {
+			origins[id] = warmSlotOrigin(p.slots[id], record, journal)
 		}
-		inventory = append(inventory, domain.WarmWorkspaceSlot{ID: id, ProjectID: slot.ProjectID, RepositoryID: slot.RepositoryID, State: state, Generation: p.state.Slots[id].Generation})
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lock == nil {
+		return nil
+	}
+	active = p.state.activeSlots()
+	var inventory []domain.WarmWorkspaceSlot
+	if p.idleOrigins == nil {
+		p.idleOrigins = make(map[string]string)
+	}
+	for _, id := range slices.Sorted(maps.Keys(p.slots)) {
+		slot, record := p.slots[id], p.state.Slots[id]
+		state, origin := "blocked", record.OriginSHA256
+		idleOrigin, inspected := origins[id]
+		if !record.NeedsInspection {
+			switch {
+			case active[id]:
+				state = "reserved"
+			case records[id].Generation != record.Generation:
+				state = "reserved" // another generation took ownership during inspection
+			case !inspected && origin != "":
+				state = "reserved" // just returned; next idle inspection enables placement
+			default:
+				origin = idleOrigin
+				p.idleOrigins[id] = origin
+				if origin != "" {
+					state = "available"
+				}
+			}
+		}
+		inventory = append(inventory, domain.WarmWorkspaceSlot{ID: id, ProjectID: slot.ProjectID, RepositoryID: slot.RepositoryID, State: state, OriginSHA256: origin, Generation: record.Generation})
 	}
 	return inventory
 }
@@ -44,10 +76,10 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	}
 	// Git preparation and release proofs have their own lifetimes. A short
 	// control call may report placement, never readiness from placement alone.
-	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus {
-		if d.warmDockerUnavailable() {
-			return runnerWorkspaceError(errWarmDockerUnavailable)
-		}
+	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus && d.warmDockerUnavailable() {
+		return runnerWorkspaceError(errWarmDockerUnavailable)
+	}
+	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus && req.Operation != domain.RunnerWorkspaceOperationWarmVerifyAccess {
 		fence := d.workspaceGate("warm/" + l.OwnerRunID)
 		if !fence.TryLock() {
 			return workspaceBusyResponse("workspace is still in use")
@@ -70,14 +102,8 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 		}
 		auth := invocationGitHTTPContext(gitwork.WithSSHKeys(ctx, inv.GitSSHKeys), inv)
 		for _, r := range inv.Repositories {
-			if domain.URLHasCredentials(r.CloneURL) {
-				return runnerWorkspaceError(errors.New("warm access check requires a credential-free remote"))
-			}
-			if err := gitwork.ValidateRemoteURL(r.CloneURL, true); err != nil {
+			if err := verifyWarmRemoteAccess(auth, dir, r); err != nil {
 				return runnerWorkspaceError(err)
-			}
-			if _, err := gitwork.C(repositoryGitContext(auth, r), dir, "ls-remote", "--exit-code", "--", r.CloneURL, "HEAD"); err != nil {
-				return runnerWorkspaceError(errors.New("current actor cannot read the frozen remote"))
 			}
 		}
 		return runnerWorkspacePayload(map[string]string{"phase": "authorized"})
@@ -91,7 +117,11 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 		}
 		defer gate.Unlock()
 		if err := p.prepareLeaseCheckout(ctx, *l, req.PreparationInvocation); err != nil {
-			return runnerWorkspaceError(err)
+			resp := runnerWorkspaceError(err)
+			if errors.Is(err, errWarmCheckoutRetryable) {
+				resp.Code = domain.WorkspaceErrorWarmCheckoutRetryable
+			}
+			return resp
 		}
 
 	case domain.RunnerWorkspaceOperationWarmPrepare:

@@ -329,7 +329,22 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 
 // Existing placements stay on their original machine. Recheck compatibility
 // when joining the queue and while waiting for the first placement.
-func (r *RunnersRepo) CheckConversationWarmTarget(run domain.Run, state domain.WarmWorkspaceState) error {
+var errWarmTargetIncompatible = errors.New("执行机器不兼容")
+
+// A competing reservation or requeue wins over a stale poller's compatibility observation.
+func (r *RunnersRepo) CheckQueuedWarmTarget(run domain.Run, l domain.WarmWorkspaceLease) error {
+	err := r.CheckWarmTarget(run, domain.WarmWorkspaceQueued)
+	if !errors.Is(err, errWarmTargetIncompatible) {
+		return err
+	}
+	res := r.DB.Model(&warmWorkspaceRow{}).Where("owner_run_id = ? AND epoch = ? AND state = ?", run.ID, l.Epoch, domain.WarmWorkspaceQueued).Update("state", domain.WarmWorkspaceCanceled)
+	if res.Error != nil || res.RowsAffected == 0 {
+		return res.Error
+	}
+	return err
+}
+
+func (r *RunnersRepo) CheckWarmTarget(run domain.Run, state domain.WarmWorkspaceState) error {
 	switch state {
 	case "", domain.WarmWorkspaceQueued, domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled:
 	default:
@@ -338,7 +353,7 @@ func (r *RunnersRepo) CheckConversationWarmTarget(run domain.Run, state domain.W
 	var machine runnerRow
 	err := r.DB.Select("id", "status", "runner_version", "warm_slots").Take(&machine, "id = ?", run.ExecutionContext.ExecutionRunnerID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return errors.New("会话执行机器已移除，请在已登记仓库的机器新开对话")
+		return fmt.Errorf("%w：执行机器已移除，请在已登记仓库的机器新开对话", errWarmTargetIncompatible)
 	}
 	if err != nil {
 		return err
@@ -346,7 +361,10 @@ func (r *RunnersRepo) CheckConversationWarmTarget(run domain.Run, state domain.W
 	if machine.Status != domain.RunnerStatusOnline && state == domain.WarmWorkspaceQueued {
 		return nil // preserve an existing wait across a temporary disconnect
 	}
-	return runnerFromRow(machine).CheckWarmWorkspaceRegistration(run.ExecutionContext.ProjectID, run.RepositoryContexts())
+	if err := runnerFromRow(machine).CheckWarmWorkspaceRegistration(run.ExecutionContext.ProjectID, run.RepositoryContexts()); err != nil {
+		return errors.Join(errWarmTargetIncompatible, err)
+	}
+	return nil
 }
 
 // joinConversationDemand executes inside the transaction that parks a turn.
@@ -369,7 +387,7 @@ func (r *RunnersRepo) joinConversationDemand(tx *gorm.DB, run domain.Run) (uint6
 	if err != nil {
 		return 0, false, err
 	}
-	if err = scoped.CheckConversationWarmTarget(run, state); err != nil {
+	if err = scoped.CheckWarmTarget(run, state); err != nil {
 		return 0, false, err
 	}
 	if err = scoped.EnqueueWarmWorkspace(d, time.Now()); err != nil {

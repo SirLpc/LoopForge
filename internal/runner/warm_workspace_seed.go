@@ -2,9 +2,9 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,10 +16,6 @@ import (
 // Read ref files as data without letting the seed select Git configuration.
 // A local ref must have a corresponding remote name before its metadata
 // can be exchanged, even when its object also belongs to another branch.
-func verifyWarmSeedRefs(ctx context.Context, meta, db string) error {
-	return verifyWarmRefs(ctx, meta, db, "", false)
-}
-
 func verifyWarmRefs(ctx context.Context, meta, db, current string, returning bool) error {
 	if _, err := warmSeedIdentity(filepath.Join(meta, "refs")); err != nil {
 		return err
@@ -118,7 +114,21 @@ func verifyWarmRefs(ctx context.Context, meta, db, current string, returning boo
 	return nil
 }
 
-const warmSeedMarker = "pending-seed.json"
+func checkWarmStoredModules(meta string) error {
+	// A deinitialized submodule can still own unpublished branches or a
+	// stash in the parent Git directory even when its checkout is empty.
+	modules, err := openWarmWorkspaceDir(filepath.Join(meta, "modules"), false)
+	if err == nil {
+		_, readErr := modules.Readdirnames(1)
+		modules.Close()
+		if readErr != io.EOF {
+			return errors.New("inspect stored submodule repositories before exchanging checkout metadata")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
 
 func warmSeedIdentity(meta string) (warmWorkspaceIdentity, error) {
 	dir, err := openWarmWorkspaceDir(meta, false)
@@ -129,40 +139,7 @@ func warmSeedIdentity(meta string) (warmWorkspaceIdentity, error) {
 	return warmWorkspaceDirIdentity(dir)
 }
 
-func recordWarmSeedIdentity(meta, db string) error {
-	id, err := warmSeedIdentity(meta)
-	if err != nil {
-		return err
-	}
-	b, err := json.Marshal(id)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(db, warmSeedMarker), b, 0600)
-}
-
-// Cache publication precedes metadata exchange. Only the original directory
-// inode still requires operator-seed proof after a restart in that window.
-func pendingWarmSeed(meta, db string) (bool, error) {
-	b, err := os.ReadFile(filepath.Join(db, warmSeedMarker))
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	var expected warmWorkspaceIdentity
-	if err := json.Unmarshal(b, &expected); err != nil {
-		return false, err
-	}
-	if expected.Ino == 0 {
-		return false, errors.New("invalid pending warm seed identity")
-	}
-	id, err := warmSeedIdentity(meta)
-	return id == expected, err
-}
-
-func verifyWarmSeedIndex(local context.Context, db, private, checkout, head string) error {
+func verifyWarmSeedIndex(local context.Context, db, private, checkout, head string, checkFiles bool) error {
 	old := filepath.Join(checkout, ".git")
 	// Compare the seed index in trusted metadata. Never let the original
 	// repository config, hooks or index extensions choose the Git directory.
@@ -182,8 +159,10 @@ func verifyWarmSeedIndex(local context.Context, db, private, checkout, head stri
 	}
 	// Reject dirty operator work before making a credentialed request.
 	// The independent index built below verifies bytes again before promotion.
-	if _, err := gitwork.C(local, db, "--work-tree="+checkout, "-c", "filter.lfs.clean=git-lfs clean -- %f", "-c", "lfs.storage="+filepath.Join(private, "seed-lfs"), "diff-files", "--quiet", "--no-ext-diff", "--ignore-submodules=all", "--"); err != nil {
-		return fmt.Errorf("warm seed contains working tree edits: %w", err)
+	if checkFiles {
+		if _, err := gitwork.C(local, db, "--work-tree="+checkout, "-c", "filter.lfs.clean=git-lfs clean -- %f", "-c", "lfs.storage="+filepath.Join(private, "seed-lfs"), "diff-files", "--quiet", "--no-ext-diff", "--ignore-submodules=all", "--"); err != nil {
+			return fmt.Errorf("warm seed contains working tree edits: %w", err)
+		}
 	}
 	if err := os.Remove(filepath.Join(db, "index")); err != nil {
 		return err

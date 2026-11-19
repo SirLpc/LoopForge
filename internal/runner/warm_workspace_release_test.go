@@ -480,3 +480,97 @@ func TestWarmWorkspaceReleaseKeepsLibraryAndRestoresExactCommit(t *testing.T) {
 	}
 	warmPoolRequireSame(t, before, filepath.Join(home, "Library", "sentinel"))
 }
+
+func TestReturnedWarmCheckoutInspectsLiveMetadata(t *testing.T) {
+	for _, change := range []string{"stash", "branch", "index", "pending", "clean"} {
+		t.Run(change, func(t *testing.T) {
+			_, p, l, g := warmReturnFixture(t)
+			runGitT(t, g.checkout, "switch", "-c", "saved-work-branch")
+			refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = p.commitReturn(t.Context(), l, refs); err != nil {
+				t.Fatal(err)
+			}
+			home := p.slots["a"].Path
+			switch change {
+			case "stash":
+				warmGitWrite(t, home, "README.md", "operator notes")
+				runGitT(t, home, "stash")
+			case "branch":
+				runGitT(t, home, "branch", "extra")
+			case "index":
+				warmGitWrite(t, home, "README.md", "staged only")
+				runGitT(t, home, "add", "README.md")
+				runGitT(t, home, "restore", "--source=HEAD", "--worktree", "README.md")
+			case "pending":
+				warmGitWrite(t, home, ".git/MERGE_HEAD", refs[0].Commit)
+			}
+			old := warmGitStat(t, filepath.Join(home, ".git"))
+			l.Generation++
+			if err = p.reserve(l); err != nil {
+				t.Fatal(err)
+			}
+			if err = p.place(t.Context(), l, map[string]string{"a": "checkout"}); err != nil {
+				t.Fatal(err)
+			}
+			err = p.prepareLeaseCheckout(t.Context(), l, &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}})
+			if change == "clean" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !os.SameFile(old, warmGitStat(t, filepath.Join(g.checkout, ".git"))) {
+				t.Errorf("operator metadata was exchanged following %s", change)
+			}
+		})
+	}
+}
+
+func TestWarmCheckoutPreservesDeinitializedSubmodule(t *testing.T) {
+	g := newWarmGitFixture(t)
+	runGitT(t, g.checkout, "-c", "protocol.file.allow=always", "submodule", "add", g.repo.CloneURL, "nested")
+	runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.org", "commit", "-qm", "submodule")
+	runGitT(t, g.checkout, "push", "origin", "HEAD")
+	runGitT(t, filepath.Join(g.checkout, "nested"), "branch", "local")
+	runGitT(t, g.checkout, "submodule", "deinit", "-f", "nested")
+	ref := filepath.Join(g.checkout, ".git", "modules", "nested", "refs", "heads", "local")
+	old := warmGitStat(t, ref)
+	if err := prepareWarmCheckout(t.Context(), g.checkout, g.cache, g.repo, nil); err == nil {
+		t.Fatal("exchanged stored submodule metadata")
+	}
+	if !os.SameFile(old, warmGitStat(t, ref)) {
+		t.Fatal("lost nested branch")
+	}
+}
+
+func TestWarmCheckoutReusesLegacyReturnedBranch(t *testing.T) {
+	_, p, l, g := warmReturnFixture(t)
+	runGitT(t, g.checkout, "switch", "-c", "returned-work")
+	refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.commitReturn(t.Context(), l, refs); err != nil {
+		t.Fatal(err)
+	}
+	// Previous journals recorded the exact ref on the released allocation only.
+	next := p.state.clone()
+	record := next.Slots["a"]
+	record.ReturnedRef = nil
+	next.Slots["a"] = record
+	if err := p.save(next); err != nil {
+		t.Fatal(err)
+	}
+	l.OwnerRunID = "next"
+	l.Generation++
+	if err := p.reserve(l); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.place(t.Context(), l, map[string]string{"a": "checkout"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.prepareLeaseCheckout(t.Context(), l, &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}}); err != nil {
+		t.Fatal(err)
+	}
+}

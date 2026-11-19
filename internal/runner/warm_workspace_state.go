@@ -31,22 +31,25 @@ type warmWorkspaceIdentity struct {
 }
 
 type warmWorkspaceSlotRecord struct {
-	Path            string                `json:"path"`
-	ProjectID       string                `json:"projectId"`
-	RepositoryID    string                `json:"repositoryId"`
-	Identity        warmWorkspaceIdentity `json:"identity"`
-	Parent          warmWorkspaceIdentity `json:"parent"`
-	Generation      uint64                `json:"generation"`
-	NeedsInspection bool                  `json:"needsInspection,omitempty"`
+	OriginSHA256    string                   `json:"originSHA256,omitempty"`
+	ReturnedRef     *domain.WarmWorkspaceRef `json:"returnedRef,omitempty"`
+	Path            string                   `json:"path"`
+	ProjectID       string                   `json:"projectId"`
+	RepositoryID    string                   `json:"repositoryId"`
+	Identity        warmWorkspaceIdentity    `json:"identity"`
+	Parent          warmWorkspaceIdentity    `json:"parent"`
+	Generation      uint64                   `json:"generation"`
+	NeedsInspection bool                     `json:"needsInspection,omitempty"`
 }
 
 type warmWorkspaceAllocation struct {
-	PreparingGit     bool                      `json:"preparingGit,omitempty"`
-	CheckoutComplete bool                      `json:"checkoutComplete,omitempty"`
-	ReturnProven     bool                      `json:"returnProven,omitempty"`
-	ReturnRefs       []domain.WarmWorkspaceRef `json:"returnRefs,omitempty"`
-	ReturnRemove     []string                  `json:"returnRemove,omitempty"`
-	GitReady         bool                      `json:"gitReady,omitempty"`
+	PreparedRefs     map[string]domain.WarmWorkspaceRef `json:"preparedRefs,omitempty"`
+	PreparingGit     bool                               `json:"preparingGit,omitempty"`
+	CheckoutComplete bool                               `json:"checkoutComplete,omitempty"`
+	ReturnProven     bool                               `json:"returnProven,omitempty"`
+	ReturnRefs       []domain.WarmWorkspaceRef          `json:"returnRefs,omitempty"`
+	ReturnRemove     []string                           `json:"returnRemove,omitempty"`
+	GitReady         bool                               `json:"gitReady,omitempty"`
 
 	Lease   domain.WarmWorkspaceLease `json:"lease"`
 	Phase   warmWorkspacePhase        `json:"phase"`

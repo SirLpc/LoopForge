@@ -14,6 +14,9 @@ import (
 
 func TestWarmWorkspaceSOPWaitsBeforeDispatch(t *testing.T) {
 	e, _ := cvEEngine(t)
+	if err := e.repo.PutProject(domain.Project{ID: "project", OwnerID: 1}); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now()
 	if err := e.repo.PutRunner(domain.Runner{ID: "machine"}); err != nil {
 		t.Fatal(err)
@@ -239,5 +242,149 @@ func TestWarmWorkspaceSchedulerDurableCancelBeforeEnqueue(t *testing.T) {
 	got, _ := s.RunState(r.ID)
 	if got.Status != "cancelled" {
 		t.Fatalf("durably cancelled worker settled as %q", got.Status)
+	}
+}
+
+func TestWarmSOPQueuedRunnerChanges(t *testing.T) {
+	for _, change := range []string{"removed", "downgraded", "unregistered", "offline", "retry"} {
+		t.Run(change, func(t *testing.T) {
+			e, st := cvEEngine(t)
+			r := cvERunnerRun("owner", "machine")
+			r.ExecutionContext.ProjectID = "project"
+			r.ExecutionContext.WorkspaceMode = domain.WorkspaceModeWarmPool
+			r.Status = "running"
+			r.Repository = domain.RepositoryContext{RepositoryID: "code", WorkspaceDir: "code"}
+			r.WorkflowSnapshot.SandboxSnapshot = &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}}
+			if err := st.PutRun(r); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			if err := st.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: r.ID, RunnerID: "machine", ProjectID: "project", RepositoryIDs: []string{"code"}}, now); err != nil {
+				t.Fatal(err)
+			}
+			if change != "removed" {
+				m := domain.Runner{ID: "machine", RunnerVersion: domain.RunnerVersionWarmWorkspace, Status: domain.RunnerStatusOnline}
+				if change == "offline" {
+					m.Status = domain.RunnerStatusOffline
+				}
+				if change == "downgraded" {
+					m.RunnerVersion = "0.1.0"
+				}
+				if err := st.PutRunner(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if change == "retry" {
+				if err := st.CancelWarmWorkspaceEpoch(r.ID, 1, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 120*time.Millisecond)
+			defer cancel()
+			_, err := e.EnsureWarmWorkspace(ctx, r, 1)
+			l, state, _, _ := st.WarmWorkspaceAllocation(r.ID)
+			if change == "offline" {
+				if err != context.DeadlineExceeded || state != domain.WarmWorkspaceQueued {
+					t.Fatalf("offline: %s %v", state, err)
+				}
+				if err := st.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "project", RepositoryID: "code", State: "available"}}); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok, err := st.ReserveNextWarmWorkspace("machine", now); !ok || err != nil {
+					t.Fatalf("reconnect: %t %v", ok, err)
+				}
+				return
+			}
+			if err == nil || err == context.DeadlineExceeded || state != domain.WarmWorkspaceCanceled || l.Epoch != 1 {
+				t.Fatalf("incompatible %s: %s epoch %d %v", change, state, l.Epoch, err)
+			}
+		})
+	}
+}
+func TestWarmSOPGrantChecksResponsibleActor(t *testing.T) {
+	e, st := cvEEngine(t)
+	r := cvERunnerRun("owner", "machine")
+	r.ExecutionContext.ProjectID = "project"
+	r.ExecutionContext.WorkspaceMode = domain.WorkspaceModeWarmPool
+	r.Repository = domain.RepositoryContext{RepositoryID: "code", WorkspaceDir: "code"}
+	r.WorkflowSnapshot.SandboxSnapshot = &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}}
+	if err := st.PutRun(r); err != nil {
+		t.Fatal(err)
+	}
+	project := domain.Project{ID: "project", OwnerID: 22, Members: []domain.ProjectMember{{UserID: 1, Role: "member"}}}
+	if err := st.PutProject(project); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := st.PutRunner(domain.Runner{ID: "machine"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "project", RepositoryID: "code", State: "available"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{OwnerRunID: r.ID, RunnerID: "machine", ProjectID: "project", RepositoryIDs: []string{"code"}}, now); err != nil {
+		t.Fatal(err)
+	}
+	project.Members = []domain.ProjectMember{}
+	if err := st.PutProject(project); err != nil {
+		t.Fatal(err)
+	}
+	l, ok, err := st.ReserveNextWarmWorkspace("machine", now)
+	if !ok || err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	e.WorkspaceCheckpointTransport = func(context.Context, domain.Run, domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		count++
+		return domain.RunnerWorkspaceResponse{}, nil
+	}
+	q := domain.RunnerWorkspaceRequest{RunID: r.ID, Operation: domain.RunnerWorkspaceOperationWarmCheckout, WarmWorkspaceLease: &l}
+	if _, err := e.requestWorkspaceCheckpoint(t.Context(), r, q); err == nil || count != 0 {
+		t.Fatalf("checkout after membership changed: %v, dispatched %d", err, count)
+	}
+}
+
+func TestWarmCheckoutRetryableResponseRetainsEpoch(t *testing.T) {
+	e, st := cvEEngine(t)
+	r := cvERunnerRun("owner", "machine")
+	r.Status = "running"
+	r.ExecutionContext.ProjectID = "project"
+	r.ExecutionContext.WorkspaceMode = domain.WorkspaceModeWarmPool
+	r.Repository = domain.RepositoryContext{RepositoryID: "code", WorkspaceDir: "code"}
+	r.WorkflowSnapshot.SandboxSnapshot = &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: "docker"}}
+	if err := st.PutProject(domain.Project{ID: "project", OwnerID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutRun(r); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := st.PutRunner(domain.Runner{ID: "machine"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RunnerHeartbeat("machine", nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: "project", RepositoryID: "code", State: "available"}}); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	e.WorkspaceCheckpointTransport = func(_ context.Context, _ domain.Run, q domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		if q.Operation == domain.RunnerWorkspaceOperationWarmPrepare {
+			return domain.RunnerWorkspaceResponse{Payload: []byte(`{"phase":"placed"}`)}, nil
+		}
+		if !failed {
+			failed = true
+			return domain.RunnerWorkspaceResponse{Status: 409, Error: "frozen remote unavailable", Code: "warm_checkout_retryable"}, nil
+		}
+		return domain.RunnerWorkspaceResponse{Payload: []byte(`{"phase":"ready"}`)}, nil
+	}
+	if _, err := e.EnsureWarmWorkspace(t.Context(), r, 1); err == nil {
+		t.Fatal("failed checkout should return its diagnostic")
+	}
+	first, state, _, _ := st.WarmWorkspaceAllocation(r.ID)
+	if state != domain.WarmWorkspaceReserved {
+		t.Fatal("lost replayable reservation", state)
+	}
+	next, err := e.EnsureWarmWorkspace(t.Context(), r, 1)
+	if err != nil || next.Generation != first.Generation || next.Epoch != first.Epoch {
+		t.Fatal(next, err)
 	}
 }

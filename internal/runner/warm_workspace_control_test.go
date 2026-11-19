@@ -48,6 +48,7 @@ func TestWarmWorkspaceControlPrepareRespectsOwnerGate(t *testing.T) {
 
 func TestWarmWorkspaceControlFreshRunnerResumesDiskGeneration(t *testing.T) {
 	f := newWarmPoolFixture(t)
+	f.writeSlots(t, newWarmGitFixture(t).checkout, newWarmGitFixture(t).checkout)
 	p := f.open(t)
 	released := domain.WarmWorkspaceLease{OwnerRunID: "returned", RunnerID: "former", Generation: 6, Slots: map[string]string{"a": "a"}}
 	if err := p.reserve(released); err != nil {
@@ -89,5 +90,34 @@ func TestWarmWorkspaceControlFreshRunnerResumesDiskGeneration(t *testing.T) {
 	}
 	if got := p.state.Leases["active"]; !sameWarmWorkspaceLease(got.Lease, active) || got.Phase != warmWorkspaceReserved {
 		t.Fatalf("old lease changed %+v", got)
+	}
+}
+
+func TestWarmInventoryQualifiesLiveCheckout(t *testing.T) {
+	f := newWarmPoolFixture(t)
+	g := newWarmGitFixture(t)
+	f.writeSlots(t, g.checkout, f.homeB)
+	p := f.open(t)
+	slots := p.inventory()
+	if slots[0].State != "available" || slots[1].State != "blocked" {
+		t.Errorf("initial checkout qualification: %+v", slots)
+	}
+	runGitT(t, g.checkout, "remote", "set-url", "origin", "https://user:password@example.invalid/path")
+	if p.inventory()[0].State != "blocked" {
+		t.Fatal("credentialed idle checkout advertised")
+	}
+	runGitT(t, g.checkout, "remote", "set-url", "origin", g.repo.CloneURL)
+	if p.inventory()[0].State != "available" {
+		t.Fatal("repaired idle registration stayed blocked")
+	}
+	l := domain.WarmWorkspaceLease{OwnerRunID: "owner", RunnerID: "machine", Generation: 4, Epoch: 1, Slots: map[string]string{"a": "a"}}
+	if err := p.reserve(l); err != nil {
+		t.Fatal(err)
+	}
+	record := p.state.Slots["a"]
+	record.NeedsInspection = true
+	p.state.Slots["a"] = record
+	if p.inventory()[0].State != "blocked" {
+		t.Fatal("inspection-blocked owner advertised as compatible")
 	}
 }

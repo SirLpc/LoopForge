@@ -21,7 +21,7 @@ func (e *Engine) AdvanceConversationWarmWorkspace(ctx context.Context, run domai
 	}
 	switch state {
 	case domain.WarmWorkspaceQueued:
-		if err := e.repo.CheckConversationWarmTarget(run, state); err != nil {
+		if err := e.repo.CheckWarmTarget(run, state); err != nil {
 			return false, err
 		}
 		if _, _, err := e.repo.ReserveNextWarmWorkspace(l.RunnerID, time.Now()); err != nil {
@@ -60,21 +60,5 @@ func (e *Engine) AdvanceConversationWarmWorkspace(ctx context.Context, run domai
 // Validate the current speaker against every frozen remote before revealing
 // the checkout, even if a different speaker already prepared this lease.
 func (e *Engine) AuthorizeConversationWarmWorkspace(ctx context.Context, run domain.Run, actor int64) error {
-	if run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
-		return nil
-	}
-	ctx = WithWorkspaceRestoreActor(ctx, actor)
-	if err := e.CheckWorkspaceRestoreAccess(ctx, run); err != nil {
-		return err
-	}
-	if run.IsWorkspace() {
-		l, state, found, err := e.repo.WarmWorkspaceAllocation(run.ID)
-		if err != nil {
-			return err
-		}
-		if found && state == domain.WarmWorkspaceReady {
-			return e.RecordWarmWorkspaceActor(run, l, actor)
-		}
-	}
-	return nil
+	return e.CheckWorkspaceRestoreAccess(WithWorkspaceRestoreActor(ctx, actor), run)
 }

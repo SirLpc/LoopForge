@@ -336,3 +336,102 @@ func TestWarmWorkspaceClientAdvertisesClaimsAndControl(t *testing.T) {
 		}
 	}
 }
+
+func TestWarmCheckoutReplaysTransientFailure(t *testing.T) {
+	for _, action := range []string{"replay", "cancel", "partial replay", "partial cancel", "ambiguous"} {
+		t.Run(action, func(t *testing.T) {
+			f := newWarmPoolFixture(t)
+			g := newWarmGitFixture(t)
+			g.repo.RepositoryID = "a"
+			g.repo.Dir = "first"
+			paths := []string{g.checkout}
+			repos := []domain.RunnerRepository{g.repo}
+			dirs := map[string]string{"a": "first"}
+			l := domain.WarmWorkspaceLease{OwnerRunID: "owner", RunnerID: "machine", Epoch: 1, Generation: 1, Slots: map[string]string{"a": "a"}}
+			if strings.HasPrefix(action, "partial") {
+				second := newWarmGitFixture(t)
+				second.repo.RepositoryID = "b"
+				second.repo.Dir = "second"
+				l.Slots["b"] = "b"
+				dirs["b"] = "second"
+				repos = append(repos, second.repo)
+				paths = append(paths, second.checkout)
+			}
+			f.writeSlots(t, paths...)
+			p := f.open(t)
+			if err := p.reserve(l); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.place(t.Context(), l, dirs); err != nil {
+				t.Fatal(err)
+			}
+			remote := repos[len(repos)-1].CloneURL
+			if err := os.Rename(remote, remote+".offline"); err != nil {
+				t.Fatal(err)
+			}
+			inv := &domain.RunnerInvocation{Repositories: repos}
+			if action == "ambiguous" {
+				a := p.state.Leases[l.OwnerRunID]
+				a.PreparingGit = true
+				if err := p.saveAllocation(a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := p.prepareLeaseCheckout(t.Context(), l, inv); err == nil {
+				t.Fatal("invalid checkout became ready")
+			}
+			if err := os.Rename(remote+".offline", remote); err != nil {
+				t.Fatal(err)
+			}
+			old := warmGitStat(t, filepath.Join(p.state.Leases[l.OwnerRunID].Targets["a"], ".git"))
+			if action == "ambiguous" {
+				if err := p.prepareLeaseCheckout(t.Context(), l, inv); err == nil {
+					t.Fatal("replayed ambiguous write")
+				}
+				if _, err := p.proveReturn(t.Context(), l, repos); err == nil {
+					t.Fatal("returned ambiguous write")
+				}
+			} else if strings.HasSuffix(action, "cancel") {
+				refs, err := p.proveReturn(t.Context(), l, repos)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := p.commitReturn(t.Context(), l, refs); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if action == "partial replay" {
+					// Recheck the current actor's access to the already prepared member as well.
+					if err := os.Rename(g.repo.CloneURL, g.repo.CloneURL+".unavailable"); err != nil {
+						t.Fatal(err)
+					}
+					if err := p.prepareLeaseCheckout(t.Context(), l, inv); err == nil {
+						t.Fatal("inaccessible previously prepared repository")
+					}
+					if err := os.Rename(g.repo.CloneURL+".unavailable", g.repo.CloneURL); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := p.prepareLeaseCheckout(t.Context(), l, inv); err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(action, "partial") && !os.SameFile(old, warmGitStat(t, filepath.Join(p.state.Leases[l.OwnerRunID].Targets["a"], ".git"))) {
+					t.Fatal("completed first repository prepared twice")
+				}
+			}
+		})
+	}
+}
+
+func TestWarmAccessProbeWhileOwnerBusy(t *testing.T) {
+	f, p, l, g := warmReturnFixture(t)
+	d := Daemon{cfg: Config{DefaultWorkspaceRoot: f.workspace}, state: daemonState{RunnerID: l.RunnerID}, warmWorkspacePool: p}
+	gate := d.workspaceGate("warm/" + l.OwnerRunID)
+	gate.RLock()
+	defer gate.RUnlock()
+	req := domain.RunnerWorkspaceRequest{RunID: l.OwnerRunID, Operation: domain.RunnerWorkspaceOperationWarmVerifyAccess, WarmWorkspaceLease: &l, WarmWorkspaceActorID: 2, PreparationInvocation: &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}}}
+	result := d.readRunnerWorkspace(t.Context(), req)
+	if result.Error != "" || !strings.Contains(string(result.Payload), "authorized") {
+		t.Fatal(result)
+	}
+}

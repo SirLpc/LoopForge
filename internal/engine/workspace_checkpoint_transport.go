@@ -60,7 +60,7 @@ func (e *Engine) requestWorkspaceCheckpoint(ctx context.Context, run domain.Run,
 		var err error
 		request, err = e.warmWorkspaceControlRequest(owner, request)
 		if err != nil {
-			return domain.RunnerWorkspaceResponse{}, err
+			return domain.RunnerWorkspaceResponse{}, errors.Join(errWarmControlRejected, err)
 		}
 		run = owner
 		var cancel context.CancelFunc
@@ -127,7 +127,11 @@ func postWorkspaceRequest(ctx context.Context, base, token string, request domai
 		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			return result, fmt.Errorf("%w：%s认证失败（HTTP %d）；请核对 API/Worker 的 AGENTFLOW_CONTROL_TOKEN 和内部 API 地址", ErrWorkspaceControlConfiguration, operation, response.StatusCode)
 		}
-		return result, fmt.Errorf("%s失败：工作区控制服务返回 HTTP %d", operation, response.StatusCode)
+		err := fmt.Errorf("%s失败：工作区控制服务返回 HTTP %d", operation, response.StatusCode)
+		if domain.IsWarmWorkspaceOperation(request.Operation) && response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != 429 {
+			return result, errors.Join(errWarmControlRejected, err)
+		}
+		return result, err
 	}
 	err = json.NewDecoder(io.LimitReader(response.Body, 20<<20)).Decode(&result)
 	return result, err

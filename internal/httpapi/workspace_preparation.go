@@ -48,6 +48,9 @@ func (h *runsHandlers) workspacePreparation(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "运行不存在"})
 		return
 	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return
+	}
 	if c.Request.Method == "GET" {
 		if _, ok := h.projectRunUser(c, run.ExecutionContext.ProjectID); !ok {
 			return

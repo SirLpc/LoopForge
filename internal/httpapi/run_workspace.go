@@ -149,6 +149,9 @@ func (h *runsHandlers) runWorkspace(c *gin.Context) {
 		c.JSON(http.StatusGone, map[string]string{"error": reason})
 		return
 	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return
+	}
 	if runnerID := h.engine.RunExecutionRunner(run); runnerID != "" {
 		if _, exists := h.repo.Runner(runnerID); !exists {
 			reason := "执行机器 Daemon 已卸载，工作区已随之删除；重新连接执行机器也无法恢复此工作区"

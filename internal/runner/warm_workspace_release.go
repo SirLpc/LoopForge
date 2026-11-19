@@ -41,7 +41,23 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 	if a.ReturnProven {
 		return a.ReturnRefs, nil
 	}
-	if a.Phase == warmWorkspaceReserved || a.Phase == warmWorkspacePlaced && !a.GitReady && !a.PreparingGit {
+	if a.Phase == warmWorkspaceReserved || a.Phase == warmWorkspacePlaced && !a.GitReady && !a.PreparingGit && !a.CheckoutComplete {
+		// Some repositories may already be prepared when a later fetch fails.
+		// Verify each finished checkout before returning the unadmitted group.
+		for id, prepared := range a.PreparedRefs {
+			i := slices.IndexFunc(repos, func(r domain.RunnerRepository) bool { return r.RepositoryID == prepared.RepositoryID })
+			if i < 0 {
+				return nil, errors.New("missing partially prepared repository")
+			}
+			check := warmReturnTree{root: filepath.Dir(a.Targets[id]), checkout: a.Targets[id]}
+			actual, err := check.verify(ctx, p.slots[id], p.gitCache(id), repos[i])
+			if err != nil {
+				return nil, err
+			}
+			if actual.Branch != prepared.Branch || actual.Commit != prepared.Commit || len(check.remove) > 0 {
+				return nil, errors.New("partially prepared repository changed; inspect before return")
+			}
+		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		a.ReturnProven = true
@@ -167,16 +183,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 	if _, err := warmSeedIdentity(meta); err != nil {
 		return ref, err
 	}
-	// A deinitialized submodule can still own unpublished branches or a
-	// stash in the parent Git directory even when its checkout is empty.
-	modules, err := openWarmWorkspaceDir(filepath.Join(meta, "modules"), false)
-	if err == nil {
-		_, readErr := modules.Readdirnames(1)
-		modules.Close()
-		if readErr != io.EOF {
-			return ref, errors.New("inspect stored submodule repositories before return")
-		}
-	} else if !os.IsNotExist(err) {
+	if err := checkWarmStoredModules(meta); err != nil {
 		return ref, err
 	}
 	head, err := warmCurrentHead(meta)

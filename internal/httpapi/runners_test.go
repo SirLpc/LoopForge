@@ -948,3 +948,36 @@ func TestRunnerRunLimitOnlyOwnerCanSet(t *testing.T) {
 		t.Fatalf("clear limit: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestRunnerHeartbeatQualifiesWarmOrigin(t *testing.T) {
+	st, err := repo.OpenTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.PutProject(domain.Project{ID: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	r := domain.Repository{ID: "code", ProjectID: "p", CloneURL: "https://example.org/team/code.git"}
+	if err := st.PutRepository(r); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, engine.New(st, runtime.NewManager(t.TempDir())), tracker.NewService(), "", "")
+	id, session := registerTestRunner(t, h)
+	good := sha256.Sum256([]byte("https://example.org/team/code"))
+	for _, fingerprint := range []string{"", strings.Repeat("0", 64), hex.EncodeToString(good[:])} {
+		slot := map[string]any{"id": "slot", "projectId": "p", "repositoryId": "code", "state": "available", "originSHA256": fingerprint, "generation": 7}
+		resp := requestWithHeaders(t, h, "POST", "/api/runners/heartbeat", map[string]any{"version": domain.RunnerVersionWarmWorkspace, "warmSlots": []any{slot}}, map[string]string{"Authorization": "Bearer " + session})
+		if resp.Code != 200 {
+			t.Fatal(resp.Code, resp.Body)
+		}
+		m, _ := st.Runner(id)
+		if len(m.WarmWorkspaceSlots) != 1 || m.WarmWorkspaceSlots[0].Generation != 7 {
+			t.Fatal(m.WarmWorkspaceSlots)
+		}
+		valid := m.CheckWarmWorkspaceRegistration("p", []domain.RepositoryContext{{RepositoryID: "code"}}) == nil
+		if valid != (fingerprint == hex.EncodeToString(good[:])) {
+			t.Errorf("wrong registration for evidence %q: %+v", fingerprint, m.WarmWorkspaceSlots)
+		}
+	}
+}

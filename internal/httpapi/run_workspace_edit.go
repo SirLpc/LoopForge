@@ -64,6 +64,9 @@ func (h *runsHandlers) workspaceTakeover(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return
+	}
 	// Kept for older clients. People edit at any time, so this pauses nothing.
 	if err := h.repo.AcquireWorkspaceEditor(run.ID, user); err != nil {
 		c.JSON(409, gin.H{"error": err.Error()})
@@ -87,6 +90,9 @@ func (h *runsHandlers) workspaceRelease(c *gin.Context) {
 func (h *runsHandlers) workspaceWrite(c *gin.Context) {
 	run, user, ok := h.workspaceEditActor(c)
 	if !ok {
+		return
+	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20)
@@ -202,6 +208,9 @@ func (h *runsHandlers) workspaceTerminal(c *gin.Context) {
 		return
 	}
 	runnerID := h.engine.RunExecutionRunner(run)
+	if req.Operation != "close" && req.Operation != "close-all" && !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return
+	}
 	remoteHost := h.engine.WorkspaceRemoteHost(run)
 	var trustedRequest domain.RunnerWorkspaceRequest
 	if runnerID != "" || remoteHost {

@@ -106,7 +106,7 @@ func (h *agentToolGateway) requestWarmHandoff(s *AgentToolSession, conv domain.A
 		if err != nil {
 			return state, err
 		}
-		return state, h.repo.CheckConversationWarmTarget(run, state)
+		return state, h.repo.CheckWarmTarget(run, state)
 	}
 	if _, err := targetState(); err != nil {
 		return "", err

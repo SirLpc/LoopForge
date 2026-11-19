@@ -1,6 +1,8 @@
 package gitwork
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
@@ -114,4 +116,10 @@ func CanonicalRemote(raw string) string {
 		return u.String()
 	}
 	return raw
+}
+
+// RemoteFingerprint compares repository identity without transmitting a local path.
+func RemoteFingerprint(origin string) string {
+	digest := sha256.Sum256([]byte(CanonicalRemote(origin)))
+	return hex.EncodeToString(digest[:])
 }

@@ -279,12 +279,17 @@ async function resumePausedRun(runId,fromEl){
     if(state.drawerOpen&&state.issueDetailData?.issue)openIssueDetail(state.issueDetailData.issue.id,'sop');
   }catch(e){toast(e.message,'err')}
 }
-function patchCachedRun(runId,patch){
+function patchCachedRun(runId,patch,complete=false){
   if(!runId||!patch)return;
-  if(state.activeRun?.id===runId)state.activeRun={...state.activeRun,...patch};
-  if(state.issueDetailData?.run?.id===runId)state.issueDetailData.run={...state.issueDetailData.run,...patch};
+  const merge=cached=>{
+    const next={...cached,...patch};
+    if(complete&&cached.warmWorkspaceWaiting&&!Object.hasOwn(patch,'warmWorkspaceWaiting'))next.warmWorkspaceWaiting=false;
+    return next;
+  };
+  if(state.activeRun?.id===runId)state.activeRun=merge(state.activeRun);
+  if(state.issueDetailData?.run?.id===runId)state.issueDetailData.run=merge(state.issueDetailData.run);
   const i=(state.data.runs||[]).findIndex(r=>r.id===runId);
-  if(i>=0)state.data.runs[i]={...state.data.runs[i],...patch};
+  if(i>=0)state.data.runs[i]=merge(state.data.runs[i]);
 }
 function paintRunControl(runId){
   const run=state.activeRun?.id===runId?state.activeRun:(state.data.runs||[]).find(r=>r.id===runId);

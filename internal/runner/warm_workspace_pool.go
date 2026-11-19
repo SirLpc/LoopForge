@@ -27,6 +27,7 @@ type warmWorkspaceSlot struct {
 
 type warmWorkspacePool struct {
 	mu                 sync.Mutex
+	idleOrigins        map[string]string
 	slots              map[string]warmWorkspaceSlot
 	workspaceRoot      string
 	gitRoot            string
@@ -236,6 +237,7 @@ func (p *warmWorkspacePool) reserve(lease domain.WarmWorkspaceLease) error {
 		if record.NeedsInspection || active[id] || record.Generation >= lease.Generation {
 			return fmt.Errorf("warm workspace slot %q is unavailable for generation %d", id, lease.Generation)
 		}
+		record.OriginSHA256 = p.idleOrigins[id]
 		record.Generation = lease.Generation
 		next.Slots[id] = record
 	}
@@ -247,6 +249,16 @@ func (p *warmWorkspacePool) reserve(lease domain.WarmWorkspaceLease) error {
 		}
 		for repository, id := range old.Lease.Slots {
 			if lease.Slots[repository] == id {
+				// Earlier journals kept the previous proof only on the released
+				// group. Carry it forward for each still-matching slot.
+				for _, ref := range old.ReturnRefs {
+					previousID := old.Lease.Slots[ref.RepositoryID]
+					slot := next.Slots[previousID]
+					if slot.ReturnedRef == nil && p.state.Slots[previousID].Generation == old.Lease.Generation {
+						slot.ReturnedRef = &domain.WarmWorkspaceRef{RepositoryID: ref.RepositoryID, Branch: ref.Branch, Commit: ref.Commit}
+						next.Slots[previousID] = slot
+					}
+				}
 				delete(next.Leases, owner)
 				break
 			}
@@ -449,6 +461,20 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 	if returning {
 		allocation.Phase = warmWorkspaceReleased
 		allocation.Targets = nil
+		next := p.state.clone()
+		for id, ref := range allocation.PreparedRefs {
+			record := next.Slots[id]
+			record.ReturnedRef = &ref
+			next.Slots[id] = record
+		}
+		for _, ref := range allocation.ReturnRefs {
+			id := allocation.Lease.Slots[ref.RepositoryID]
+			record := next.Slots[id]
+			record.ReturnedRef = &domain.WarmWorkspaceRef{RepositoryID: ref.RepositoryID, Branch: ref.Branch, Commit: ref.Commit}
+			next.Slots[id] = record
+		}
+		next.Leases[allocation.Lease.OwnerRunID] = allocation
+		return p.save(next)
 	}
 	return p.saveAllocation(allocation)
 }

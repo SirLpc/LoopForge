@@ -47,12 +47,15 @@ const (
 )
 
 type WarmWorkspaceSlot struct {
+	OriginSHA256 string `json:"originSHA256,omitempty"`
 	Generation   uint64 `json:"generation,omitempty"`
 	ID           string `json:"id"`
 	ProjectID    string `json:"projectId"`
 	RepositoryID string `json:"repositoryId"`
 	State        string `json:"state"`
 }
+
+const WorkspaceErrorWarmCheckoutRetryable = "warm_checkout_retryable"
 
 const RunnerVersionWarmWorkspace = "0.12.0"
 

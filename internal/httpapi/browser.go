@@ -46,6 +46,9 @@ func (h *browserHandlers) browser(c *gin.Context) {
 	if !decode(c, &req) {
 		return
 	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return
+	}
 	if !browserReadOperations[req.Operation] && !h.canControl(c.Request, run, user.ID) {
 		c.JSON(403, gin.H{"error": "无权操作该任务的浏览器"})
 		return

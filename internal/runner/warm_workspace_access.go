@@ -15,6 +15,8 @@ import (
 	"agentflow/internal/runtime"
 )
 
+var errWarmCheckoutRetryable = errors.New("retry warm repository access")
+
 // The caller holds the owner gate for the duration of Git preparation.
 // Keep the journal mutex available to inventories and other workspace owners.
 func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.WarmWorkspaceLease, inv *domain.RunnerInvocation) error {
@@ -46,16 +48,25 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 	if err != nil || !maps.Equal(a.Targets, targets) {
 		return errors.New("warm checkout differs from placed repositories")
 	}
+	// Previously completed repositories keep their prepared metadata. Recheck
+	// their frozen remotes with this request's credentials before reuse.
+	for _, repo := range inv.Repositories {
+		slotID := l.Slots[repo.RepositoryID]
+		if _, done := a.PreparedRefs[slotID]; done {
+			if err := verifyWarmRemoteAccess(ctx, p.gitCache(slotID), repo); err != nil {
+				return errors.Join(errWarmCheckoutRetryable, err)
+			}
+		}
+	}
 	if !a.CheckoutComplete {
-		p.mu.Lock()
-		a.PreparingGit = true
-		err = p.saveAllocation(a)
-		p.mu.Unlock()
-		if err != nil {
-			return err
+		if a.PreparingGit {
+			return errors.New("interrupted warm checkout write requires inspection")
 		}
 		for _, repo := range inv.Repositories {
 			slotID := l.Slots[repo.RepositoryID]
+			if _, done := a.PreparedRefs[slotID]; done {
+				continue
+			}
 			var restore *domain.WarmWorkspaceRef
 			for i := range inv.WarmWorkspaceRefs {
 				if inv.WarmWorkspaceRefs[i].RepositoryID == repo.RepositoryID {
@@ -66,13 +77,36 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 			if len(inv.WarmWorkspaceRefs) > 0 && restore == nil {
 				return errors.New("missing recorded repository revision")
 			}
-			if err := prepareWarmProjectCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore); err != nil {
+			p.mu.Lock()
+			previous := p.state.Slots[slotID].ReturnedRef
+			p.mu.Unlock()
+			var prepared domain.WarmWorkspaceRef
+			beforeWrite := func(ref domain.WarmWorkspaceRef) error {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				prepared = ref
+				a.PreparingGit = true
+				return p.saveAllocation(a)
+			}
+			if err := prepareWarmCheckoutWithProof(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore, previous, beforeWrite); err != nil {
 				return err
 			}
 			if err := gitwork.RecordBaseline(targets[slotID], repo.Ref); err != nil {
 				return err
 			}
 			if err := configureRepositoryGitIdentity(ctx, targets[slotID], inv.GitUserName, inv.GitUserEmail); err != nil {
+				return err
+			}
+			p.mu.Lock()
+			a.PreparedRefs = maps.Clone(a.PreparedRefs)
+			if a.PreparedRefs == nil {
+				a.PreparedRefs = map[string]domain.WarmWorkspaceRef{}
+			}
+			a.PreparedRefs[slotID] = prepared
+			a.PreparingGit = false
+			err = p.saveAllocation(a)
+			p.mu.Unlock()
+			if err != nil {
 				return err
 			}
 		}
@@ -255,4 +289,17 @@ func checkoutForWorkspace(ctx context.Context, lease *domain.WarmWorkspaceLease,
 		return nil
 	}
 	return checkoutInvocationRepositories(ctx, root, inv, refresh...)
+}
+
+func verifyWarmRemoteAccess(auth context.Context, dir string, r domain.RunnerRepository) error {
+	if domain.URLHasCredentials(r.CloneURL) {
+		return errors.New("warm access check requires a credential-free remote")
+	}
+	if err := gitwork.ValidateRemoteURL(r.CloneURL, true); err != nil {
+		return err
+	}
+	if _, err := gitwork.C(repositoryGitContext(auth, r), dir, "ls-remote", "--exit-code", "--", r.CloneURL, "HEAD"); err != nil {
+		return errors.New("current actor cannot read the frozen remote")
+	}
+	return nil
 }

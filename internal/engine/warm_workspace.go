@@ -161,9 +161,10 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 	if err != nil {
 		return empty, err
 	}
-	runner, ok := e.repo.Runner(runnerID)
-	if !alreadyQueued && (!ok || runner.CheckWarmWorkspaceRegistration(owner.ExecutionContext.ProjectID, repos) != nil) {
-		return empty, errors.New("执行机器缺少项目所需的预热工作区登记")
+	if !alreadyQueued {
+		if err := e.repo.CheckWarmTarget(owner, ""); err != nil {
+			return empty, err
+		}
 	}
 	ids := make([]string, 0, len(repos))
 	for _, r := range repos {
@@ -204,6 +205,9 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 			}
 			return *verified, nil
 		case domain.WarmWorkspaceQueued:
+			if err := e.repo.CheckQueuedWarmTarget(owner, l); err != nil {
+				return empty, err
+			}
 			var allocated domain.WarmWorkspaceLease
 			var ok bool
 			if runner, found := e.repo.Runner(runnerID); found && runner.Status == domain.RunnerStatusOnline {
@@ -248,6 +252,9 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 			}
 
 		case domain.WarmWorkspaceReleased, domain.WarmWorkspaceCanceled:
+			if err := e.repo.CheckWarmTarget(owner, state); err != nil {
+				return empty, err
+			}
 			if current.Status != "running" && state != domain.WarmWorkspaceReleased {
 				return empty, fmt.Errorf("workspace owner is %s", current.Status)
 			}
@@ -320,13 +327,15 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	return r.CheckWarmWorkspaceRegistration(ec.ProjectID, repositories)
 }
 
+var errWarmControlRejected = errors.New("warm workspace control rejected")
+
 // confirmWarmWorkspace returns false on a transient transport or owner-gate
 // conflict. Replaying either RPC against the same generation is idempotent.
 func (e *Engine) confirmWarmWorkspace(ctx context.Context, owner domain.Run, l domain.WarmWorkspaceLease) (bool, error) {
 	for _, op := range []string{domain.RunnerWorkspaceOperationWarmPrepare, domain.RunnerWorkspaceOperationWarmCheckout} {
 		resp, err := e.requestWorkspaceCheckpoint(ctx, owner, domain.RunnerWorkspaceRequest{Operation: op, RunID: owner.ID, WarmWorkspaceLease: &l, WarmWorkspaceActorID: workspaceRestoreActor(ctx)})
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, ErrWorkspaceControlConfiguration) {
+			if ctx.Err() != nil || errors.Is(err, ErrWorkspaceControlConfiguration) || errors.Is(err, errWarmControlRejected) {
 				return false, err
 			}
 			return false, nil
@@ -340,6 +349,9 @@ func (e *Engine) confirmWarmWorkspace(ctx context.Context, owner domain.Run, l d
 		placed := op == domain.RunnerWorkspaceOperationWarmPrepare && result.Phase == "placed"
 		if !valid || !ready && !placed {
 			err := fmt.Errorf("warm workspace %s returned phase %q: %s", op, result.Phase, resp.Error)
+			if op == domain.RunnerWorkspaceOperationWarmCheckout && resp.Code == domain.WorkspaceErrorWarmCheckoutRetryable {
+				return false, err
+			}
 			return false, errors.Join(err, e.repo.SettleWarmWorkspace(l, domain.WarmWorkspaceBlocked))
 		}
 	}

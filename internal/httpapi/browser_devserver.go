@@ -178,6 +178,9 @@ func (h *browserHandlers) devServerRun(c *gin.Context, runID string) (domain.Run
 		devServerFail(c, http.StatusForbidden, "无权访问该任务的开发服务器", false)
 		return domain.Run{}, false
 	}
+	if !checkWarmWorkspaceAccess(c, h.deps, run) {
+		return domain.Run{}, false
+	}
 	h.touchWorkspace(run.ID)
 	return run, true
 }

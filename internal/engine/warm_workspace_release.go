@@ -221,7 +221,7 @@ func (e *Engine) CheckWorkspaceRestoreAccess(ctx context.Context, run domain.Run
 	if err := e.authorizeWarmActor(owner, actor); err != nil {
 		return err
 	}
-	l, _, found, err := e.repo.WarmWorkspaceAllocation(owner.ID)
+	l, state, found, err := e.repo.WarmWorkspaceAllocation(owner.ID)
 	if err != nil {
 		return err
 	}
@@ -242,6 +242,9 @@ func (e *Engine) CheckWorkspaceRestoreAccess(ctx context.Context, run domain.Run
 	var result struct{ Phase string }
 	if resp.Error != "" || resp.Status >= 400 || json.Unmarshal(resp.Payload, &result) != nil || result.Phase != "authorized" {
 		return errors.New("current actor cannot verify access to the workspace repositories")
+	}
+	if owner.IsWorkspace() && state == domain.WarmWorkspaceReady {
+		return e.RecordWarmWorkspaceActor(owner, l, actor)
 	}
 	return nil
 }

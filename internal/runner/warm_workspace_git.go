@@ -36,7 +36,11 @@ func prepareWarmCheckout(ctx context.Context, checkout, cache string, repo domai
 
 // The caller holds the exclusive, verified slot. cache belongs to the runner,
 // outside every writable checkout; it is stable across renames of the slot.
-func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, projectID string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) (result error) {
+func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, projectID string, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef) error {
+	return prepareWarmCheckoutWithProof(ctx, checkout, cache, project, projectID, repo, restore, nil, nil)
+}
+
+func prepareWarmCheckoutWithProof(ctx context.Context, checkout, cache, project, projectID string, repo domain.RunnerRepository, restore, previous *domain.WarmWorkspaceRef, beforeWrite func(domain.WarmWorkspaceRef) error) (result error) {
 	if !filepath.IsAbs(cache) || !filepath.IsAbs(checkout) || filepath.Clean(cache) != cache || warmWorkspacePathsOverlap(checkout, cache) || strings.ContainsAny(cache, "\r\n") {
 		return errors.New("invalid warm Git cache location")
 	}
@@ -116,15 +120,18 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, p
 	if err != nil {
 		return err
 	}
+	if err := checkWarmStoredModules(old); err != nil {
+		return err
+	}
 	auth := repositoryGitContext(ctx, repo)
-	db, err := warmObjectCache(local, auth, private, cache, checkout, head, repo)
+	db, err := warmObjectCache(local, auth, private, cache, checkout, head, repo, previous)
 	if err != nil {
 		return err
 	}
 	if restore == nil && repo.Ref == "" && repo.WorkBranch == "" {
 		refs, err := gitwork.C(auth, db, "ls-remote", "--symref", "origin", "HEAD")
 		if err != nil {
-			return err
+			return errors.Join(errWarmCheckoutRetryable, err)
 		}
 		for _, line := range strings.Split(refs, "\n") {
 			if name, ok := strings.CutPrefix(line, "ref: refs/heads/"); ok {
@@ -135,7 +142,7 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, p
 	}
 	if restore != nil {
 		if err := authorizeWarmRestore(local, auth, private, db, repo, restore.Commit); err != nil {
-			return err
+			return errors.Join(errWarmCheckoutRetryable, err)
 		}
 	}
 	target, branch, err := warmCheckoutTarget(local, db, repo, restore)
@@ -210,13 +217,15 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, p
 			return err
 		}
 	}
+	if beforeWrite != nil {
+		if err := beforeWrite(domain.WarmWorkspaceRef{RepositoryID: repo.RepositoryID, Branch: branch, Commit: target}); err != nil {
+			return err
+		}
+	}
 	if _, err := work("-c", "filter.lfs.smudge=git-lfs smudge --skip -- %f", "read-tree", "-m", "-u", head, target); err != nil {
 		return err
 	}
 	if err := exchangeWarmGitDirs(old, meta); err != nil {
-		return err
-	}
-	if err := os.Remove(filepath.Join(cache, warmSeedMarker)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return lfs.hydrate(checkout, private)
@@ -224,12 +233,12 @@ func prepareWarmProjectCheckout(ctx context.Context, checkout, cache, project, p
 
 // A new cache can borrow the admin seed during its first fetch. Promotion
 // happens only after the remote refs and worktree have both been verified.
-func warmObjectCache(local, auth context.Context, private, cache, checkout, head string, repo domain.RunnerRepository) (string, error) {
+func warmObjectCache(local, auth context.Context, private, cache, checkout, head string, repo domain.RunnerRepository, previous *domain.WarmWorkspaceRef) (string, error) {
 	old := filepath.Join(checkout, ".git")
 	db := cache
 	_, err := os.Lstat(cache)
 	fresh := errors.Is(err, os.ErrNotExist)
-	verifySeed := fresh
+
 	if fresh {
 		db = filepath.Join(private, "cache")
 		if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(head), db); err != nil {
@@ -250,10 +259,7 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		}
 		// Offer the seed commit for negotiation but retain only objects reachable
 		// from refs the authenticated remote actually advertised.
-		if err := verifyWarmSeedIndex(local, db, private, checkout, head); err != nil {
-			return "", err
-		}
-		if err := recordWarmSeedIdentity(old, db); err != nil {
+		if err := verifyWarmSeedIndex(local, db, private, checkout, head, true); err != nil {
 			return "", err
 		}
 		if _, err := gitwork.C(local, db, "config", "core.alternateRefsCommand", "/bin/true"); err != nil {
@@ -279,29 +285,38 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		if err != nil || remote != repo.CloneURL {
 			return "", errors.New("warm Git cache origin mismatch")
 		}
-		verifySeed, err = pendingWarmSeed(old, db)
-		if err != nil {
-			return "", err
-		}
-		if verifySeed {
-			check := filepath.Join(private, "seed-index")
-			if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(head), check); err != nil {
-				return "", err
-			}
-			if err := warmAlternate(check, filepath.Join(db, "objects")); err != nil {
-				return "", err
-			}
-			if err := verifyWarmSeedIndex(local, check, private, checkout, head); err != nil {
-				return "", err
-			}
-		}
 
 	}
 	if _, err := gitwork.C(auth, db, "fetch", "--no-auto-gc", "--prune", "--no-tags", "origin", "+HEAD:refs/warm/default", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"); err != nil {
+		return "", errors.Join(errWarmCheckoutRetryable, err)
+	}
+	if !fresh {
+		check := filepath.Join(private, "seed-index")
+		if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(head), check); err != nil {
+			return "", err
+		}
+		if err := warmAlternate(check, filepath.Join(db, "objects")); err != nil {
+			return "", err
+		}
+		if err := verifyWarmSeedIndex(local, check, private, checkout, head, false); err != nil {
+			return "", err
+		}
+	}
+	allowedBranch := ""
+	if previous != nil && previous.RepositoryID == repo.RepositoryID && previous.Commit == head && previous.Branch != "" {
+		raw, err := os.ReadFile(filepath.Join(old, "HEAD"))
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(string(raw)) == "ref: refs/heads/"+previous.Branch {
+			allowedBranch = previous.Branch
+		}
+	}
+	if err := verifyWarmRefs(local, old, db, allowedBranch, previous != nil); err != nil {
 		return "", err
 	}
-	if verifySeed {
-		if err := verifyWarmSeedRefs(local, old, db); err != nil {
+	if !fresh {
+		if err := authorizeWarmRestore(local, auth, private, db, repo, head); err != nil {
 			return "", err
 		}
 	}
@@ -557,7 +572,7 @@ func warmCheckoutTarget(ctx context.Context, db string, repo domain.RunnerReposi
 			return "", "", fmt.Errorf("remote branch %s already exists", branch)
 		}
 		if !exists && repo.RequireExistingWorkBranch {
-			return "", "", fmt.Errorf("remote branch %s does not exist", branch)
+			return "", "", fmt.Errorf("%w: remote branch %s does not exist", errWarmCheckoutRetryable, branch)
 		}
 		if exists {
 			return commit, branch, nil
@@ -580,7 +595,7 @@ func warmCheckoutTarget(ctx context.Context, db string, repo domain.RunnerReposi
 	if commit, ok := gitwork.RevParse(ctx, db, ref); ok {
 		return commit, branch, nil
 	}
-	return "", "", errors.New("requested ref missing from frozen remote")
+	return "", "", fmt.Errorf("%w: requested ref missing from frozen remote", errWarmCheckoutRetryable)
 }
 
 // Check repository-controlled LFS endpoints in Git's object database, before
@@ -646,7 +661,10 @@ func authorizeWarmRestore(local, auth context.Context, private, db string, repo 
 			return nil
 		}
 	}
-	proof := filepath.Join(private, "restore")
+	proof, err := os.MkdirTemp(private, "restore-")
+	if err != nil {
+		return err
+	}
 	if _, err := gitwork.C(local, private, "init", "--bare", "--template=", warmObjectFormat(pin), proof); err != nil {
 		return err
 	}
