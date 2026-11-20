@@ -172,13 +172,14 @@ func HandleBrowser(ctx context.Context, runID string, req domain.BrowserRequest)
 }
 
 func openBrowserView(ctx context.Context, runID string) (*browserView, error) {
+	key := browserRequestCacheKey(ctx, runID)
 	browserViews.Lock()
-	view := browserViews.items[runID]
+	view := browserViews.items[key]
 	browserViews.Unlock()
-	if view != nil && !view.client.closed() {
+	if view != nil && browserEndpointMatchesRequest(ctx, view.endpoint) && !view.client.closed() {
 		return view, nil
 	}
-	endpoint, ok := lookupBrowserEndpoint(ctx, runID)
+	endpoint, ok := requestBrowserEndpoint(ctx, runID, lookupBrowserEndpoint)
 	if !ok {
 		return nil, errors.New("Agent 浏览器尚未启动：Agent 用到时会自动启动，也可以现在手动启动")
 	}
@@ -188,7 +189,7 @@ func openBrowserView(ctx context.Context, runID string) (*browserView, error) {
 	if err != nil {
 		return nil, err
 	}
-	view = &browserView{runID: runID, endpoint: endpoint, targets: map[string]*browserTarget{}, changed: make(chan struct{}), lastUsed: time.Now()}
+	view = &browserView{runID: key, endpoint: endpoint, targets: map[string]*browserTarget{}, changed: make(chan struct{}), lastUsed: time.Now()}
 	view.client = newCDPClient(transport, view.onEvent)
 	if err := view.client.call(dialCtx, "", "Target.setDiscoverTargets", map[string]any{"discover": true}, nil); err != nil {
 		view.client.close()
@@ -220,10 +221,10 @@ func openBrowserView(ctx context.Context, runID string) (*browserView, error) {
 	view.follow = true
 	view.mu.Unlock()
 	browserViews.Lock()
-	if old := browserViews.items[runID]; old != nil && old != view {
+	if old := browserViews.items[key]; old != nil && old != view {
 		old.client.close()
 	}
-	browserViews.items[runID] = view
+	browserViews.items[key] = view
 	browserViews.Unlock()
 	go view.reapWhenIdle()
 	return view, nil

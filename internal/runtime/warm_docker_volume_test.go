@@ -86,7 +86,7 @@ func TestWarmDockerVolumeLifecycle(t *testing.T) {
 	}
 	t.Setenv("AGENTFLOW_ISOLATED_IMAGE", image)
 	t.Setenv("AGENTFLOW_DOCKER_NETWORK", "none")
-	name := "loopforge-test-warm-volume-" + strings.ToLower(rand.Text())
+	name := "agentflow-rt-test-warm-volume-" + strings.ToLower(rand.Text())
 	cli := func(args ...string) string {
 		t.Helper()
 		out, err := exec.CommandContext(t.Context(), "docker", args...).CombinedOutput()
@@ -179,15 +179,30 @@ PROBE
 			t.Errorf("remove browser fixture: %v: %s", err, out)
 		}
 	})
-	if err := sb.ensureWarmVolumeBrowser(t.Context(), "run", browserImage, browser); err != nil {
+	if err := sb.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser); err != nil {
 		t.Fatal(err)
 	}
 	cli("exec", browser, "sh", "-ec", "test -f /workspace/test")
 	cli("stop", "-t", "1", browser)
-	if err := sb.ensureWarmVolumeBrowser(t.Context(), "run", browserImage, browser); err != nil {
+	if err := sb.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser); err != nil {
 		t.Fatal(err)
 	}
 	if got := cli("inspect", "--format", "{{.State.Running}}", browser); got != "true" {
 		t.Fatal("verified browser did not restart")
 	}
+	t.Setenv("AGENTFLOW_BROWSER_IMAGE", browserImage)
+	reqFile := domain.BrowserRequest{Operation: "file", File: "/workspace/marker"}
+	if exec.CommandContext(t.Context(), "docker", "exec", browser, "sh", "-ec", "command -v node").Run() == nil {
+		state, err := HandleWarmDockerVolumeBrowser(t.Context(), name, workspace, req, reqFile)
+		if err != nil || state.HTTP == nil || string(state.HTTP.Body) != "first\n" {
+			t.Fatalf("verified browser file: %+v %v", state, err)
+		}
+		t.Log("served fixture file via verified Docker browser ID")
+	}
+	foreign := cli("run", "--rm", "-d", "--pull=never", "--network=none", "--label", browserRunLabel+"="+name, "--entrypoint", "sleep", image, "60")
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", foreign).Run() })
+	if _, err := HandleWarmDockerVolumeBrowser(t.Context(), name, workspace, req, reqFile); err == nil {
+		t.Fatal("duplicate live browser identity accepted")
+	}
+
 }

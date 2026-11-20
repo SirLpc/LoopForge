@@ -16,8 +16,8 @@ type warmDockerMount struct {
 }
 
 type warmDockerInspection struct {
-	ID     string
-	Config struct {
+	ID, Name string
+	Config   struct {
 		Image  string
 		Labels map[string]string
 	}

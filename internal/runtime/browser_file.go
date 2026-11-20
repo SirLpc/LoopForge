@@ -63,7 +63,7 @@ func handleWorkspaceFile(ctx context.Context, runID, file string) (domain.Browse
 	if !strings.HasPrefix(file, "/") || strings.ContainsRune(file, 0) {
 		return domain.BrowserState{}, errors.New("无效的工作区文件路径")
 	}
-	endpoint, ok := devServerLookup(ctx, runID)
+	endpoint, ok := requestBrowserEndpoint(ctx, runID, devServerLookup)
 	if !ok {
 		return domain.BrowserState{Available: false, Reason: "Agent 浏览器尚未启动：工作区文件预览需要它所在的执行环境"}, nil
 	}
