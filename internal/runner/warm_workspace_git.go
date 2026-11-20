@@ -259,7 +259,7 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		}
 		// Offer the seed commit for negotiation but retain only objects reachable
 		// from refs the authenticated remote actually advertised.
-		if err := verifyWarmSeedIndex(local, db, private, checkout, head, true); err != nil {
+		if err := verifyWarmSeedIndex(local, db, checkout, head, true); err != nil {
 			return "", err
 		}
 		if _, err := gitwork.C(local, db, "config", "core.alternateRefsCommand", "/bin/true"); err != nil {
@@ -298,7 +298,7 @@ func warmObjectCache(local, auth context.Context, private, cache, checkout, head
 		if err := warmAlternate(check, filepath.Join(db, "objects")); err != nil {
 			return "", err
 		}
-		if err := verifyWarmSeedIndex(local, check, private, checkout, head, false); err != nil {
+		if err := verifyWarmSeedIndex(local, check, checkout, head, false); err != nil {
 			return "", err
 		}
 	}
@@ -379,7 +379,7 @@ func verifyWarmWorktree(local context.Context, checkout, stage, head, target, li
 			return err
 		}
 	}
-	if _, err := work("update-index", "--really-refresh"); err != nil {
+	if _, err := work(warmLFSVerificationArgs("update-index", "--really-refresh")...); err != nil {
 		return fmt.Errorf("warm checkout differs from its verified baseline: %w", err)
 	}
 	extra, err := work("ls-files", "-z", "--others", "--directory", "--no-empty-directory", "--", ".", ":(exclude,literal)"+library)

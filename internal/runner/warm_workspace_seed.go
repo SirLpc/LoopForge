@@ -155,7 +155,7 @@ func warmSeedIdentity(meta string) (warmWorkspaceIdentity, error) {
 	return warmWorkspaceDirIdentity(dir)
 }
 
-func verifyWarmSeedIndex(local context.Context, db, private, checkout, head string, checkFiles bool) error {
+func verifyWarmSeedIndex(local context.Context, db, checkout, head string, checkFiles bool) error {
 	old := filepath.Join(checkout, ".git")
 	// Compare the seed index in trusted metadata. Never let the original
 	// repository config, hooks or index extensions choose the Git directory.
@@ -176,7 +176,7 @@ func verifyWarmSeedIndex(local context.Context, db, private, checkout, head stri
 	// Reject dirty operator work before making a credentialed request.
 	// The independent index built below verifies bytes again before promotion.
 	if checkFiles {
-		if _, err := gitwork.C(local, db, "--work-tree="+checkout, "-c", "filter.lfs.clean=git-lfs clean -- %f", "-c", "lfs.storage="+filepath.Join(private, "seed-lfs"), "diff-files", "--quiet", "--no-ext-diff", "--ignore-submodules=all", "--"); err != nil {
+		if _, err := gitwork.C(local, db, warmLFSVerificationArgs("--work-tree="+checkout, "diff-files", "--quiet", "--no-ext-diff", "--ignore-submodules=all", "--")...); err != nil {
 			return fmt.Errorf("warm seed contains working tree edits: %w", err)
 		}
 	}
