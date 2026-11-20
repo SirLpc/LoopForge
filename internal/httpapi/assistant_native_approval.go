@@ -197,6 +197,12 @@ func (h *agentToolGateway) approveNativeTool(ctx context.Context, s *AgentToolSe
 	if h.nativeGatewayTool(ctx, s, action.Name, action.Input) {
 		return nativeToolApprovalResult{Allow: true}
 	}
+	// CodeBuddy discovers deferred tools and waits for MCP connections through
+	// these built-ins. Neither one invokes the discovered tools.
+	switch action.Name {
+	case "ToolSearch", "WaitForMcpServers":
+		return nativeToolApprovalResult{Allow: true}
+	}
 	switch strings.ToLower(action.Name) {
 	case "skill", "read", "read_file", "readfile", "glob", "grep", "list", "ls", "list_directory", "list_resources", "view_image", "todowrite", "todo_read", "todoread":
 		return nativeToolApprovalResult{Allow: true}
@@ -317,10 +323,22 @@ const nativeApprovalWait = 9 * time.Minute
 // Permit only the session gateway's aliases/wrappers here; tools/call still
 // checks the current catalog, token, mode and concrete action permissions.
 func (h *agentToolGateway) nativeGatewayTool(ctx context.Context, s *AgentToolSession, name string, input json.RawMessage) bool {
-	for _, prefix := range []string{"mcp__" + agentToolSessionMCPName + "__", agentToolSessionMCPName + "_"} {
+	const mcpPrefix = "mcp__" + agentToolSessionMCPName + "__"
+	for _, prefix := range []string{mcpPrefix, agentToolSessionMCPName + "_"} {
 		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
 			return true
 		}
+	}
+	if name == "DeferExecuteTool" {
+		// Use CodeBuddy's exact case-sensitive key. The wrapper can also
+		// invoke native tools, so only trust targets on the session MCP.
+		var args map[string]json.RawMessage
+		var toolName string
+		if json.Unmarshal(input, &args) != nil || json.Unmarshal(args["toolName"], &toolName) != nil {
+			return false
+		}
+		target, ok := strings.CutPrefix(toolName, mcpPrefix)
+		return ok && target != ""
 	}
 	var args struct {
 		ServerName string `json:"ServerName"`
