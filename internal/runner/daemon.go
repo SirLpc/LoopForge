@@ -159,7 +159,9 @@ func New(cfg Config) (*Daemon, error) {
 		host, _ := os.Hostname()
 		cfg.Name = host
 	}
-	return &Daemon{cfg: cfg, client: NewClient(cfg.ServerURL), executor: runtime.NewExecutorRunner(),
+	client := NewClient(cfg.ServerURL)
+	client.warmOnly = cfg.WarmDockerVolume != ""
+	return &Daemon{cfg: cfg, client: client, executor: runtime.NewExecutorRunner(),
 		controls: map[string]chan string{}, pendingControls: map[string]string{}, heartbeatWake: make(chan struct{}, 1)}, nil
 }
 
@@ -181,7 +183,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	if d.cfg.WarmWorkspacePoolFile != "" {
-		if err := d.qualifyWarmDockerVolume(ctx); err != nil {
+		if err := d.openWarmDockerVolume(ctx); err != nil {
 			return err
 		}
 		pool, err := openWarmWorkspacePoolWithin(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json", d.cfg.WarmDockerVolumeRoot)
@@ -191,8 +193,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.warmWorkspacePool = pool
 		d.client.warmProtocol = (domain.Runner{RunnerVersion: Version()}).SupportsWarmWorkspace()
 		defer pool.close()
+		if err := d.qualifyWarmDockerVolume(ctx); err != nil {
+			return err
+		}
 	}
 	if err := d.ensureRegistered(ctx); err != nil {
+		return err
+	}
+	if err := d.checkDedicatedWarmClaim(ctx); err != nil {
+		d.disconnect(ctx)
 		return err
 	}
 	d.refreshRuntimes(ctx)

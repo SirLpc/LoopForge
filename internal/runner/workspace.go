@@ -132,6 +132,9 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 	if domain.IsWarmWorkspaceOperation(request.Operation) {
 		return d.warmWorkspaceControl(ctx, request)
 	}
+	if err := d.checkDedicatedVolumeRequest(request); err != nil {
+		return runnerWorkspaceError(err)
+	}
 	if d.warmWorkspacePool != nil || request.WarmWorkspaceLease != nil {
 		owner := requestGateKey(request)
 		gate := d.workspaceGate("warm/" + owner)
@@ -142,7 +145,7 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 		if err := d.checkWarmOperation(ctx, owner, request.Operation, request.WarmWorkspaceLease); err != nil {
 			return runnerWorkspaceError(err)
 		}
-		if request.WarmWorkspaceLease != nil && (request.Sandbox != nil && request.Sandbox.Profile.Driver != domain.SandboxDriverDocker || request.Operation == "conversation_process") {
+		if request.WarmWorkspaceLease != nil && (request.Sandbox != nil && request.Sandbox.Profile.Driver != domain.SandboxDriverDocker || request.Operation == "conversation_process" && d.warmVolumeMount == nil) {
 			return runnerWorkspaceError(errors.New("warm operation requires a verified Docker sandbox"))
 		}
 	}

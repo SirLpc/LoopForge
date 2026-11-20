@@ -26,6 +26,7 @@ var ErrTaskLeaseLost = errors.New("task lease lost")
 
 type Client struct {
 	warmProtocol bool
+	warmOnly     bool
 	base         string
 	http         *http.Client
 	mu           sync.RWMutex
@@ -202,7 +203,7 @@ func (c *Client) WaitForTask(ctx context.Context, req ClaimRequest) (bool, *doma
 		TaskAvailable bool              `json:"taskAvailable"`
 		Task          domain.RunnerTask `json:"task"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/runners/tasks/claim", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, c.taskClaimPath(), req, &out); err != nil {
 		return false, nil, err
 	}
 	if out.Task.ID != "" {
@@ -218,7 +219,7 @@ func (c *Client) Claim(ctx context.Context, req ClaimRequest) (*domain.RunnerTas
 	var out struct {
 		Task domain.RunnerTask `json:"task"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/runners/tasks/claim", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, c.taskClaimPath(), req, &out); err != nil {
 		return nil, false, err
 	}
 	if out.Task.ID == "" {

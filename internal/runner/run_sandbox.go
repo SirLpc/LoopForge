@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -189,19 +187,9 @@ func (d *Daemon) localTaskSandboxSpec(task domain.RunnerTask) (runtime.SandboxRe
 		return requirements, resources
 	}
 	requirements.GitCacheRoot = p.gitCacheRoot()
-	workspace := d.taskWorkspace(task)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for owner, allocation := range p.state.Leases {
-		if allocation.Phase != warmWorkspacePlaced || workspace != filepath.Join(p.workspaceRoot, "runs", owner, "workspace") {
-			continue
-		}
-		for _, slot := range allocation.Lease.Slots {
-			requirements.GitObjectDirs = append(requirements.GitObjectDirs, filepath.Join(p.gitCache(slot), "objects"))
-		}
-		sort.Strings(requirements.GitObjectDirs)
+	if dirs, ok := p.workspaceObjectDirectories(d.taskWorkspace(task)); ok {
+		requirements.GitObjectDirs = dirs
 		requirements.WarmDockerVolume = d.warmVolumeMount
-		break
 	}
 	return requirements, resources
 }

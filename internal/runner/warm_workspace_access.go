@@ -193,6 +193,9 @@ func (d *Daemon) checkWarmOperation(ctx context.Context, owner, operation string
 }
 
 func (d *Daemon) checkWarmTask(ctx context.Context, task domain.RunnerTask) error {
+	if d.cfg.WarmDockerVolume != "" && task.WarmWorkspaceLease == nil {
+		return errUnleasedDedicatedVolume
+	}
 	owner := d.taskGateKey(task)
 	if err := d.checkWarmOperation(ctx, owner, task.Action, task.WarmWorkspaceLease); err != nil {
 		return err

@@ -46,7 +46,9 @@ func (d *Daemon) conversationProcess(ctx context.Context, request domain.RunnerW
 		return runnerWorkspaceError(fmt.Errorf("conversation control channel unavailable"))
 	}
 	var factory runtime.ConversationSandboxFactory
-	if request.RunID == "" {
+	if d.warmVolumeMount != nil {
+		request.Sandbox, factory = d.warmDockerConversationFactory(request, req, workspace)
+	} else if request.RunID == "" {
 		factory = func(envCtx context.Context, _ string) (runtime.Sandbox, func(), error) {
 			var lease *managedcli.ClaimLease
 			var err error

@@ -512,6 +512,10 @@ func (r *RunnersRepo) RunnerTasks() []domain.RunnerTask {
 
 // RunnerTaskAvailable checks for eligible queued work without taking a lease.
 func (r *RunnersRepo) RunnerTaskAvailable(runnerID string, providers []string, warmProtocol bool) (bool, error) {
+	return r.runnerTaskAvailable(runnerID, providers, warmProtocol, false)
+}
+
+func (r *RunnersRepo) runnerTaskAvailable(runnerID string, providers []string, warmProtocol, warmOnly bool) (bool, error) {
 	if strings.TrimSpace(runnerID) == "" || len(providers) == 0 {
 		return false, nil
 	}
@@ -525,7 +529,7 @@ func (r *RunnersRepo) RunnerTaskAvailable(runnerID string, providers []string, w
 		return false, nil
 	}
 	var rows []runnerTaskRow
-	query, err := r.compatibleRunnerTaskQuery(r.DB, runnerID, false, warmProtocol)
+	query, err := r.compatibleRunnerTaskQuery(r.DB, runnerID, false, warmProtocol, warmOnly)
 	if err != nil {
 		return false, err
 	}
@@ -538,6 +542,10 @@ func (r *RunnersRepo) RunnerTaskAvailable(runnerID string, providers []string, w
 // The transactional claim guarantees exactly one winner even when several
 // runners wake up at the same time.
 func (r *RunnersRepo) ClaimRunnerTask(runnerID string, providers []string, now time.Time, leaseTTL time.Duration, warmProtocol bool) (domain.RunnerTask, bool, error) {
+	return r.claimRunnerTask(runnerID, providers, now, leaseTTL, warmProtocol, false)
+}
+
+func (r *RunnersRepo) claimRunnerTask(runnerID string, providers []string, now time.Time, leaseTTL time.Duration, warmProtocol, warmOnly bool) (domain.RunnerTask, bool, error) {
 	if strings.TrimSpace(runnerID) == "" {
 		return domain.RunnerTask{}, false, fmt.Errorf("runner id is required")
 	}
@@ -556,7 +564,7 @@ func (r *RunnersRepo) ClaimRunnerTask(runnerID string, providers []string, now t
 	var claimed domain.RunnerTask
 	var found bool
 	err := r.DB.Transaction(func(tx *gorm.DB) error {
-		query, err := r.compatibleRunnerTaskQuery(tx, runnerID, true, warmProtocol)
+		query, err := r.compatibleRunnerTaskQuery(tx, runnerID, true, warmProtocol, warmOnly)
 		if err != nil {
 			return err
 		}
@@ -957,7 +965,7 @@ func (r *RunnersRepo) CancelRunnerTasksForRun(runID string, now time.Time) ([]st
 
 // Older daemons ignore unknown JSON fields, so never send them tasks whose
 // isolation depends on the typed warm lease. Unrelated work stays claimable.
-func (r *RunnersRepo) compatibleRunnerTaskQuery(db *gorm.DB, runnerID string, lock, warmProtocol bool) (*gorm.DB, error) {
+func (r *RunnersRepo) compatibleRunnerTaskQuery(db *gorm.DB, runnerID string, lock, warmProtocol, warmOnly bool) (*gorm.DB, error) {
 	lookup := db
 	query := db
 	if lock {
@@ -971,8 +979,14 @@ func (r *RunnersRepo) compatibleRunnerTaskQuery(db *gorm.DB, runnerID string, lo
 			return nil, err
 		}
 		if (domain.Runner{RunnerVersion: machine.RunnerVersion}).SupportsWarmWorkspace() {
+			if warmOnly {
+				return warmRunnerTaskQuery(query, runnerID), nil
+			}
 			return query, nil
 		}
+	}
+	if warmOnly {
+		return query.Where("1 = 0"), nil
 	}
 	return query.Where("JSON_EXTRACT(payload, '$.warmWorkspaceLease') IS NULL"), nil
 }

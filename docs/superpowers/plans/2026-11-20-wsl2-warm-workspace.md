@@ -24,5 +24,12 @@
 
 - [ ] Write Runner configuration/main and integration tests. Only local configuration can select the special mode, and unqualified storage must not advertise or reuse warm slots.
 - [ ] Add CLI and locally provisioned runner tool paths. Connect volume requirements and release policy to existing runner lifecycle hooks. Document setup and rollback, using fictional public examples only.
+
+### Task 4. Close review findings and verify conversation phases
+
+- [ ] Test collision retention before close or recreation, and use verified immutable Docker identities for cleanup.
+- [ ] Test that dedicated-mode controls deny unleased tasks and reject CLI directories outside the trusted tools directory.
+- [ ] Verify the dedicated claim route leaves ordinary work queued for existing Runners and refuses to claim through older control planes.
+- [ ] Verify named-volume sandbox creation, session-private mounts and approval guard files for both text and leased-repository phases. Exercise each phase with a stub provider CLI in the actual Docker Desktop. Keep native paths intact.
 - [ ] Verify the isolated allocation, Docker execution, Git operations, release and recovery on the current Docker Desktop. Run full Go and scoped race regression. Request independent code review.
 - [ ] Prepare two native-volume copies of the authorized Unity checkouts and configure the dedicated runner. Verify actual platform slot registration, readiness and project configuration through existing authenticated entry points. Preserve source paths and the current runner until the new route is validated.

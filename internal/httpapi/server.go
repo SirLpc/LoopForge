@@ -632,6 +632,7 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.POST("/runners/disconnect", api.runners.runnerDisconnect)
 	g.POST("/runners/heartbeat", api.runners.runnerHeartbeat)
 	g.POST("/runners/tasks/claim", api.runners.runnerTaskClaim)
+	g.POST(domain.WarmWorkspaceClaimPath, api.runners.runnerWarmTaskClaim)
 	g.POST("/runners/tasks/:id/start", api.runners.runnerTaskStart)
 	g.POST("/runners/tasks/:id/lease/renew", api.runners.runnerTaskLeaseRenew)
 	g.POST("/runners/tasks/:id/events", api.runners.runnerTaskEventsIngest)

@@ -100,3 +100,7 @@ func IsWorkspaceGitRead(op, ref string) bool {
 // may reuse the machine session while its predecessor's heartbeat is still live.
 const WarmWorkspaceProtocolHeader = "X-LoopForge-Warm-Workspace"
 const WarmWorkspaceProtocolV1 = "1"
+
+// WarmWorkspaceClaimPath is the dedicated Runner claim endpoint. A separate
+// path prevents an older server from silently leasing checkout tasks.
+const WarmWorkspaceClaimPath = "/runners/warm-tasks/claim"

@@ -8,10 +8,37 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/runtime"
 )
+
+var errUnleasedDedicatedVolume = errors.New("the dedicated warm Docker Runner requires an active workspace lease")
+
+func (d *Daemon) checkDedicatedVolumeRequest(request domain.RunnerWorkspaceRequest) error {
+	if d.cfg.WarmDockerVolume == "" {
+		return nil
+	}
+	if request.WarmWorkspaceLease != nil {
+		if request.WorkspaceLayout != domain.RunnerWorkspaceLayoutShared {
+			return errors.New("the dedicated warm Docker Runner requires a shared workspace layout")
+		}
+		return nil
+	}
+	if request.Operation == "conversation_process" && request.RunID == "" && request.WorkspaceRunID == "" && d.warmVolumeMount != nil {
+		return nil
+	}
+	return errUnleasedDedicatedVolume
+}
+
+func validateWarmDockerVolumeCLIDirectory(root, cliDir string) error {
+	tools := filepath.Join(root, "tools")
+	if cliDir != "" && cliDir != tools && !warmVolumeChild(tools, cliDir) {
+		return errors.New("warm Docker runtime CLI directory must be in the dedicated tools directory")
+	}
+	return nil
+}
 
 func validateWarmDockerVolumeConfig(cfg Config) error {
 	root := cfg.WarmDockerVolumeRoot
@@ -59,7 +86,7 @@ func validateWarmDockerVolumeSlots(root string, slots map[string]warmWorkspaceSl
 	return nil
 }
 
-func (d *Daemon) qualifyWarmDockerVolume(ctx context.Context) error {
+func (d *Daemon) openWarmDockerVolume(ctx context.Context) error {
 	if d.cfg.WarmDockerVolume == "" {
 		return nil
 	}
@@ -71,17 +98,43 @@ func (d *Daemon) qualifyWarmDockerVolume(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("qualify dedicated warm Docker volume: %w", err)
 	}
+	if err := prepareWarmDockerVolumeCLIDirectory(root, runtime.RuntimeCLIDir()); err != nil {
+		return err
+	}
 	helper := filepath.Join(root, "tools", "agentflow-runner")
 	if err := validateWarmDockerVolumeHelper(helper); err != nil {
 		return err
 	}
-	if err := desktop.Ready(ctx); err != nil {
-		return fmt.Errorf("qualify warm Docker Desktop process inspection: %w", err)
-	}
 	d.warmDockerDesktop = desktop
 	d.warmVolumeMount = &runtime.WarmDockerVolume{Name: d.cfg.WarmDockerVolume, Root: root, Backing: desktop.Backing(), Helper: helper}
+	return nil
+}
+
+func (d *Daemon) qualifyWarmDockerVolume(ctx context.Context) error {
+	if d.warmDockerDesktop == nil {
+		return nil
+	}
+	if err := d.warmDockerDesktop.SetConversationScope(d.cfg.DefaultWorkspaceRoot, d.warmWorkspacePool.workspaceObjectDirectories); err != nil {
+		return err
+	}
+	probe, stop := context.WithTimeout(ctx, 15*time.Second)
+	defer stop()
+	if err := d.warmDockerDesktop.Ready(probe); err != nil {
+		return fmt.Errorf("qualify warm Docker Desktop process inspection: %w", err)
+	}
 	d.warmHostVisible.Store(true)
 	return nil
+}
+
+func prepareWarmDockerVolumeCLIDirectory(root, cliDir string) error {
+	if err := validateWarmDockerVolumeCLIDirectory(root, cliDir); err != nil || cliDir == "" {
+		return err
+	}
+	dir, err := openWarmWorkspaceDir(cliDir, true)
+	if err != nil {
+		return fmt.Errorf("open warm Docker runtime CLI directory: %w", err)
+	}
+	return dir.Close()
 }
 
 func validateWarmDockerVolumeHelper(helper string) error {

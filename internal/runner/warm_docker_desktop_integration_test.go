@@ -1,12 +1,14 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/runtime"
@@ -36,11 +38,18 @@ func TestWarmDockerDesktopLeaseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.qualifyWarmDockerVolume(t.Context()); err != nil {
+	if err := d.openWarmDockerVolume(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	p := f.open(t)
 	d.warmWorkspacePool = p
+	if err := d.qualifyWarmDockerVolume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	d.conversationForward = func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage("{}"), nil
+	}
+	checkWarmDockerConversation(t, d, domain.RunnerWorkspaceRequest{}, "a", "text-only")
 	d.state.RunnerID = "fixture-machine"
 	first := domain.WarmWorkspaceLease{RunnerID: d.state.RunnerID, OwnerRunID: "wsl-fixture-" + filepath.Base(f.root), Epoch: 1, Generation: 1, Slots: map[string]string{"a": "a"}}
 	g.repo.RepositoryID = "a"
@@ -66,13 +75,14 @@ func TestWarmDockerDesktopLeaseLifecycle(t *testing.T) {
 	}
 	req := domain.RunnerWorkspaceRequest{
 		RunID: first.OwnerRunID, WorkspaceRunID: first.OwnerRunID, WarmWorkspaceLease: &first,
-		WorkspaceLayout: domain.RunnerWorkspaceLayoutShared, Sandbox: spec,
+		WorkspaceLayout: domain.RunnerWorkspaceLayoutShared, Sandbox: spec, Workflow: &domain.WorkflowDefinition{ID: "test-workflow"},
 		Repositories: []domain.RepositoryContext{{RepositoryID: "a", WorkspaceDir: "checkout"}}, PreparationInvocation: inv,
 	}
 	req.Operation = domain.RunnerWorkspaceOperationCheckouts
 	if got := d.readRunnerWorkspace(t.Context(), req); got.Error != "" || !strings.Contains(string(got.Payload), "checkout") {
 		t.Fatalf("read-only Git helper failed: %+v", got)
 	}
+	checkWarmDockerConversation(t, d, req, "b", "imported")
 	sandbox, done, err := d.acquireTaskSandbox(t.Context(), domain.RunnerTask{
 		ID: first.OwnerRunID + "-task", RunID: first.OwnerRunID, Workspace: workspace, Sandbox: spec, WarmWorkspaceLease: &first,
 	})
@@ -119,4 +129,53 @@ func TestWarmDockerDesktopLeaseLifecycle(t *testing.T) {
 	if got, err := os.ReadFile(cache); err != nil || string(got) != "imported" {
 		t.Fatalf("reacquired cache = %q, %v", got, err)
 	}
+}
+
+func checkWarmDockerConversation(t *testing.T, d *Daemon, envelope domain.RunnerWorkspaceRequest, digit, expected string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	envelope.Operation = "conversation_process"
+	command := runtime.ConversationProcessRequest{
+		Operation: "start", SessionKey: strings.Repeat(digit, 64),
+		Command: &runtime.ConversationCommand{Argv: []string{"codebuddy"}, Provider: "codebuddy"},
+	}
+	request := func() runtime.ConversationProcessResult {
+		t.Helper()
+		raw, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		envelope.Conversation = raw
+		resp := d.readRunnerWorkspace(ctx, envelope)
+		var result runtime.ConversationProcessResult
+		if resp.Error != "" || json.Unmarshal(resp.Payload, &result) != nil {
+			t.Fatalf("conversation %s: %+v", command.Operation, resp)
+		}
+		return result
+	}
+	start := request()
+	if start.ID == "" {
+		t.Fatal("conversation did not start")
+	}
+	command.ID, command.Operation, command.Command = start.ID, "poll", nil
+	var out strings.Builder
+	for ctx.Err() == nil {
+		result := request()
+		command.After = result.Sequence
+		for _, event := range result.Events {
+			if event.Name == "process.stdout" {
+				out.WriteString(event.Message)
+			}
+		}
+		if !result.Done {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if result.Error != "" || strings.TrimSpace(out.String()) != expected {
+			t.Fatalf("conversation got %q, error %q, want %q", out.String(), result.Error, expected)
+		}
+		return
+	}
+	t.Fatal("isolated Docker conversation did not complete")
 }

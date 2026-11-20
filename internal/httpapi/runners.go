@@ -823,6 +823,10 @@ func runnerDBPollInterval() time.Duration {
 //
 //	g.POST("/runners/tasks/claim", h.runnerTaskClaim)
 func (h *runnersHandlers) runnerTaskClaim(c *gin.Context) {
+	h.runnerTaskClaimScoped(c, false)
+}
+
+func (h *runnersHandlers) runnerTaskClaimScoped(c *gin.Context, warmOnly bool) {
 	runner, ok := h.runnerSessionAuth(c)
 	if !ok {
 		return
@@ -845,6 +849,9 @@ func (h *runnersHandlers) runnerTaskClaim(c *gin.Context) {
 	}
 	warmProtocol := c.GetHeader(domain.WarmWorkspaceProtocolHeader) == domain.WarmWorkspaceProtocolV1
 	claimOrSignal := func() (domain.RunnerTask, bool, error) {
+		if warmOnly {
+			return h.claimDedicatedWarmTask(runner.ID, input.AvailableRuntimes, input.Preflight)
+		}
 		if input.Preflight {
 			available, err := h.repo.RunnerTaskAvailable(runner.ID, input.AvailableRuntimes, warmProtocol)
 			return domain.RunnerTask{}, available, err

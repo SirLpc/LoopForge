@@ -19,7 +19,13 @@
 
 配置也可通过 `AGENTFLOW_RUNNER_WORKSPACE_POOL_FILE`、`AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME` 和 `AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME_ROOT` 提供。Docker Desktop 模式通过更换镜像升级。详见[通用登记与验收指南](warm-workspace-pool.md)。
 
+平台和专用 Runner 需要支持 `/runners/warm-tasks/claim`。这个接口只领取分派到本机且已有预热租约的任务。专用 Runner 启动时会检查平台是否提供该接口。
+
+将 Runner 接入可访问平台的自定义 Docker 网络。将 `AGENTFLOW_CONVERSATION_DOCKER_NETWORK` 设为该网络名称，`AGENTFLOW_CONVERSATION_RELAY_HOST` 设为 Runner 在该网络上的容器名称或别名，会话容器使用这个地址连接 Runner 的中继。
+
 ## 归还检查
+
+专用 Runner 接收带预热租约的仓库任务。项目对话的文本阶段和仓库阶段均使用 Docker 隔离，每次只挂载当前会话的目录和已获租约的工作区。Docker 运行工具共享目录应位于卷内的 `tools` 目录。
 
 任务容器挂载当前租约对应的卷子路径。Git 对象和辅助工具通过只读子路径挂载。归还前，Runner 检查引擎中运行和停止的容器。未知的重叠挂载、无法读取的进程状态或未交付的文件都会让槽位继续由原所有者保留。
 
