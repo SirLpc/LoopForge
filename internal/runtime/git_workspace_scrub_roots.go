@@ -13,6 +13,10 @@ import (
 	"time"
 )
 
+// A sandbox-supplied config, including a sparse file, must not consume the
+// Runner's temp volume or an unbounded amount of memory during cleanup.
+const maxScrubGitConfigBytes = 4 << 20
+
 func openScrubBase(name string) (*os.Root, error) {
 	if name == "" {
 		return nil, os.ErrInvalid
@@ -180,6 +184,9 @@ func scrubCheckoutConfigs(ctx context.Context, ws *os.Root) []string {
 // original parent, honor Git's config lock, and publish by replacing the
 // directory entry, never by truncating an inode supplied by the workspace.
 func scrubGitConfigFile(ctx context.Context, base *os.Root, rel string) []string {
+	if ctx.Err() != nil {
+		return nil
+	}
 	parent, err := openScrubDirectory(base, filepath.Dir(rel))
 	if err != nil {
 		return nil
@@ -196,7 +203,7 @@ func scrubGitConfigFile(ctx context.Context, base *os.Root, rel string) []string
 	}
 	defer input.Close()
 	info, err := input.Stat()
-	if err != nil || !os.SameFile(expected, info) || !singleLinkConfig(info) {
+	if err != nil || !os.SameFile(expected, info) || !singleLinkConfig(info) || info.Size() > maxScrubGitConfigBytes {
 		return nil
 	}
 	stage, err := os.MkdirTemp("", "loopforge-git-scrub-")
@@ -217,8 +224,12 @@ func scrubGitConfigFile(ctx context.Context, base *os.Root, rel string) []string
 	if len(cleaned) == 0 {
 		return nil
 	}
-	data, err := os.ReadFile(file)
+	result, err := os.Open(file)
 	if err != nil {
+		return nil
+	}
+	data, err := readScrubConfig(result)
+	if errors.Join(err, result.Close(), ctx.Err()) != nil {
 		return nil
 	}
 	lock := name + ".lock"
@@ -242,7 +253,7 @@ func scrubGitConfigFile(ctx context.Context, base *os.Root, rel string) []string
 		info.Size() != current.Size() || !info.ModTime().Equal(current.ModTime()) {
 		return nil
 	}
-	if err := parent.Rename(lock, name); err != nil {
+	if ctx.Err() != nil || parent.Rename(lock, name) != nil {
 		return nil
 	}
 	committed = true
@@ -252,4 +263,13 @@ func scrubGitConfigFile(ctx context.Context, base *os.Root, rel string) []string
 func singleLinkConfig(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && info.Mode().IsRegular() && stat.Nlink == 1
+}
+
+// Git's expanded config listing can be larger than the original file.
+func readScrubConfig(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxScrubGitConfigBytes+1))
+	if len(data) > maxScrubGitConfigBytes {
+		return nil, errors.New("Git configuration exceeds the cleanup size limit")
+	}
+	return data, err
 }

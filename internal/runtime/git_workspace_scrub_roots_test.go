@@ -107,3 +107,36 @@ func TestScrubConversationCleansSessionAndWorkspaceHomes(t *testing.T) {
 		}
 	}
 }
+
+func TestScrubGitConfigSkipsOversizedSparseFile(t *testing.T) {
+	home, tools := t.TempDir(), t.TempDir()
+	config := filepath.Join(home, ".gitconfig")
+	if err := os.WriteFile(config, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(config, (4<<20)+1); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(tools, "invoked")
+	t.Setenv("SCRUB_GIT_PROBE", probe)
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(tools, "git"), []byte("#!/bin/sh\n: > \"$SCRUB_GIT_PROBE\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if cleaned := ScrubWorkspaceGitSecrets(t.Context(), []string{home}, ""); len(cleaned) != 0 {
+		t.Fatal("oversized config was reported as cleaned")
+	}
+	if _, err := os.Stat(probe); !os.IsNotExist(err) {
+		t.Fatalf("oversized config reached Git: %v", err)
+	}
+	// The same bound applies when reading a private result or Git stdout,
+	// even if the reader grows beyond its original reported size.
+	file, err := os.Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if data, err := readScrubConfig(file); err == nil || data != nil {
+		t.Fatal("oversized result was accepted")
+	}
+}

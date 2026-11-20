@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"os/exec"
@@ -33,7 +34,10 @@ func scrubPrivateGitConfig(ctx context.Context, file string) []string {
 	}
 	var cleaned []string
 	removed := map[string]bool{}
-	for _, entry := range bytes.Split(out, []byte{0}) {
+	for entry := range bytes.SplitSeq(out, []byte{0}) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		key, value, _ := strings.Cut(string(entry), "\n")
 		if key == "" {
 			continue
@@ -91,5 +95,15 @@ func cutLast(value, sep string) (string, string, bool) {
 func scrubGit(ctx context.Context, file string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"config", "--file", file}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_COUNT=0")
-	return cmd.Output()
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	data, readErr := readScrubConfig(out)
+	// Close before waiting, so a producer stopped at the size limit can exit.
+	_ = out.Close()
+	return data, errors.Join(readErr, cmd.Wait())
 }
