@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ func TestWarmDesktopFencePhysicalScope(t *testing.T) {
 				spec.VolumeOptions.Subpath = tt.sub
 				c.HostConfig.Mounts = []desktopMountSpec{spec}
 			}
-			held, _, err := d.containerScope(c, ws)
+			held, err := d.containerOverlaps(c, ws)
 			if (held || err != nil) != tt.held {
 				t.Fatalf("held=%v err=%v", held, err)
 			}
@@ -183,5 +184,46 @@ func TestWarmDesktopFenceRequiresCanonicalWorkspace(t *testing.T) {
 	d := &WarmDockerDesktop{root: root}
 	if err := d.Fence(t.Context(), filepath.Join(root, "alias")); err == nil || !strings.Contains(err.Error(), "canonical workspace") {
 		t.Fatalf("unqualified alias reached Docker: %v", err)
+	}
+}
+
+func TestWarmDesktopFenceRetainsStoppedContainerWithCopiedLabels(t *testing.T) {
+	root := "/pool/work"
+	workspace := filepath.Join(root, "runs", "owner", "workspace")
+	d := &WarmDockerDesktop{volume: "pool", root: "/pool", backing: "/docker/volumes/pool/_data", id: strings.Repeat("a", 64)}
+	if err := d.SetConversationScope(root, func(ws string) ([]string, bool) { return []string{"/pool/cache/slot/objects"}, ws == workspace }); err != nil {
+		t.Fatal(err)
+	}
+	c := desktopContainer{ID: strings.Repeat("b", 64), Name: "/copied-task"}
+	c.Config.Labels = map[string]string{"io.loopforge.warm-workspace": workspace}
+	c.Mounts = []desktopMount{{Type: "volume", Name: d.volume, Source: d.backing, Destination: "/workspace", RW: true}}
+	spec := desktopMountSpec{Type: "volume", Source: d.volume, Target: "/workspace"}
+	sub, err := filepath.Rel(d.root, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.VolumeOptions.Subpath = sub
+	c.HostConfig.Mounts = []desktopMountSpec{spec}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixture, "inspection"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	docker := "#!/bin/sh\ncase \"$1\" in\nps) echo \"$FIXTURE_ID\";;\ninspect) cat \"$FIXTURE_DIR/inspection\";;\nrm) touch \"$FIXTURE_DIR/removed\";;\n*) exit 2;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fixture, "docker"), []byte(docker), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fixture+":"+os.Getenv("PATH"))
+	t.Setenv("FIXTURE_ID", c.ID)
+	t.Setenv("FIXTURE_DIR", fixture)
+	_, err = d.inventory(t.Context(), workspace)
+	if err == nil || !strings.Contains(err.Error(), "workspace mount") {
+		t.Fatalf("stopped foreign container did not retain the lease: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture, "removed")); !os.IsNotExist(err) {
+		t.Fatal("attempted to remove foreign container")
 	}
 }

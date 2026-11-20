@@ -38,14 +38,14 @@ func (d *WarmDockerDesktop) leaseObjects(workspace string) ([]string, bool) {
 	return d.conversations.authorizedObjects(workspace)
 }
 
-func (d *WarmDockerDesktop) verifyConversation(c desktopContainer, actual *warmDockerInspection) (string, error) {
+func (d *WarmDockerDesktop) verifyConversation(c desktopContainer, actual *warmDockerInspection) error {
 	if d.conversations == nil || actual == nil || !desktopContainerID.MatchString(c.ID) || actual.ID != c.ID || actual.Name != c.Name {
-		return "", errors.New("unverified Docker Desktop conversation identity")
+		return errors.New("unverified Docker Desktop conversation identity")
 	}
 	root := c.Config.Labels[warmConversationRootLabel]
 	workspace := c.Config.Labels["io.loopforge.warm-workspace"]
 	if actual.Config.Labels[warmConversationRootLabel] != root || actual.Config.Labels["io.loopforge.warm-workspace"] != workspace {
-		return "", errors.New("Docker Desktop conversation identity changed")
+		return errors.New("Docker Desktop conversation identity changed")
 	}
 	sessionKey := filepath.Base(root)
 	base := filepath.Join(d.conversations.workRoot, ".conversations")
@@ -54,55 +54,40 @@ func (d *WarmDockerDesktop) verifyConversation(c desktopContainer, actual *warmD
 		base = filepath.Join(base, ".transient")
 	}
 	if !desktopContainerID.MatchString(sessionKey) || root != filepath.Join(base, sessionKey) || c.Name != "/"+dockerContainerName(WarmDockerConversationID(sessionKey, transient)) {
-		return "", errors.New("invalid Docker Desktop session root or container name")
+		return errors.New("invalid Docker Desktop session root or container name")
 	}
 	req := SandboxRequirements{ConversationRoot: root, WarmDockerVolume: &WarmDockerVolume{Name: d.volume, Root: d.root, Backing: d.backing}}
 	if workspace != filepath.Join(root, "ws") {
 		objects, ok := d.leaseObjects(workspace)
 		if transient || !ok || len(objects) == 0 {
-			return "", errors.New("conversation workspace has no placed warm lease")
+			return errors.New("conversation workspace has no placed warm lease")
 		}
 		req.GitObjectDirs = objects
 	}
-	if err := actual.validateTask(workspace, req, RuntimeCLIDir()); err != nil {
-		return "", err
-	}
-	return workspace, nil
+	return actual.validateTask(workspace, req, RuntimeCLIDir())
 }
 
-// In a readiness check every volume client needs an owner. During return,
-// an unrelated client's physical mounts and handles are checked by the
-// inventory probe even when its session or lease is no longer registered.
-func (d *WarmDockerDesktop) classifyVolumeClient(ctx context.Context, c desktopContainer, workspace string) (bool, error) {
-	_, conversation := c.Config.Labels[warmConversationRootLabel]
-	conversation = conversation && d.hasVolume(c)
+// The fence is an observer. Labels and mount requests describe scope, but
+// only the creating component has the receipt needed to remove a container.
+func (d *WarmDockerDesktop) checkVolumeClient(ctx context.Context, c desktopContainer, workspace string) error {
 	if workspace != "" {
-		mounted, owns, err := d.containerScope(c, workspace)
-		if err != nil || !mounted {
-			return false, err
+		overlap, err := d.containerOverlaps(c, workspace)
+		if err != nil {
+			return err
 		}
-		if !conversation && !owns {
-			return false, fmt.Errorf("container %s still has a workspace mount", c.Name)
+		if overlap {
+			return fmt.Errorf("container %s still has a workspace mount", c.Name)
 		}
+		return nil
 	}
-	if conversation {
+	if _, conversation := c.Config.Labels[warmConversationRootLabel]; conversation && d.hasVolume(c) {
 		actual, err := inspectWarmDocker(ctx, c.ID)
 		if err != nil || actual == nil {
-			return false, err
+			return err
 		}
-		owner, err := d.verifyConversation(c, actual)
-		if err != nil {
-			return false, err
-		}
-		if workspace != "" && owner != workspace {
-			return false, errors.New("unverified conversation workspace alias")
-		}
-	} else if workspace == "" || d.conversations != nil {
-		if err := d.checkDedicated(c); err != nil {
-			return false, err
-		}
+		return d.verifyConversation(c, actual)
 	}
-	return workspace != "", nil
+	return d.checkDedicated(c)
 }
 
 // Other volume clients have no access to private conversation state. A

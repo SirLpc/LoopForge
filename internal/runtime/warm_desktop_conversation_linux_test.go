@@ -77,13 +77,12 @@ func TestDesktopConversationOwnership(t *testing.T) {
 			if tc.leased {
 				add(object, object, false)
 			}
-			got, err := d.verifyConversation(c, &i)
-			if err != nil || got != source {
-				t.Fatalf("authorized %s: %q %v", tc.name, got, err)
+			if err := d.verifyConversation(c, &i); err != nil {
+				t.Fatalf("authorized %s: %v", tc.name, err)
 			}
 			original := c.Name
 			c.Name, i.Name = "/foreign", "/foreign"
-			if _, err := d.verifyConversation(c, &i); err == nil {
+			if err := d.verifyConversation(c, &i); err == nil {
 				t.Fatal("foreign container name accepted")
 			}
 			c.Name, i.Name = original, original
@@ -95,21 +94,21 @@ func TestDesktopConversationOwnership(t *testing.T) {
 				c.HostConfig.Mounts = append(c.HostConfig.Mounts, spec)
 			}
 			unrelated := filepath.Join(work, "runs", "another", "workspace")
-			if remove, err := d.classifyVolumeClient(t.Context(), c, unrelated); err != nil || remove {
-				t.Fatalf("unrelated lease return affected this session: remove=%v err=%v", remove, err)
+			if err := d.checkVolumeClient(t.Context(), c, unrelated); err != nil {
+				t.Fatalf("unrelated lease return affected this session: %v", err)
 			}
 			c.Config.Labels["io.loopforge.warm-workspace"] = filepath.Join(work, "runs", "unleased", "workspace")
-			if _, err := d.verifyConversation(c, &i); err == nil {
+			if err := d.verifyConversation(c, &i); err == nil {
 				t.Fatal("unleased workspace accepted")
 			}
 			c.Config.Labels["io.loopforge.warm-workspace"] = source
 			i.Mounts[1].RW = true
-			if _, err := d.verifyConversation(c, &i); err == nil {
+			if err := d.verifyConversation(c, &i); err == nil {
 				t.Fatal("writable session root accepted")
 			}
 			i.Mounts[1].RW = false
 			add(filepath.Join(root, "tools"), "/unexpected", true)
-			if _, err := d.verifyConversation(c, &i); err == nil {
+			if err := d.verifyConversation(c, &i); err == nil {
 				t.Fatal("extra writable tools mount accepted")
 			}
 		})

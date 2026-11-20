@@ -216,7 +216,7 @@ func (d *WarmDockerDesktop) Ready(ctx context.Context) error {
 	if err := d.verifyCurrent(ctx); err != nil {
 		return err
 	}
-	mounts, err := d.inventory(ctx, "", false)
+	mounts, err := d.inventory(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -243,14 +243,7 @@ func (d *WarmDockerDesktop) Fence(ctx context.Context, workspace string) error {
 	if err := d.verifyCurrent(ctx); err != nil {
 		return err
 	}
-	// Verify the daemon PID identity before removing an owned helper.
-	if err := d.probe(ctx, "", desktopInventory{}); err != nil {
-		return err
-	}
-	if _, err := d.inventory(ctx, workspace, true); err != nil {
-		return err
-	}
-	mounts, err := d.inventory(ctx, workspace, false)
+	mounts, err := d.inventory(ctx, workspace)
 	if err != nil {
 		return err
 	}
@@ -334,7 +327,7 @@ type desktopInventory struct {
 	Live        []desktopLiveMount
 }
 
-func (d *WarmDockerDesktop) inventory(ctx context.Context, workspace string, cleanup bool) (result desktopInventory, err error) {
+func (d *WarmDockerDesktop) inventory(ctx context.Context, workspace string) (result desktopInventory, err error) {
 	raw, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--no-trunc").Output()
 	if err != nil {
 		return result, fmt.Errorf("cannot enumerate Docker Desktop containers: %w", err)
@@ -352,18 +345,8 @@ func (d *WarmDockerDesktop) inventory(ctx context.Context, workspace string, cle
 		if c.ID != id {
 			return result, errors.New("container identity changed during workspace fence")
 		}
-		remove, err := d.classifyVolumeClient(ctx, c, workspace)
-		if err != nil {
+		if err := d.checkVolumeClient(ctx, c, workspace); err != nil {
 			return result, err
-		}
-		if remove {
-			if !cleanup {
-				return result, fmt.Errorf("container %s still has a workspace mount", c.Name)
-			}
-			if err := removeDockerContainer(ctx, c.ID); err != nil {
-				return result, err
-			}
-			continue
 		}
 		for _, m := range c.Mounts {
 			switch m.Type {
@@ -413,7 +396,7 @@ func (d *WarmDockerDesktop) inventory(ctx context.Context, workspace string, cle
 	return result, nil
 }
 
-func (d *WarmDockerDesktop) containerScope(c desktopContainer, workspace string) (mounted, owns bool, err error) {
+func (d *WarmDockerDesktop) containerOverlaps(c desktopContainer, workspace string) (bool, error) {
 	sub, _ := filepath.Rel(d.root, workspace)
 	daemonPath, physicalPath := filepath.Join(d.backing, sub), filepath.Join(d.mount.root, sub)
 	for _, m := range c.Mounts {
@@ -421,36 +404,31 @@ func (d *WarmDockerDesktop) containerScope(c desktopContainer, workspace string)
 		case "volume":
 			if m.Name != d.volume {
 				if desktopOverlap(m.Source, daemonPath) || desktopOverlap(m.Source, physicalPath) {
-					return true, false, errors.New("unexpected volume identity at workspace backing")
+					return true, errors.New("unexpected volume identity at workspace backing")
 				}
 				continue
 			}
 			if m.Source != d.backing {
-				return true, false, errors.New("Docker volume backing changed")
+				return true, errors.New("Docker volume backing changed")
 			}
 			s, err := desktopVolumeSubpath(c, m)
 			if err != nil {
-				return true, false, err
+				return true, err
 			}
 			if c.ID == d.id && m.Destination == d.root && s == "" && m.RW {
 				continue
 			}
 			source := filepath.Join(d.backing, s)
-			if !desktopOverlap(source, daemonPath) {
-				continue
+			if desktopOverlap(source, daemonPath) {
+				return true, nil
 			}
-			mounted = true
-			if source != daemonPath || m.Destination != "/workspace" {
-				return true, false, nil
-			}
-			owns = warmContainerOwnsWorkspace(c.Name, c.Config.Labels, workspace)
 		case "bind":
 			if !filepath.IsAbs(m.Source) || desktopOverlap(m.Source, daemonPath) || desktopOverlap(m.Source, physicalPath) {
-				return true, false, nil
+				return true, nil
 			}
 		}
 	}
-	return mounted, owns, nil
+	return false, nil
 }
 
 func (d *WarmDockerDesktop) probe(ctx context.Context, workspace string, inventory desktopInventory) error {
