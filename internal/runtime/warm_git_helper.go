@@ -106,16 +106,33 @@ func (target warmGitContainer) run(ctx context.Context, input []byte) (reply []b
 	}
 	args = append(args, binds...)
 	args = append(args, "--entrypoint", warmGitExecutable, target.image, "warm-git-helper")
-	// Even if the CLI loses its create acknowledgement, remove the unique name.
+	// Volume helpers require the create receipt and matching inspected mount
+	// contract. The release fence handles an unacknowledged helper.
+	cleanupTarget := name
+	volume := target.requirements.WarmDockerVolume
+	if volume != nil {
+		cleanupTarget = ""
+	}
 	defer func() {
+		if cleanupTarget == "" {
+			return
+		}
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stop()
-		resultErr = errors.Join(resultErr, removeDockerContainer(cleanup, name))
+		resultErr = errors.Join(resultErr, removeDockerContainer(cleanup, cleanupTarget))
 	}()
-	if _, err = exec.CommandContext(ctx, "docker", args...).Output(); err != nil {
+	created, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if err != nil {
 		return nil, fmt.Errorf("create warm Git helper: %w", err)
 	}
-	raw, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{json .}}", name).Output()
+	startTarget := name
+	if volume != nil {
+		startTarget = strings.TrimSpace(string(created))
+		if !dockerImmutableID(startTarget) {
+			return nil, errors.New("invalid warm Git helper create acknowledgement")
+		}
+	}
+	raw, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{json .}}", startTarget).Output()
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +149,13 @@ func (target warmGitContainer) run(ctx context.Context, input []byte) (reply []b
 	if err = actual.validateWarmPaths(target.requirements.WarmDockerVolume, map[string]string{"/workspace": target.workspace, warmGitExecutable: helper}, target.requirements.GitObjectDirs, "", target.writable); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, "docker", "start", "-ai", name)
+	if volume != nil {
+		if actual.ID != startTarget || actual.Name != "/"+name || actual.Config.Labels["io.loopforge.warm-git-parent"] != target.parent || actual.Config.Image != target.image {
+			return nil, errors.New("unexpected warm Git helper identity")
+		}
+		cleanupTarget = startTarget
+	}
+	cmd := exec.CommandContext(ctx, "docker", "start", "-ai", startTarget)
 	cmd.Stdin = bytes.NewReader(input)
 	output, err := cmd.StdoutPipe()
 	if err != nil {

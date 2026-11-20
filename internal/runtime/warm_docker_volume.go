@@ -172,21 +172,24 @@ func dockerRuntimeCLIMount(v *WarmDockerVolume, dir string) ([]string, error) {
 	return dockerPathMount(v, dir, dir, true)
 }
 
-func (s *dockerSandbox) canReuseDockerMounts(ctx context.Context, mounts *dockerWorkspaceMounts, recreate bool) (bool, error) {
+func (s *dockerSandbox) reusableDockerContainer(ctx context.Context, mounts *dockerWorkspaceMounts, recreate bool) (string, error) {
 	if s.requirements.WarmDockerVolume != nil {
 		// Check ownership before restarting or replacing any existing container.
-		return !recreate, s.verifyWarmDocker(ctx)
+		if recreate {
+			return "", nil
+		}
+		return s.volumeStartTarget(ctx, s.name, s.warmTaskID)
 	}
 	if !dockerBindMatchesWorkspace(mounts.source, s.workspace) {
-		return false, fmt.Errorf("docker sandbox %s is bound to %s, not %s", s.name, mounts.source, s.workspace)
+		return "", fmt.Errorf("docker sandbox %s is bound to %s, not %s", s.name, mounts.source, s.workspace)
 	}
 	for _, objects := range s.requirements.GitObjectDirs {
 		if !dockerBindMatchesWorkspace(mounts.readOnlyObjects[objects], objects) {
-			return false, nil
+			return "", nil
 		}
 	}
 	if recreate || mounts.legacyMasks {
-		return false, nil
+		return "", nil
 	}
-	return true, s.verifyWarmDocker(ctx)
+	return s.name, s.verifyWarmDocker(ctx)
 }

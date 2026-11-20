@@ -20,14 +20,16 @@ import (
 )
 
 type dockerSandbox struct {
-	id, name, workspace string
-	profile             domain.SandboxProfile
-	requirements        SandboxRequirements
-	dockerfile          domain.DockerfileDefinition
-	builtImage          string
-	mu                  sync.Mutex
-	browserMu           sync.Mutex
-	started             bool
+	id, name, workspace             string
+	profile                         domain.SandboxProfile
+	requirements                    SandboxRequirements
+	dockerfile                      domain.DockerfileDefinition
+	builtImage                      string
+	warmTaskID                      string // protected by mu
+	warmBrowserID, warmBrowserRunID string // protected by browserMu
+	mu                              sync.Mutex
+	browserMu                       sync.Mutex
+	started                         bool
 	// execGate lets parallel branches exec concurrently (read side) while a
 	// cwd-recovery Recreate (write side) waits for them instead of docker
 	// rm-ing the container under a sibling's running command.
@@ -46,6 +48,10 @@ func (s *dockerSandbox) Driver() string    { return "docker" }
 func (s *dockerSandbox) Close(ctx context.Context) error {
 	s.mu.Lock()
 	s.started = false
+	if s.requirements.WarmDockerVolume != nil {
+		defer s.mu.Unlock()
+		return s.removeTaskContainers(ctx)
+	}
 	image := s.builtImage
 	s.builtImage = ""
 	s.mu.Unlock()
@@ -695,13 +701,13 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		return errors.New("warm Docker volumes do not support conversation state mounts")
 	}
 	if mounts != nil {
-		reuse, err := s.canReuseDockerMounts(ctx, mounts, recreate)
+		existing, err := s.reusableDockerContainer(ctx, mounts, recreate)
 		if err != nil {
 			return err
 		}
-		if reuse {
-			if err := exec.CommandContext(ctx, "docker", "start", name).Run(); err == nil {
-				if err := waitDockerWorkspaceReady(ctx, name); err == nil {
+		if existing != "" {
+			if err := exec.CommandContext(ctx, "docker", "start", existing).Run(); err == nil {
+				if err := waitDockerWorkspaceReady(ctx, existing); err == nil {
 					s.started = true
 					return nil
 				}
@@ -788,27 +794,36 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	// Resolve the replacement image and mounts before retiring a workspace with
 	// legacy masks. Its new container ID invalidates old preparation receipts.
 	if mounts != nil || recreate {
-		if err := removeDockerWorkspaceContainers(ctx, name); err != nil {
+		if err := s.removeTaskContainers(ctx); err != nil {
 			return err
 		}
 	}
 	s.builtImage = built
-	if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
-		dropEphemeralDockerImage(s.builtImage)
+	var createErrors strings.Builder
+	create := exec.CommandContext(ctx, "docker", args...)
+	create.Stderr = &createErrors
+	created, err := create.Output()
+	if err != nil {
+		if volume == nil {
+			dropEphemeralDockerImage(s.builtImage)
+		}
 		s.builtImage = ""
-		return fmt.Errorf("docker create: %w: %s", err, out)
+		return fmt.Errorf("docker create: %w: %s", err, createErrors.String())
 	}
-	if err := s.verifyWarmDocker(ctx); err != nil {
+	startTarget, err := s.createdStartTarget(ctx, created)
+	if err != nil {
 		return err
 	}
-	if out, err := exec.CommandContext(ctx, "docker", "start", name).CombinedOutput(); err != nil {
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
-		dropEphemeralDockerImage(s.builtImage)
+	if out, err := exec.CommandContext(ctx, "docker", "start", startTarget).CombinedOutput(); err != nil {
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", startTarget).Run()
+		if volume == nil {
+			dropEphemeralDockerImage(s.builtImage)
+		}
 		s.builtImage = ""
 		return fmt.Errorf("docker start: %w: %s", err, out)
 	}
-	if err := waitDockerWorkspaceReady(ctx, name); err != nil {
-		_ = exec.Command("docker", "rm", "-f", name).Run()
+	if err := waitDockerWorkspaceReady(ctx, startTarget); err != nil {
+		_ = exec.Command("docker", "rm", "-f", startTarget).Run()
 		s.started = false
 		return err
 	}

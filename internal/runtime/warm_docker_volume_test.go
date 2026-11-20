@@ -205,4 +205,37 @@ PROBE
 		t.Fatal("duplicate live browser identity accepted")
 	}
 
+	// Retiring a workspace may remove its verified task and browser only. A
+	// stopped foreign container with an expected name remains visible to Fence.
+	makeCollision := func(container string) string {
+		return cli("create", "--pull=never", "--name", container, "--network=none", "--mount", "type=volume,src="+name+",dst=/foreign,volume-subpath=runs/one,volume-nocopy", "--entrypoint", "sleep", image, "60")
+	}
+	exists := func(id string) bool { return cli("ps", "-aq", "--no-trunc", "--filter", "id="+id) == id }
+	scriptsID := makeCollision(name + legacyDockerScriptSuffix)
+	taskID, browserID := cli("inspect", "--format", "{{.Id}}", name), cli("inspect", "--format", "{{.Id}}", browser)
+	if err := sb.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if exists(taskID) || exists(browserID) || !exists(scriptsID) {
+		t.Fatal("close failed to distinguish verified task and browser from foreign legacy companion")
+	}
+	foreignTask := makeCollision(name)
+	if err := sb.Close(t.Context()); err == nil || !exists(foreignTask) {
+		t.Fatal("close removed a foreign stopped task")
+	}
+	if err := sb.Recreate(t.Context()); err == nil || !exists(foreignTask) {
+		t.Fatal("recreate replaced a foreign stopped task")
+	}
+	cli("rm", foreignTask)
+	if err := sb.ensureStarted(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	foreignBrowser := makeCollision(browser)
+	if err := sb.Close(t.Context()); err == nil || !exists(foreignBrowser) {
+		t.Fatal("close removed a foreign stopped browser")
+	}
+	if err := sb.Recreate(t.Context()); err == nil || !exists(foreignBrowser) {
+		t.Fatal("recreate removed a foreign stopped browser")
+	}
+
 }
