@@ -697,9 +697,6 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		return err
 	}
 	volume := s.requirements.WarmDockerVolume
-	if volume != nil && s.requirements.ConversationRoot != "" {
-		return errors.New("warm Docker volumes do not support conversation state mounts")
-	}
 	if mounts != nil {
 		existing, err := s.reusableDockerContainer(ctx, mounts, recreate)
 		if err != nil {
@@ -754,7 +751,13 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	if network != "" {
 		args = append(args, "--network", network)
 	}
-	if root := s.requirements.ConversationRoot; root != "" {
+	if root := s.requirements.ConversationRoot; root != "" && volume != nil {
+		conversation, err := warmVolumeConversationArgs(volume, root, workspace)
+		if err != nil {
+			return err
+		}
+		args = append(args, conversation...)
+	} else if root != "" {
 		args = append(args, "-v", root+":"+root+":ro", "-v", filepath.Join(root, "home")+":"+filepath.Join(root, "home"), "-v", workspace+":"+filepath.Join(root, "ws"))
 		guards, err := conversationGuardMounts(root)
 		if err != nil {

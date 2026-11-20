@@ -85,7 +85,7 @@ func (actual *warmDockerInspection) validateWarmBrowser(runID, image, owner, wor
 	if err := actual.validateBrowserHost(network); err != nil {
 		return err
 	}
-	return actual.validateVolumeMounts(v, map[string]string{"/workspace": workspace}, true)
+	return actual.validateVolumePaths(v, map[string]warmVolumePath{"/workspace": {workspace, true}}, nil, "")
 }
 
 // HandleWarmDockerVolumeBrowser pins every panel operation, including file and

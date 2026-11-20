@@ -65,7 +65,7 @@ type warmDockerMountRequest struct {
 	}
 }
 
-func (i warmDockerInspection) validateVolumeRequests(v *WarmDockerVolume, allowed map[string]string, workspaceWritable bool) error {
+func (i warmDockerInspection) validateVolumeRequests(v *WarmDockerVolume, allowed map[string]warmVolumePath) error {
 	if len(i.HostConfig.Binds) != 0 || len(i.HostConfig.Mounts) != len(allowed) {
 		return errors.New("unexpected mount requests for the warm Docker volume")
 	}
@@ -81,11 +81,11 @@ func (i warmDockerInspection) validateVolumeRequests(v *WarmDockerVolume, allowe
 			return fmt.Errorf("unexpected warm Docker mount request at %s", m.Target)
 		}
 		seen[m.Target] = true
-		subpath, err := v.subpath(source)
+		subpath, err := v.subpath(source.Source)
 		if err != nil {
 			return err
 		}
-		wantReadOnly := m.Target != "/workspace" || !workspaceWritable
+		wantReadOnly := !source.Writable
 		if m.Type != "volume" || m.Source != v.Name || m.VolumeOptions == nil ||
 			m.VolumeOptions.Subpath != subpath || !m.VolumeOptions.NoCopy || m.ReadOnly != wantReadOnly {
 			return fmt.Errorf("incorrect warm Docker volume request at %s", m.Target)
@@ -101,34 +101,52 @@ func (i warmDockerInspection) validateTask(workspace string, requirements Sandbo
 	if err := i.validateHost(); err != nil {
 		return err
 	}
-	return i.validateWarmPaths(requirements.WarmDockerVolume, map[string]string{"/workspace": workspace}, requirements.GitObjectDirs, cli, true)
+	if i.Config.Labels[warmConversationRootLabel] != requirements.ConversationRoot {
+		return errors.New("unexpected warm Docker conversation identity")
+	}
+	allowed := map[string]warmVolumePath{"/workspace": {workspace, true}}
+	if requirements.ConversationRoot != "" {
+		var err error
+		if err := requirements.WarmDockerVolume.checkConversationAlias(requirements.ConversationRoot); err != nil {
+			return err
+		}
+		allowed, err = warmConversationMounts(requirements.ConversationRoot, workspace)
+		if err != nil {
+			return err
+		}
+	}
+	return i.validateVolumePaths(requirements.WarmDockerVolume, allowed, requirements.GitObjectDirs, cli)
 }
 
 func (i warmDockerInspection) validateWarmPaths(v *WarmDockerVolume, allowed map[string]string, objects []string, cli string, writable bool) error {
 	if v == nil {
 		return i.validateMounts(allowed, objects, cli, writable)
 	}
-	for _, path := range objects {
-		allowed[path] = path
+	paths := make(map[string]warmVolumePath, len(allowed))
+	for dst, src := range allowed {
+		paths[dst] = warmVolumePath{src, writable && dst == "/workspace"}
 	}
-	if cli != "" {
-		allowed[cli] = cli
-	}
-	return i.validateVolumeMounts(v, allowed, writable)
+	return i.validateVolumePaths(v, paths, objects, cli)
 }
 
-func (i warmDockerInspection) validateVolumeMounts(v *WarmDockerVolume, allowed map[string]string, writable bool) error {
-	if err := i.validateVolumeRequests(v, allowed, writable); err != nil {
+func (i warmDockerInspection) validateVolumePaths(v *WarmDockerVolume, allowed map[string]warmVolumePath, objects []string, cli string) error {
+	for _, path := range objects {
+		allowed[path] = warmVolumePath{Source: path}
+	}
+	if cli != "" {
+		allowed[cli] = warmVolumePath{Source: cli}
+	}
+	if err := i.validateVolumeRequests(v, allowed); err != nil {
 		return err
 	}
 	for _, m := range i.Mounts {
 		if m.Type == "tmpfs" && m.Destination == "/tmp" {
 			continue
 		}
-		_, ok := allowed[m.Destination]
+		expected, ok := allowed[m.Destination]
 		private := m.Propagation == "" || m.Propagation == "private" || m.Propagation == "rprivate"
 		if !ok || m.Type != "volume" || m.Name != v.Name || m.Source != v.Backing ||
-			m.RW != (writable && m.Destination == "/workspace") || !private {
+			m.RW != expected.Writable || !private {
 			return fmt.Errorf("unexpected warm Docker volume mount at %s", m.Destination)
 		}
 		delete(allowed, m.Destination)
