@@ -11,13 +11,22 @@ import (
 )
 
 type warmDockerMount struct {
-	Type, Source, Destination, Propagation string
-	RW                                     bool
+	Type, Name, Source, Destination, Propagation string
+	RW                                           bool
 }
 
 type warmDockerInspection struct {
+	ID     string
+	Config struct {
+		Image  string
+		Labels map[string]string
+	}
+	State      struct{ Running bool }
 	Mounts     []warmDockerMount
 	HostConfig struct {
+		Binds                                                        []string
+		Mounts                                                       []warmDockerMountRequest
+		Tmpfs                                                        map[string]string
 		Privileged                                                   bool
 		CapAdd, CapDrop, SecurityOpt, VolumesFrom, DeviceCgroupRules []string
 		Devices, DeviceRequests                                      []json.RawMessage
@@ -78,16 +87,30 @@ func (i warmDockerInspection) validateHost() error {
 }
 
 func (s *dockerSandbox) verifyWarmDocker(ctx context.Context) error {
-	if len(s.requirements.GitObjectDirs) == 0 {
+	if len(s.requirements.GitObjectDirs) == 0 && s.requirements.WarmDockerVolume == nil {
 		return nil
 	}
-	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", s.name).Output()
+	actual, err := inspectWarmDocker(ctx, s.name)
 	if err != nil {
-		return fmt.Errorf("inspect warm Docker container: %w", err)
+		return err
+	}
+	if actual == nil {
+		return errors.New("warm Docker sandbox disappeared")
+	}
+	return actual.validateTask(s.workspace, s.requirements, RuntimeCLIDir())
+}
+
+func inspectWarmDocker(ctx context.Context, name string) (*warmDockerInspection, error) {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", name).CombinedOutput()
+	if dockerObjectGone(string(out), err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect warm Docker container: %w", err)
 	}
 	var rows []warmDockerInspection
 	if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
-		return errors.New("invalid warm Docker inspection")
+		return nil, errors.New("invalid warm Docker inspection")
 	}
-	return rows[0].validate(s.workspace, s.requirements.GitObjectDirs, RuntimeCLIDir())
+	return &rows[0], nil
 }

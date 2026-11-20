@@ -90,16 +90,13 @@ func RunWarmGitHelper(ctx context.Context, sandbox Sandbox, input []byte) (reply
 }
 
 func (target warmGitContainer) run(ctx context.Context, input []byte) (reply []byte, resultErr error) {
-	helper, err := linuxWorkspaceHelper()
+	helper, mounts, err := target.pathMounts()
 	if err != nil {
 		return nil, err
 	}
 	name := target.parent + "-git-" + rand.Text()
-	workspaceMount := target.workspace + ":/workspace:ro"
-	if target.writable {
-		workspaceMount = target.workspace + ":/workspace"
-	}
-	args := []string{"create", "--name", name, "--label", "io.loopforge.warm-git-parent=" + target.parent, "--pull=never", "--init", "--interactive", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--network", target.network, "-w", "/workspace", "-v", workspaceMount, "-v", helper + ":" + warmGitExecutable + ":ro"}
+	args := []string{"create", "--name", name, "--label", "io.loopforge.warm-git-parent=" + target.parent, "--pull=never", "--init", "--interactive", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--network", target.network, "-w", "/workspace"}
+	args = append(args, mounts...)
 	if target.user != "" {
 		args = append(args, "--user", target.user)
 	}
@@ -132,7 +129,7 @@ func (target warmGitContainer) run(ctx context.Context, input []byte) (reply []b
 	if err = actual.validateHost(); err != nil {
 		return nil, err
 	}
-	if err = actual.validateMounts(map[string]string{"/workspace": target.workspace, warmGitExecutable: helper}, target.requirements.GitObjectDirs, "", target.writable); err != nil {
+	if err = actual.validateWarmPaths(target.requirements.WarmDockerVolume, map[string]string{"/workspace": target.workspace, warmGitExecutable: helper}, target.requirements.GitObjectDirs, "", target.writable); err != nil {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, "docker", "start", "-ai", name)

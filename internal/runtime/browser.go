@@ -246,8 +246,11 @@ func (s *dockerSandbox) ensureBrowser(ctx context.Context, runID string, sink Ev
 		return domain.MCPServerDefinition{}, err
 	}
 	name := dockerBrowserContainerName(s.name)
-	out, inspectErr := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}|{{.Config.Image}}|{{index .Config.Labels \""+browserRunLabel+"\"}}", name).Output()
-	if inspectErr != nil || strings.TrimSpace(string(out)) != "true|"+image+"|"+runID {
+	if s.requirements.WarmDockerVolume != nil {
+		if err := s.ensureWarmVolumeBrowser(ctx, runID, image, name); err != nil {
+			return domain.MCPServerDefinition{}, err
+		}
+	} else if out, inspectErr := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}|{{.Config.Image}}|{{index .Config.Labels \""+browserRunLabel+"\"}}", name).Output(); inspectErr != nil || strings.TrimSpace(string(out)) != "true|"+image+"|"+runID {
 		_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
 		args := []string{"run", "-d", "--name", name, "--init",
 			"--label", browserRunLabel + "=" + runID, "--label", browserOwnerLabel + "=" + s.name,

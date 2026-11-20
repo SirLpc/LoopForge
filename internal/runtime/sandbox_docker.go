@@ -5,7 +5,6 @@ import (
 	"agentflow/internal/procwatch"
 	"context"
 	"crypto/sha256"
-	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -691,19 +690,16 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	if err != nil {
 		return err
 	}
+	volume := s.requirements.WarmDockerVolume
+	if volume != nil && s.requirements.ConversationRoot != "" {
+		return errors.New("warm Docker volumes do not support conversation state mounts")
+	}
 	if mounts != nil {
-		if !dockerBindMatchesWorkspace(mounts.source, workspace) {
-			return fmt.Errorf("docker sandbox %s is bound to %s, not %s", name, mounts.source, workspace)
+		reuse, err := s.canReuseDockerMounts(ctx, mounts, recreate)
+		if err != nil {
+			return err
 		}
-		for _, objects := range s.requirements.GitObjectDirs {
-			if !dockerBindMatchesWorkspace(mounts.readOnlyObjects[objects], objects) {
-				recreate = true
-			}
-		}
-		if !recreate && !mounts.legacyMasks {
-			if err := s.verifyWarmDocker(ctx); err != nil {
-				return err
-			}
+		if reuse {
 			if err := exec.CommandContext(ctx, "docker", "start", name).Run(); err == nil {
 				if err := waitDockerWorkspaceReady(ctx, name); err == nil {
 					s.started = true
@@ -717,8 +713,13 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		return err
 	}
 	image := built
-	args := []string{"create", "--name", name, "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "-v", workspace + ":/workspace"}
-	if len(s.requirements.GitObjectDirs) > 0 {
+	args := []string{"create", "--name", name, "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges"}
+	workspaceMount, err := dockerPathMount(volume, workspace, "/workspace", false)
+	if err != nil {
+		return err
+	}
+	args = append(args, workspaceMount...)
+	if len(s.requirements.GitObjectDirs) > 0 || volume != nil {
 		args = append(args, "--label", "io.loopforge.warm-workspace="+workspace)
 	}
 	// Native installs own private (0700) workspaces as the service user.
@@ -761,7 +762,7 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	}
 	args = append(args, objectArgs...)
 	stateRequirements := s.requirements
-	if len(stateRequirements.GitObjectDirs) > 0 {
+	if len(stateRequirements.GitObjectDirs) > 0 || volume != nil {
 		stateRequirements.CLIStates = nil
 	}
 	stateArgs, err := dockerAgentStateMountRequirements(stateRequirements)
@@ -770,10 +771,11 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	}
 	args = append(args, stateArgs...)
 	if cliDir := RuntimeCLIDir(); cliDir != "" {
-		if err := os.MkdirAll(cliDir, 0o755); err != nil {
-			return fmt.Errorf("prepare runtime CLI directory: %w", err)
+		cliMount, err := dockerRuntimeCLIMount(volume, cliDir)
+		if err != nil {
+			return err
 		}
-		args = append(args, "--mount", "type=bind,src="+cliDir+",dst="+cliDir+",readonly")
+		args = append(args, cliMount...)
 	}
 	if p.ReadOnlyRootFS {
 		args = append(args, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m")
@@ -975,17 +977,11 @@ func isolateLocalDriver(profile domain.SandboxProfile, dockerfile domain.Dockerf
 func dockerGitObjectMounts(requirements SandboxRequirements) ([]string, error) {
 	var args []string
 	for _, dir := range requirements.GitObjectDirs {
-		// Docker parses --mount as CSV, including bind paths containing commas.
-		var mount strings.Builder
-		writer := csv.NewWriter(&mount)
-		if err := writer.Write([]string{"type=bind", "src=" + dir, "dst=" + dir, "readonly"}); err != nil {
+		mount, err := dockerPathMount(requirements.WarmDockerVolume, dir, dir, true)
+		if err != nil {
 			return nil, err
 		}
-		writer.Flush()
-		if err := writer.Error(); err != nil {
-			return nil, err
-		}
-		args = append(args, "--mount", strings.TrimSuffix(mount.String(), "\n"))
+		args = append(args, mount...)
 	}
 	return args, nil
 }
