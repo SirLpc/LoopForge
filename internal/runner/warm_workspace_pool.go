@@ -39,6 +39,10 @@ type warmWorkspacePool struct {
 }
 
 func openWarmWorkspacePool(configPath, workspaceRoot, statePath string) (*warmWorkspacePool, error) {
+	return openWarmWorkspacePoolWithin(configPath, workspaceRoot, statePath, "")
+}
+
+func openWarmWorkspacePoolWithin(configPath, workspaceRoot, statePath, storageRoot string) (*warmWorkspacePool, error) {
 	configPath, err := filepath.Abs(configPath)
 	if err != nil {
 		return nil, err
@@ -57,6 +61,11 @@ func openWarmWorkspacePool(configPath, workspaceRoot, statePath string) (*warmWo
 	slots, err := readWarmWorkspaceSlots(configPath, workspaceRoot, filepath.Dir(statePath))
 	if err != nil {
 		return nil, err
+	}
+	if storageRoot != "" {
+		if err := validateWarmDockerVolumeSlots(storageRoot, slots); err != nil {
+			return nil, err
+		}
 	}
 	workspace, err := openWarmWorkspaceDir(workspaceRoot, true)
 	if err != nil {

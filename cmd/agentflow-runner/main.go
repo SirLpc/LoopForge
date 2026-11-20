@@ -21,6 +21,9 @@ import (
 // HTTPS only, and executes Agent CLI tasks on that machine. Agent CLI
 // credentials stay on this machine.
 func main() {
+	if runtime.RunWarmDockerProbeCLI(os.Args[1:]) {
+		return
+	}
 	if runtime.RunMCPCallCLI(os.Args[1:]) {
 		return
 	}
@@ -36,6 +39,8 @@ func main() {
 	statePath := flag.String("state", "", "state file path (default: ~/.agentflow-runner/state.json)")
 	workspace := flag.String("workspace", "", "default workspace root for tasks without their own path")
 	warmWorkspacePoolFile := flag.String("warm-workspace-pool-file", "", "local warm workspace pool config (or AGENTFLOW_RUNNER_WORKSPACE_POOL_FILE)")
+	warmDockerVolume := flag.String("warm-docker-volume", "", "dedicated Docker Desktop warm pool volume (or AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME)")
+	warmDockerVolumeRoot := flag.String("warm-docker-volume-root", "", "mount point of the dedicated warm pool volume (or AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME_ROOT)")
 	concurrency := flag.Int("concurrency", 1, "maximum concurrent tasks")
 	heartbeat := flag.Duration("heartbeat", 30*time.Second, "heartbeat interval")
 	longPoll := flag.Duration("long-poll", 35*time.Second, "client-side long-poll timeout; must exceed the server's")
@@ -52,6 +57,8 @@ func main() {
 		Name:                   firstNonEmpty(*name, os.Getenv("AGENTFLOW_RUNNER_NAME")),
 		DefaultWorkspaceRoot:   firstNonEmpty(*workspace, os.Getenv("AGENTFLOW_RUNNER_WORKSPACE")),
 		WarmWorkspacePoolFile:  firstNonEmpty(*warmWorkspacePoolFile, os.Getenv("AGENTFLOW_RUNNER_WORKSPACE_POOL_FILE")),
+		WarmDockerVolume:       firstNonEmpty(*warmDockerVolume, os.Getenv("AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME")),
+		WarmDockerVolumeRoot:   firstNonEmpty(*warmDockerVolumeRoot, os.Getenv("AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME_ROOT")),
 		MaxConcurrency:         *concurrency,
 		HeartbeatInterval:      *heartbeat,
 		LongPollTimeout:        *longPoll,

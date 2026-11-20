@@ -48,10 +48,7 @@ func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.
 		d.runSandboxMu.Unlock()
 		d.closeSharedSandboxes(ctx, func(entry *runSandbox) bool { return entry.warmOwner == l.OwnerRunID })
 		root := filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace")
-		err := runtime.FenceWarmWorkspaceContainers(ctx, root)
-		if err == nil {
-			err = checkProcesses(ctx, root)
-		}
+		err := d.fenceWarmWorkspaceReturn(ctx, root, checkProcesses)
 		if err != nil {
 			r := runnerWorkspaceError(err)
 			if a.GitReady && !a.ReturnProven {

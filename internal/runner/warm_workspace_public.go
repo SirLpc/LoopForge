@@ -27,7 +27,11 @@ func (d *Daemon) refreshWarmHostVisibility(ctx context.Context) {
 	}
 	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	err := runtime.CheckWarmHostVisibility(probe)
+	check := runtime.CheckWarmHostVisibility
+	if d.warmDockerDesktop != nil {
+		check = d.warmDockerDesktop.Ready
+	}
+	err := check(probe)
 	d.warmHostVisible.Store(err == nil)
 	if err != nil {
 		log.Printf("warm slots withheld: %v", err)

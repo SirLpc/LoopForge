@@ -110,7 +110,7 @@ func (d *Daemon) handleRunnerWorkspaceBrowser(ctx context.Context, request domai
 	if !runnerBrowserReads[request.Browser.Operation] {
 		d.touchRunSandboxes(request.RunID)
 	}
-	state, err := runtime.HandleBrowser(ctx, request.RunID, *request.Browser)
+	state, err := d.handleWorkspaceBrowserEndpoint(ctx, request)
 	if err != nil {
 		return domain.RunnerWorkspaceResponse{Status: 409, Error: err.Error()}
 	}

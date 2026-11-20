@@ -76,6 +76,9 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	}
 	// Git preparation and release proofs have their own lifetimes. A short
 	// control call may report placement, never readiness from placement alone.
+	if d.warmDockerDesktop != nil && !d.warmHostVisible.Load() && (req.Operation == domain.RunnerWorkspaceOperationWarmPrepare || req.Operation == domain.RunnerWorkspaceOperationWarmCheckout) {
+		return domain.RunnerWorkspaceResponse{Status: 503, Error: "warm Docker Desktop host visibility is temporarily unverified"}
+	}
 	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus && d.warmDockerUnavailable() {
 		return runnerWorkspaceError(errWarmDockerUnavailable)
 	}

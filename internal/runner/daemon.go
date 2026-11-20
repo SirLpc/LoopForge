@@ -59,6 +59,8 @@ type Daemon struct {
 	workspaceTerminals   runtime.TerminalPool
 	checkpointTransfers  runtime.CheckpointTransfers
 	warmWorkspacePool    *warmWorkspacePool
+	warmDockerDesktop    *runtime.WarmDockerDesktop
+	warmVolumeMount      *runtime.WarmDockerVolume
 	warmHostVisible      atomic.Bool
 	workspaceGates       sync.Map // run ID -> *sync.RWMutex; fences manual writes locally
 }
@@ -88,6 +90,9 @@ type Config struct {
 	WarmWorkspacePoolFile string
 	// WarmDockerEndpointPinned means the CLI fixed Docker to its startup Unix socket.
 	WarmDockerEndpointPinned bool
+	// WarmDockerVolume enables the dedicated Docker Desktop local-volume mode.
+	WarmDockerVolume     string
+	WarmDockerVolumeRoot string
 }
 
 type daemonState struct {
@@ -142,6 +147,14 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, err
 	}
 	cfg.DefaultWorkspaceRoot = root
+	cfg.WarmDockerVolume = strings.TrimSpace(cfg.WarmDockerVolume)
+	cfg.WarmDockerVolumeRoot = strings.TrimSpace(cfg.WarmDockerVolumeRoot)
+	if err := validateWarmDockerVolumeConfig(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.WarmDockerVolume != "" {
+		cfg.DisableAutoUpdate = true
+	}
 	if cfg.Name == "" {
 		host, _ := os.Hostname()
 		cfg.Name = host
@@ -168,7 +181,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	if d.cfg.WarmWorkspacePoolFile != "" {
-		pool, err := openWarmWorkspacePool(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json")
+		if err := d.qualifyWarmDockerVolume(ctx); err != nil {
+			return err
+		}
+		pool, err := openWarmWorkspacePoolWithin(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json", d.cfg.WarmDockerVolumeRoot)
 		if err != nil {
 			return fmt.Errorf("open warm workspace pool: %w", err)
 		}

@@ -200,6 +200,7 @@ func (d *Daemon) localTaskSandboxSpec(task domain.RunnerTask) (runtime.SandboxRe
 			requirements.GitObjectDirs = append(requirements.GitObjectDirs, filepath.Join(p.gitCache(slot), "objects"))
 		}
 		sort.Strings(requirements.GitObjectDirs)
+		requirements.WarmDockerVolume = d.warmVolumeMount
 		break
 	}
 	return requirements, resources
