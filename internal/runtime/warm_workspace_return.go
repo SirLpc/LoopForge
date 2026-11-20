@@ -48,9 +48,7 @@ func FenceWarmWorkspaceContainers(ctx context.Context, workspace string) error {
 					mounted = true
 				}
 				if m.Source == workspace && m.Destination == "/workspace" {
-					parent := info.Config.Labels["io.loopforge.warm-git-parent"]
-					name := strings.TrimPrefix(info.Name, "/")
-					owns = info.Config.Labels["io.loopforge.warm-workspace"] == workspace || strings.HasPrefix(parent, dockerSandboxPrefix) && strings.HasPrefix(name, parent+"-git-")
+					owns = warmContainerOwnsWorkspace(info.Name, info.Config.Labels, workspace)
 				}
 			}
 			if !mounted {
@@ -65,4 +63,9 @@ func FenceWarmWorkspaceContainers(ctx context.Context, workspace string) error {
 		}
 	}
 	return nil
+}
+
+func warmContainerOwnsWorkspace(name string, labels map[string]string, workspace string) bool {
+	parent := labels["io.loopforge.warm-git-parent"]
+	return labels["io.loopforge.warm-workspace"] == workspace || strings.HasPrefix(parent, dockerSandboxPrefix) && strings.HasPrefix(strings.TrimPrefix(name, "/"), parent+"-git-")
 }
