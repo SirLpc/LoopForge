@@ -96,14 +96,15 @@ func (p *TerminalPool) HandleSandboxWithGit(ctx context.Context, sandbox Sandbox
 			return err
 		}
 	}
-	cmd, home, err := sandboxTerminalCommandWithBinding(ctx, sandbox, credentials.HTTPS, bind)
+	cmd, launch, err := sandboxTerminalCommandWithBinding(ctx, sandbox, credentials.HTTPS, bind)
 	if err != nil {
 		stopSSH()
 		return TerminalResult{}, err
 	}
+	home := launch.home
 	ownedRelease := func() {
 		stopSSH()
-		sandboxTerminalCleanup(sandbox, home)
+		sandboxTerminalCleanup(sandbox, launch)
 		if release != nil {
 			release()
 		}
@@ -111,7 +112,7 @@ func (p *TerminalPool) HandleSandboxWithGit(ctx context.Context, sandbox Sandbox
 	result, err := p.handle(scope, req, ownedRelease, func() (*exec.Cmd, string, error) { return cmd, home, nil })
 	if err != nil {
 		stopSSH()
-		sandboxTerminalCleanup(sandbox, home)
+		sandboxTerminalCleanup(sandbox, launch)
 		_ = removeTerminalHome(home)
 	}
 	return result, err

@@ -170,6 +170,10 @@ func (s *dockerSandbox) Exec(ctx context.Context, command CommandSpec, sink Even
 }
 
 func (s *dockerSandbox) execOnce(ctx context.Context, command CommandSpec, sink EventSink) (out string, err error) {
+	target, err := s.executionTarget()
+	if err != nil {
+		return "", err
+	}
 	args := []string{"exec"}
 	if command.Stdin != nil || isManagedClaude(command) {
 		args = append(args, "-i")
@@ -186,7 +190,7 @@ func (s *dockerSandbox) execOnce(ctx context.Context, command CommandSpec, sink 
 	}
 	toolchain := s.toolchainExecEnv()
 	args = append(args, toolchain...)
-	args = append(args, s.name)
+	args = append(args, target)
 	argv := dockerWorkspaceExecArgv(command.Argv)
 	if command.WorkingDir != "" {
 		argv = append([]string{"sh", "-lc", dockerMCPCallLaunch + `PATH=/opt/loopforge/conversation-cli/bin:/opt/loopforge/conversation-cli/.local/bin:$PATH; export PATH
@@ -199,7 +203,7 @@ cd "$1" && shift && exec "$@"`, "conversation", command.WorkingDir}, dropShellLo
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			stopArgs := append(append(append([]string{"exec"}, toolchain...), s.name), dockerConversationStopArgv(processFile)...)
+			stopArgs := append(append(append([]string{"exec"}, toolchain...), target), dockerConversationStopArgv(processFile)...)
 			if stopErr := exec.CommandContext(stopCtx, "docker", stopArgs...).Run(); stopErr != nil {
 				err = errors.Join(err, fmt.Errorf("停止 CLI 子进程失败: %w", stopErr))
 			}

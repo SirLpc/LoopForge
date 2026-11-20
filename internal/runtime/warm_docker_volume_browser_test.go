@@ -30,6 +30,7 @@ func TestWarmVolumePanelVerifiesEndpointBeforeServingFiles(t *testing.T) {
 	parentID, browserID := strings.Repeat("1", 64), strings.Repeat("2", 64)
 	backing := "/var/lib/docker/volumes/test-pool/_data"
 	requires := SandboxRequirements{WarmDockerVolume: &WarmDockerVolume{Root: root, Name: "test-pool", Backing: backing}}
+	requires.WarmDockerVolume.browserParents.Store(browserID, parentID)
 	inspection := func(id, name, network, image, labels string) string {
 		return fmt.Sprintf(`[{
 			"Id":%q,"Name":%q,"State":{"Running":true},"Config":{"Image":%q,"Labels":%s},

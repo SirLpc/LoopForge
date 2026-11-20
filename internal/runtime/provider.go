@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"agentflow/internal/domain"
 )
@@ -12,6 +13,7 @@ import (
 // and Helper is the runner-provisioned executable inside Root.
 type WarmDockerVolume struct {
 	Name, Root, Backing, Helper string
+	browserParents              sync.Map // witnessed sidecar ID -> verified task ID, local to this Runner
 }
 
 // SandboxRequirements describes the host state and runtime features a provider

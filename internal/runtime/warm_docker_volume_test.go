@@ -179,19 +179,28 @@ PROBE
 			t.Errorf("remove browser fixture: %v: %s", err, out)
 		}
 	})
-	if err := sb.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser); err != nil {
+	if err := sb.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser, sb.warmTaskID); err != nil {
 		t.Fatal(err)
 	}
 	cli("exec", browser, "sh", "-ec", "test -f /workspace/test")
 	cli("stop", "-t", "1", browser)
-	if err := sb.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser); err != nil {
+	if err := sb.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser, sb.warmTaskID); err != nil {
 		t.Fatal(err)
 	}
 	if got := cli("inspect", "--format", "{{.State.Running}}", browser); got != "true" {
 		t.Fatal("verified browser did not restart")
 	}
+	unwitnessedBrowser := &dockerSandbox{name: name, workspace: workspace, requirements: req, dockerfile: sb.dockerfile}
+	if err := unwitnessedBrowser.ensureWarmVolumeBrowser(t.Context(), name, browserImage, browser, sb.warmTaskID); err == nil {
+		t.Error("fresh handle adopted an existing browser")
+	}
 	t.Setenv("AGENTFLOW_BROWSER_IMAGE", browserImage)
 	reqFile := domain.BrowserRequest{Operation: "file", File: "/workspace/marker"}
+	coldRequirements := req
+	coldRequirements.WarmDockerVolume = &WarmDockerVolume{Name: v.Name, Root: v.Root, Backing: v.Backing, Helper: v.Helper}
+	if _, err := HandleWarmDockerVolumeBrowser(t.Context(), name, workspace, coldRequirements, reqFile); err == nil {
+		t.Error("fresh runner attached to an unwitnessed browser")
+	}
 	if exec.CommandContext(t.Context(), "docker", "exec", browser, "sh", "-ec", "command -v node").Run() == nil {
 		state, err := HandleWarmDockerVolumeBrowser(t.Context(), name, workspace, req, reqFile)
 		if err != nil || state.HTTP == nil || string(state.HTTP.Body) != "first\n" {
@@ -236,6 +245,34 @@ PROBE
 	}
 	if err := sb.Recreate(t.Context()); err == nil || !exists(foreignBrowser) {
 		t.Fatal("recreate removed a foreign stopped browser")
+	}
+
+	cli("rm", foreignBrowser)
+	if err := sb.ensureStarted(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	original := sb.warmTaskID
+	cold := &dockerSandbox{name: name, workspace: workspace, requirements: req, dockerfile: sb.dockerfile}
+	if err := cold.Close(t.Context()); err == nil || !exists(original) {
+		t.Fatal("cold handle removed a container without witnessing its ID")
+	}
+	if err := cold.ensureStarted(t.Context()); err == nil {
+		t.Error("fresh handle adopted an existing task")
+	}
+	cli("rm", "-f", original)
+	replacement := cli("run", "-d", "--pull=never", "--name", name, "--network=none", "--workdir", "/workspace", "--entrypoint", "sleep", image, "60")
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", replacement).Run() })
+	if _, err := ReadSandboxEnvironmentIdentity(t.Context(), sb); err == nil {
+		t.Fatal("status accepted a replacement container")
+	}
+	if _, err := sb.Exec(t.Context(), CommandSpec{Argv: []string{"true"}}, nil); err == nil {
+		t.Fatal("task command ran in a replacement container")
+	}
+	if _, err := RunWarmGitHelper(t.Context(), sb, nil); err == nil {
+		t.Fatal("Git helper accepted the replacement parent")
+	}
+	if !exists(replacement) {
+		t.Fatal("checking the old task touched the replacement container")
 	}
 
 }

@@ -149,11 +149,9 @@ func (s *dockerSandbox) conversationCLIContainer(ctx context.Context, home strin
 	if err := s.ensureStarted(ctx); err != nil {
 		return "", err
 	}
-	s.mu.Lock()
-	id := s.warmTaskID
-	s.mu.Unlock()
-	if !dockerImmutableID(id) {
-		return "", errors.New("warm conversation container has no verified ID")
+	id, err := s.executionTarget()
+	if err != nil {
+		return "", err
 	}
 	actual, err := s.inspectVolumeTask(ctx, id, id)
 	if err != nil {

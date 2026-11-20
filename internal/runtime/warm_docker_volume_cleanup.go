@@ -16,9 +16,8 @@ func dockerImmutableID(id string) bool {
 	return err == nil
 }
 
-// Validate the task's identity as well as every effective mount. A restarted
-// runner may inherit a task; an instance that already witnessed an ID must
-// never substitute a different container that has since acquired its name.
+// Validate the task's witnessed identity as well as every effective mount.
+// A process restarted without its creation receipt leaves the holder retained.
 func (s *dockerSandbox) inspectVolumeTask(ctx context.Context, ref, knownID string) (*warmDockerInspection, error) {
 	actual, err := inspectWarmDocker(ctx, ref)
 	if err != nil || actual == nil {
@@ -28,7 +27,7 @@ func (s *dockerSandbox) inspectVolumeTask(ctx context.Context, ref, knownID stri
 	if image == "" {
 		image = cachedDockerImageName(s.dockerfile)
 	}
-	if !dockerImmutableID(actual.ID) || knownID != "" && actual.ID != knownID || actual.Name != "/"+s.name ||
+	if !dockerImmutableID(knownID) || actual.ID != knownID || actual.Name != "/"+s.name ||
 		actual.Config.Image != image || actual.Config.Labels["io.loopforge.warm-workspace"] != s.workspace {
 		return nil, errors.New("warm Docker task identity changed")
 	}
@@ -102,6 +101,21 @@ func (s *dockerSandbox) removeTaskContainers(ctx context.Context) error {
 			return err
 		}
 	}
+	s.requirements.WarmDockerVolume.browserParents.Delete(s.warmBrowserID)
 	s.warmTaskID, s.warmBrowserID, s.warmBrowserRunID = "", "", ""
 	return nil
+}
+
+// executionTarget returns the container generation already verified at start.
+// Native Docker keeps its ordinary name-based lifecycle.
+func (s *dockerSandbox) executionTarget() (string, error) {
+	if s.requirements.WarmDockerVolume == nil {
+		return s.name, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !dockerImmutableID(s.warmTaskID) {
+		return "", errors.New("warm Docker container has no verified execution target")
+	}
+	return s.warmTaskID, nil
 }

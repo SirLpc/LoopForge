@@ -71,19 +71,11 @@ func RunWarmGitHelper(ctx context.Context, sandbox Sandbox, input []byte) (reply
 	}
 	s.execGate.RLock()
 	defer s.execGate.RUnlock()
-	if err := s.verifyWarmDocker(ctx); err != nil {
-		return nil, err
-	}
-	var parent struct {
-		Image      string
-		Config     struct{ User string }
-		HostConfig struct{ NetworkMode string }
-	}
-	inspect, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{json .}}", s.name).Output()
+	parent, err := s.inspectedWarmTask(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err = json.Unmarshal(inspect, &parent); err != nil || parent.Image == "" {
+	if parent.Image == "" {
 		return nil, errors.New("cannot identify warm Git sandbox image")
 	}
 	return (warmGitContainer{parent: s.name, workspace: s.workspace, image: parent.Image, user: parent.Config.User, network: parent.HostConfig.NetworkMode, requirements: s.requirements, writable: true}).run(ctx, input)

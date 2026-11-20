@@ -16,10 +16,10 @@ type warmDockerMount struct {
 }
 
 type warmDockerInspection struct {
-	ID, Name string
-	Config   struct {
-		Image  string
-		Labels map[string]string
+	ID, Name, Image string
+	Config          struct {
+		Image, User string
+		Labels      map[string]string
 	}
 	State      struct{ Running bool }
 	Mounts     []warmDockerMount
@@ -90,14 +90,31 @@ func (s *dockerSandbox) verifyWarmDocker(ctx context.Context) error {
 	if len(s.requirements.GitObjectDirs) == 0 && s.requirements.WarmDockerVolume == nil {
 		return nil
 	}
-	actual, err := inspectWarmDocker(ctx, s.name)
+	_, err := s.inspectedWarmTask(ctx)
+	return err
+}
+
+func (s *dockerSandbox) inspectedWarmTask(ctx context.Context) (*warmDockerInspection, error) {
+	target, err := s.executionTarget()
 	if err != nil {
-		return err
+		return nil, err
+	}
+	var actual *warmDockerInspection
+	if s.requirements.WarmDockerVolume != nil {
+		actual, err = s.inspectVolumeTask(ctx, target, target)
+	} else {
+		actual, err = inspectWarmDocker(ctx, target)
+		if err == nil && actual != nil {
+			err = actual.validateTask(s.workspace, s.requirements, RuntimeCLIDir())
+		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	if actual == nil {
-		return errors.New("warm Docker sandbox disappeared")
+		return nil, errors.New("warm Docker sandbox disappeared")
 	}
-	return actual.validateTask(s.workspace, s.requirements, RuntimeCLIDir())
+	return actual, nil
 }
 
 func inspectWarmDocker(ctx context.Context, name string) (*warmDockerInspection, error) {

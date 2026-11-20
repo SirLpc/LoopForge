@@ -22,8 +22,8 @@ func (i warmDockerInspection) validateBrowserHost(taskNetwork string) error {
 
 // Bind the browser to the task's inspected network namespace by immutable ID.
 // Inspect newly created and previously stopped sidecars before allowing a start.
-func (s *dockerSandbox) ensureWarmVolumeBrowser(ctx context.Context, runID, image, name string) error {
-	parent, err := s.inspectVolumeTask(ctx, s.name, "")
+func (s *dockerSandbox) ensureWarmVolumeBrowser(ctx context.Context, runID, image, name, parentID string) error {
+	parent, err := s.inspectVolumeTask(ctx, parentID, parentID)
 	if err != nil {
 		return err
 	}
@@ -61,13 +61,17 @@ func (s *dockerSandbox) ensureWarmVolumeBrowser(ctx context.Context, runID, imag
 		if actual == nil || actual.ID != id {
 			return errors.New("warm browser identity changed after creation")
 		}
-	} else if s.warmBrowserID != "" && actual.ID != s.warmBrowserID {
+	} else if actual.ID != s.warmBrowserID {
 		return errors.New("warm browser identity changed")
 	}
 	if err := actual.validateWarmBrowser(runID, image, s.name, s.workspace, network, v); err != nil {
 		return err
 	}
+	if s.warmBrowserID != actual.ID {
+		v.browserParents.Delete(s.warmBrowserID)
+	}
 	s.warmBrowserID, s.warmBrowserRunID = actual.ID, runID
+	v.browserParents.Store(actual.ID, parent.ID)
 	if !actual.State.Running {
 		if out, err := exec.CommandContext(ctx, "docker", "start", actual.ID).CombinedOutput(); err != nil {
 			return fmt.Errorf("start warm browser: %w: %s", err, tailOutput(out))
@@ -107,6 +111,10 @@ func HandleWarmDockerVolumeBrowser(ctx context.Context, runID, workspace string,
 	if len(ids) != 1 {
 		return domain.BrowserState{}, errors.New("multiple browser containers claim this run")
 	}
+	witnessedParent, ok := v.browserParents.Load(ids[0])
+	if !ok {
+		return domain.BrowserState{}, errors.New("warm browser does not have a local creation receipt")
+	}
 	browser, err := inspectWarmDocker(ctx, ids[0])
 	if err != nil {
 		return domain.BrowserState{}, err
@@ -116,7 +124,7 @@ func HandleWarmDockerVolumeBrowser(ctx context.Context, runID, workspace string,
 	}
 	owner := browser.Config.Labels[browserOwnerLabel]
 	parentID, shared := strings.CutPrefix(browser.HostConfig.NetworkMode, "container:")
-	if !shared || parentID == "" || !strings.HasPrefix(owner, dockerSandboxPrefix) || browser.Name != "/"+dockerBrowserContainerName(owner) {
+	if !shared || parentID != witnessedParent || !strings.HasPrefix(owner, dockerSandboxPrefix) || browser.Name != "/"+dockerBrowserContainerName(owner) {
 		return domain.BrowserState{}, errors.New("unexpected warm browser owner")
 	}
 	parent, err := inspectWarmDocker(ctx, parentID)

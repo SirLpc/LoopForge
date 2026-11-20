@@ -144,7 +144,7 @@ func TestSandboxTerminalCommandsAcrossDrivers(t *testing.T) {
 	if cmd, home, err = sandboxTerminalCommand(context.Background(), docker); err != nil || cmd == nil || home == "" {
 		t.Fatalf("docker cmd=%+v home=%q err=%v", cmd, home, err)
 	}
-	sandboxTerminalCleanup(docker, home)
+	sandboxTerminalCleanup(docker, terminalLaunch{home: home, dockerTarget: docker.name})
 	_ = removeTerminalHome(home)
 	managed := &managedSandbox{Sandbox: local, workspace: workspace, credentials: RunCredentials{GitHTTPCredentials: testHTTPSCredentials("token")}, slots: make(chan struct{}, 1)}
 	if cmd, home, err = sandboxTerminalCommand(context.Background(), managed); err != nil || cmd == nil || home == "" {

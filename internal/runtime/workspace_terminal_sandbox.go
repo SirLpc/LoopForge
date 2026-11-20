@@ -48,27 +48,31 @@ exec "$SHELL" -i
 // sandboxTerminalCommand deliberately supports only concrete platform drivers.
 // An unknown Sandbox must fail closed instead of silently opening a host shell.
 func sandboxTerminalCommand(ctx context.Context, sandbox Sandbox) (*exec.Cmd, string, error) {
-	return sandboxTerminalCommandWithBinding(ctx, sandbox, nil, nil)
+	cmd, launch, err := sandboxTerminalCommandWithBinding(ctx, sandbox, nil, nil)
+	return cmd, launch.home, err
 }
 
-func sandboxTerminalCommandWithBinding(ctx context.Context, sandbox Sandbox, https map[string]domain.GitHTTPExecutionCredential, bind func(*CommandSpec) error) (*exec.Cmd, string, error) {
+// Keep cleanup bound to the same container generation as the opened PTY.
+type terminalLaunch struct{ home, dockerTarget string }
+
+func sandboxTerminalCommandWithBinding(ctx context.Context, sandbox Sandbox, https map[string]domain.GitHTTPExecutionCredential, bind func(*CommandSpec) error) (*exec.Cmd, terminalLaunch, error) {
 	if sandbox == nil {
-		return nil, "", fmt.Errorf("工作区执行环境不可用")
+		return nil, terminalLaunch{}, fmt.Errorf("工作区执行环境不可用")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, "", err
+		return nil, terminalLaunch{}, err
 	}
 	workspace := sandbox.Workspace()
 	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
-		return nil, "", fmt.Errorf("工作区不可用")
+		return nil, terminalLaunch{}, fmt.Errorf("工作区不可用")
 	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
-		return nil, "", err
+		return nil, terminalLaunch{}, err
 	}
 	home, err := EnsureControlDirectory(workspace, "private-home", "terminal-"+hex.EncodeToString(random))
 	if err != nil {
-		return nil, "", err
+		return nil, terminalLaunch{}, err
 	}
 	command := CommandSpec{Argv: []string{"/bin/sh", "-c", terminalShellLaunch}, environment: map[string]string{
 		"HOME": home, "TERM": "xterm-256color", "LANG": "C.UTF-8",
@@ -79,26 +83,27 @@ func sandboxTerminalCommandWithBinding(ctx context.Context, sandbox Sandbox, htt
 		rel, relErr := filepath.Rel(workspace, home)
 		if relErr != nil {
 			_ = removeTerminalHome(home)
-			return nil, "", relErr
+			return nil, terminalLaunch{}, relErr
 		}
 		command.environment["HOME"] = filepath.ToSlash(filepath.Join("/workspace", rel))
 		command.Argv[2] = `umask 077
 printf '%s\n' "$$" > "$HOME/.terminal-pid" || exit
 ` + terminalShellLaunch
 	}
-	cmd, err := sandboxTerminalCommandBound(ctx, sandbox, command, terminalBaseEnvironment(home), https, bind)
+	launch := terminalLaunch{home: home}
+	cmd, err := sandboxTerminalCommandBound(ctx, sandbox, command, terminalBaseEnvironment(home), https, bind, &launch)
 	if err != nil {
 		_ = removeTerminalHome(home)
-		return nil, "", err
+		return nil, terminalLaunch{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		_ = removeTerminalHome(home)
-		return nil, "", err
+		return nil, terminalLaunch{}, err
 	}
-	return cmd, home, nil
+	return cmd, launch, nil
 }
 
-func sandboxTerminalCommandBound(ctx context.Context, sandbox Sandbox, command CommandSpec, base []string, https map[string]domain.GitHTTPExecutionCredential, bind func(*CommandSpec) error) (*exec.Cmd, error) {
+func sandboxTerminalCommandBound(ctx context.Context, sandbox Sandbox, command CommandSpec, base []string, https map[string]domain.GitHTTPExecutionCredential, bind func(*CommandSpec) error, launch *terminalLaunch) (*exec.Cmd, error) {
 	// Share the run's environment and Git author defaults. Authentication comes
 	// from the terminal caller, independently of the shared sandbox credentials.
 	credentials := RunCredentials{GitHTTPCredentials: https}
@@ -138,18 +143,23 @@ func sandboxTerminalCommandBound(ctx context.Context, sandbox Sandbox, command C
 		if err := s.ensureStarted(ctx); err != nil {
 			return nil, err
 		}
-		return s.terminalCommand(command), nil
+		target, err := s.executionTarget()
+		if err != nil {
+			return nil, err
+		}
+		launch.dockerTarget = target
+		return s.terminalCommand(command, target), nil
 	default:
 		return nil, fmt.Errorf("工作区沙箱不支持交互终端；不能降级为宿主机终端")
 	}
 }
 
-func (s *dockerSandbox) terminalCommand(command CommandSpec) *exec.Cmd {
+func (s *dockerSandbox) terminalCommand(command CommandSpec, target string) *exec.Cmd {
 	args := []string{"exec", "-it"}
 	for _, value := range appendEnvironment(nil, s.profile.Environment, command.environment) {
 		args = append(args, "-e", value)
 	}
-	args = append(args, s.name)
+	args = append(args, target)
 	args = append(args, dockerWorkspaceExecArgv(command.Argv)...)
 	cmd := exec.Command("docker", args...)
 	// Docker's own client needs its context/socket configuration on the host. The
@@ -198,7 +208,11 @@ func ReadSandboxEnvironmentIdentity(ctx context.Context, sandbox Sandbox) (strin
 	case *managedSandbox:
 		return ReadSandboxEnvironmentIdentity(ctx, s.Sandbox)
 	case *dockerSandbox:
-		output, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}|{{.Id}}|{{.State.StartedAt}}", s.name).Output()
+		target, err := s.executionTarget()
+		if err != nil {
+			return "", err
+		}
+		output, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}|{{.Id}}|{{.State.StartedAt}}", target).Output()
 		if err != nil {
 			return "", fmt.Errorf("inspect workspace environment: %w", err)
 		}
@@ -294,11 +308,15 @@ var terminalProcessEnvironmentEpoch = sync.OnceValue(func() string {
 	return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 })
 
-func sandboxTerminalCleanup(sandbox Sandbox, home string) {
+func sandboxTerminalCleanup(sandbox Sandbox, launch terminalLaunch) {
+	home := launch.home
 	switch s := sandbox.(type) {
 	case *managedSandbox:
-		sandboxTerminalCleanup(s.Sandbox, home)
+		sandboxTerminalCleanup(s.Sandbox, launch)
 	case *dockerSandbox:
+		if launch.dockerTarget == "" {
+			return
+		}
 		rel, err := filepath.Rel(s.workspace, home)
 		if err != nil {
 			return
@@ -309,7 +327,7 @@ func sandboxTerminalCleanup(sandbox Sandbox, home string) {
 		// A Docker exec client's death does not hang up its container shell. Verify
 		// the unique terminal token before signalling the exact shell/process group;
 		// a stale or edited pid file must never kill another member's execution.
-		_ = exec.CommandContext(ctx, "docker", "exec", s.name, "sh", "-c", dockerTerminalStopScript, "terminal-stop", path, filepath.Base(home)).Run()
+		_ = exec.CommandContext(ctx, "docker", "exec", launch.dockerTarget, "sh", "-c", dockerTerminalStopScript, "terminal-stop", path, filepath.Base(home)).Run()
 	}
 }
 

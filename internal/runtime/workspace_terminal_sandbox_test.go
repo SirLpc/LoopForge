@@ -113,7 +113,7 @@ func TestWorkspaceTerminalDockerCommandStaysInSameContainer(t *testing.T) {
 	t.Setenv("AGENTFLOW_DATABASE_URL", "private")
 	t.Setenv("OPENAI_API_KEY", "private")
 	s := &dockerSandbox{name: "existing-run-container", profile: domain.SandboxProfile{Environment: map[string]string{"SOP_ENV_MARKER": "container-env"}}}
-	cmd := s.terminalCommand(CommandSpec{Argv: []string{"/bin/sh", "-i"}, environment: map[string]string{"HOME": "/workspace/.agentflow/private-home/terminal-test"}})
+	cmd := s.terminalCommand(CommandSpec{Argv: []string{"/bin/sh", "-i"}, environment: map[string]string{"HOME": "/workspace/.agentflow/private-home/terminal-test"}}, s.name)
 	args := strings.Join(cmd.Args, "\n")
 	for _, want := range []string{"exec\n-it", "existing-run-container", "cd /workspace", "/bin/sh\n-i", "SOP_ENV_MARKER=container-env", "HOME=/workspace/.agentflow/private-home/terminal-test"} {
 		if !strings.Contains(args, want) {
