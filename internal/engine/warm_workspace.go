@@ -307,6 +307,9 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	if profile.Driver != domain.SandboxDriverDocker {
 		return errors.New("预热工作区需要 Docker 沙箱")
 	}
+	if !ec.ExecutionPinned && ec.WorkflowID != domain.ConversationWorkspaceWorkflowID {
+		e.selectPersonalWarmRunner(ec, repositories)
+	}
 	if ec.ExecutionRunnerID == "" && !ec.ExecutionPinned {
 		e.mu.Lock()
 		pool := e.cloudPool
