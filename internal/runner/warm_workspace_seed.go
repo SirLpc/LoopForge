@@ -23,13 +23,7 @@ func warmRefMismatch(name, reason string) error {
 	return err
 }
 
-// Read ref files as data without letting the seed select Git configuration.
-// A local ref must have a corresponding remote name before its metadata
-// can be exchanged, even when its object also belongs to another branch.
-func verifyWarmRefs(ctx context.Context, meta, db, current string, returning bool) error {
-	if _, err := warmSeedIdentity(filepath.Join(meta, "refs")); err != nil {
-		return err
-	}
+func checkWarmPendingGitState(meta string) error {
 	for _, name := range []string{"index.lock", "HEAD.lock", "packed-refs.lock", "MERGE_HEAD", "MERGE_MSG", "AUTO_MERGE", "MERGE_AUTOSTASH", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "BISECT_START", "BISECT_LOG", "rebase-apply", "rebase-merge", "sequencer", "worktrees", "commondir"} {
 		if _, err := os.Lstat(filepath.Join(meta, name)); !errors.Is(err, os.ErrNotExist) {
 			if err != nil {
@@ -37,6 +31,19 @@ func verifyWarmRefs(ctx context.Context, meta, db, current string, returning boo
 			}
 			return fmt.Errorf("warm seed has pending Git state at %s", name)
 		}
+	}
+	return nil
+}
+
+// Read ref files as data without letting the seed select Git configuration.
+// A local ref must have a corresponding remote name before its metadata
+// can be exchanged, even when its object also belongs to another branch.
+func verifyWarmRefs(ctx context.Context, meta, db, current string, returning bool) error {
+	if _, err := warmSeedIdentity(filepath.Join(meta, "refs")); err != nil {
+		return err
+	}
+	if err := checkWarmPendingGitState(meta); err != nil {
+		return err
 	}
 	refs := make(map[string]string)
 	packed := filepath.Join(meta, "packed-refs")

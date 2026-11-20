@@ -29,6 +29,9 @@ func warmSlotOrigin(slot warmWorkspaceSlot, record warmWorkspaceSlotRecord, jour
 		}
 		f.Close()
 	}
+	if err := checkWarmPendingGitState(meta); err != nil {
+		return ""
+	}
 	config, index := filepath.Join(meta, "config"), filepath.Join(meta, "index")
 	if warmRegular(config) != nil || warmRegular(index) != nil {
 		return ""
