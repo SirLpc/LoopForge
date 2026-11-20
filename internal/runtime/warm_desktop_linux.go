@@ -19,6 +19,7 @@ import (
 // WarmDockerDesktop is bound to one running container, its immutable image,
 // and its private, plain local volume on one pinned Desktop Linux engine.
 type WarmDockerDesktop struct {
+	conversations                                          *desktopConversationScope
 	volume, root, backing, id, image, executable, endpoint string
 	mount                                                  desktopMountInfo
 	pid                                                    int
@@ -226,6 +227,7 @@ func (d *WarmDockerDesktop) verifyCurrent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	next.conversations = d.conversations
 	if *d != *next {
 		return errors.New("Docker Desktop runner identity or volume changed")
 	}
@@ -294,6 +296,9 @@ func (d *WarmDockerDesktop) checkLocalSubpath(sub string) error {
 // A dedicated volume may serve the verified runner and its scoped children.
 // The writable workspace must be positively identified even for a read helper.
 func (d *WarmDockerDesktop) checkDedicated(c desktopContainer) error {
+	if d.conversations != nil && c.ID != d.id {
+		return d.checkCarrier(c)
+	}
 	scoped, owner := false, false
 	for _, m := range c.Mounts {
 		if m.Type != "volume" || m.Name != d.volume {
@@ -347,24 +352,18 @@ func (d *WarmDockerDesktop) inventory(ctx context.Context, workspace string, cle
 		if c.ID != id {
 			return result, errors.New("container identity changed during workspace fence")
 		}
-		if workspace == "" {
-			if err := d.checkDedicated(c); err != nil {
+		remove, err := d.classifyVolumeClient(ctx, c, workspace)
+		if err != nil {
+			return result, err
+		}
+		if remove {
+			if !cleanup {
+				return result, fmt.Errorf("container %s still has a workspace mount", c.Name)
+			}
+			if err := removeDockerContainer(ctx, c.ID); err != nil {
 				return result, err
 			}
-		} else {
-			mounted, owns, err := d.containerScope(c, workspace)
-			if err != nil {
-				return result, err
-			}
-			if mounted {
-				if !owns || !cleanup {
-					return result, fmt.Errorf("container %s still has a workspace mount", c.Name)
-				}
-				if err := removeDockerContainer(ctx, id); err != nil {
-					return result, err
-				}
-				continue
-			}
+			continue
 		}
 		for _, m := range c.Mounts {
 			switch m.Type {

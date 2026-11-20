@@ -18,3 +18,7 @@ func (*WarmDockerDesktop) Backing() string                     { return "" }
 func (*WarmDockerDesktop) Ready(context.Context) error         { return errWarmDesktopOS }
 func (*WarmDockerDesktop) Fence(context.Context, string) error { return errWarmDesktopOS }
 func RunWarmDockerProbeCLI(args []string) bool                 { return false }
+
+func (*WarmDockerDesktop) SetConversationScope(string, func(string) ([]string, bool)) error {
+	return errWarmDesktopOS
+}
