@@ -6,13 +6,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
-
-	"agentflow/internal/gitwork"
 )
 
 // workspaceGitCredentialFiles hold credentials by nature. Git never writes
@@ -28,56 +23,10 @@ var gitConfigUserinfoURL = regexp.MustCompile(`(?i)\bhttps?://[^/\s@]+@`)
 // every checkout below workspace (those configs travel with the workspace
 // snapshot). It reports what it removed, without values.
 func ScrubWorkspaceGitSecrets(ctx context.Context, homes []string, workspace string) []string {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	var cleaned []string
-	for _, home := range homes {
-		if strings.TrimSpace(home) == "" {
-			continue
-		}
-		// The root keeps a symlinked parent from pointing removal elsewhere.
-		root, err := os.OpenRoot(home)
-		if err != nil {
-			continue
-		}
-		for _, name := range workspaceGitCredentialFiles {
-			rel := filepath.FromSlash(name)
-			if _, err := root.Lstat(rel); err == nil && root.RemoveAll(rel) == nil {
-				cleaned = append(cleaned, "HOME/"+name)
-			}
-		}
-		root.Close()
-		for _, name := range []string{".gitconfig", ".config/git/config"} {
-			for _, key := range scrubGitConfigFile(ctx, home, filepath.Join(home, filepath.FromSlash(name))) {
-				cleaned = append(cleaned, "HOME/"+name+" "+key)
-			}
-		}
-	}
-	if strings.TrimSpace(workspace) != "" {
-		for _, checkout := range gitwork.Checkouts(ctx, workspace) {
-			config := filepath.Join(workspace, filepath.FromSlash(checkout.Dir), ".git", "config")
-			for _, key := range scrubGitConfigFile(ctx, workspace, config) {
-				cleaned = append(cleaned, path.Join(checkout.Dir, ".git/config")+" "+key)
-			}
-		}
-	}
-	return cleaned
+	return scrubGitRoots(ctx, workspace, homes, "")
 }
 
-// scrubGitConfigFile drops HTTPS userinfo from URL values, removes url.*
-// sections whose name carries userinfo, and unsets authorization headers. A
-// file reached through a symlink is left alone: following it would read a
-// file outside base and write it back inside.
-func scrubGitConfigFile(ctx context.Context, base, file string) []string {
-	root, rel, err := openWorkspacePath(base, file)
-	if err != nil {
-		return nil
-	}
-	info, err := root.Lstat(rel)
-	root.Close()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil
-	}
+func scrubPrivateGitConfig(ctx context.Context, file string) []string {
 	out, err := scrubGit(ctx, file, "--no-includes", "--null", "--list")
 	if err != nil {
 		return nil

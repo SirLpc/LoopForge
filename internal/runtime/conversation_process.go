@@ -727,16 +727,7 @@ func scrubConversationGitSecrets(root string, sb Sandbox) []string {
 	if sb != nil && strings.TrimSpace(sb.Workspace()) != "" {
 		workspace = sb.Workspace()
 	}
-	homes := []string{filepath.Join(root, "home")}
-	privateHomes := filepath.Join(workspace, ".agentflow", "private-home")
-	if entries, err := os.ReadDir(privateHomes); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				homes = append(homes, filepath.Join(privateHomes, entry.Name()))
-			}
-		}
-	}
-	return ScrubWorkspaceGitSecrets(context.Background(), homes, workspace)
+	return scrubGitRoots(context.Background(), workspace, nil, root)
 }
 
 func cleanupConversationCredentialFiles(root, provider string) error {
