@@ -37,6 +37,45 @@ func warmReturnFixture(t *testing.T) (warmPoolFixture, *warmWorkspacePool, domai
 	return f, p, l, g
 }
 
+func TestWarmWorkspaceReleaseWithCommittedCRLFAttribute(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		wantReturn    bool
+	}{
+		{name: "clean checkout", content: "@echo off\r\necho original\r\n", wantReturn: true},
+		{name: "uncommitted edit", content: "@echo off\r\necho edited\r\n"},
+		{name: "mixed line endings", content: "@echo off\r\necho original\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, p, lease, g := warmReturnFixture(t)
+			warmGitWrite(t, g.checkout, ".gitattributes", "*.bat text eol=crlf\n")
+			warmGitWrite(t, g.checkout, "script.bat", "@echo off\r\necho original\r\n")
+			runGitT(t, g.checkout, "add", ".gitattributes", "script.bat")
+			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-qm", "batch file")
+			runGitT(t, g.checkout, "push", "origin", "HEAD")
+			warmGitWrite(t, g.checkout, "script.bat", tc.content)
+
+			refs, err := p.proveReturn(t.Context(), lease, []domain.RunnerRepository{g.repo})
+			if !tc.wantReturn {
+				if err == nil || !strings.Contains(err.Error(), "commit or restore changes in script.bat") {
+					t.Fatalf("edited batch file did not block return: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("clean CRLF checkout could not return: %v", err)
+			}
+			if err := p.commitReturn(t.Context(), lease, refs); err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(filepath.Join(p.slots["a"].Path, "script.bat"))
+			if err != nil || string(content) != tc.content {
+				t.Fatalf("returned file = %q, err = %v", content, err)
+			}
+		})
+	}
+}
+
 func TestWarmWorkspaceReleaseProtectsLocalData(t *testing.T) {
 	changes := map[string]func(*testing.T, warmGitFixture){
 		"worktree": func(t *testing.T, g warmGitFixture) { warmGitWrite(t, g.checkout, "README.md", "modified") },

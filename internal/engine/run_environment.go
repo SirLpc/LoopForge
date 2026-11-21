@@ -199,6 +199,11 @@ func (e *Engine) acquireRunEnvironment(ctx context.Context, run domain.Run, prof
 			return nil, false, err
 		}
 	}
+	if current.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		// The runner installs the frozen environment in the leased sandbox.
+		// Installing it in staging would start a second container on the platform.
+		resources = runtime.SandboxResources{}
+	}
 	sandbox, err := e.sandboxes.AcquireRunIn(ctx, run.ID, workspaceRunID(current), profile, requirements, credentials, resources)
 	if err != nil {
 		return nil, false, err

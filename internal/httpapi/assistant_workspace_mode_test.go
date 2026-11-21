@@ -334,6 +334,9 @@ func TestNativeApprovalRecognizesCLIGatewayAliases(t *testing.T) {
 	defer s.Close()
 	for _, raw := range []string{
 		`{"name":"mcp__agentflow_session__workbench_workspace_open","input":{}}`,
+		`{"name":"ToolSearch","input":{"query":"workbench_workspace_open"}}`,
+		`{"name":"WaitForMcpServers","input":{}}`,
+		`{"name":"DeferExecuteTool","input":{"toolName":"mcp__agentflow_session__workbench_workspace_open","params":{"repositoryId":"game"}}}`,
 		`{"name":"agentflow_session_workbench_workspace_open","input":{}}`,
 		`{"name":"call_mcp_tool","input":{"ServerName":"agentflow_session","ToolName":"workbench_workspace_open","Arguments":"{}"}}`,
 		`{"name":"GetMcpTools","input":{"server":"agentflow_session"}}`,
@@ -347,6 +350,12 @@ func TestNativeApprovalRecognizesCLIGatewayAliases(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{
+		`{"name":"DeferExecuteTool","input":{"toolName":"Bash","params":{"command":"pwd"}}}`,
+		`{"name":"DeferExecuteTool","input":{"toolName":"Bash","ToolName":"mcp__agentflow_session__workbench_workspace_open","params":{"command":"pwd"}}}`,
+		`{"name":"DeferExecuteTool","input":{"toolName":"mcp__other__workbench_workspace_open","params":{}}}`,
+		`{"name":"DeferExecuteTool","input":{"toolName":"workbench_workspace_open","params":{}}}`,
+		`{"name":"DeferExecuteTool","input":{"toolName":"mcp__agentflow_session__","params":{}}}`,
+		`{"name":"DeferExecuteTool","input":{}}`,
 		`{"name":"call_mcp_tool","input":{"ServerName":"foreign","ToolName":"Bash"}}`,
 		`{"name":"call_mcp_tool","input":{"ServerName":"agentflow_session"}}`,
 		`{"name":"CallDynamicTool","input":{"namespace":"foreign","toolName":"Bash"}}`,

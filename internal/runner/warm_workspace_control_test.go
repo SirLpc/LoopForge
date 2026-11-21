@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -101,6 +102,15 @@ func TestWarmInventoryQualifiesLiveCheckout(t *testing.T) {
 	slots := p.inventory()
 	if slots[0].State != "available" || slots[1].State != "blocked" {
 		t.Errorf("initial checkout qualification: %+v", slots)
+	}
+	linked := filepath.Join(t.TempDir(), "linked")
+	runGitT(t, g.checkout, "worktree", "add", "--detach", linked)
+	if slot := p.inventory()[0]; slot.State != "blocked" {
+		t.Errorf("checkout with linked worktree advertised as %s", slot.State)
+	}
+	runGitT(t, g.checkout, "worktree", "remove", linked)
+	if slot := p.inventory()[0]; slot.State != "available" {
+		t.Errorf("checkout stayed %s after linked worktree was removed", slot.State)
 	}
 	runGitT(t, g.checkout, "remote", "set-url", "origin", "https://user:password@example.invalid/path")
 	if p.inventory()[0].State != "blocked" {

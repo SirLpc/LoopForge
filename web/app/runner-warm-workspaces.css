@@ -1,0 +1,86 @@
+#confirmModal .runner-warm-pool-dialog {
+  box-sizing: border-box;
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+.runner-warm-pool-panel {
+  min-height: 0;
+  overflow: auto;
+  margin-top: 16px;
+  color: var(--hui-text);
+  font-size: 13px;
+}
+
+.runner-warm-pool-toolbar, .runner-warm-pool-queue li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runner-warm-pool-panel h4 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+}
+
+.runner-warm-pool-muted, .runner-warm-pool-panel small, .runner-warm-pool-queue time {
+  color: var(--hui-secondary);
+}
+
+.runner-warm-pool-error {
+  color: var(--hui-error);
+}
+
+.runner-warm-pool-panel .button[aria-disabled="true"] {
+  opacity: .45;
+  cursor: wait;
+}
+
+.runner-warm-pool-table {
+  overflow-x: auto;
+  border: 1px solid var(--hui-border);
+  border-radius: 8px;
+}
+
+.runner-warm-pool-table table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.runner-warm-pool-table th, .runner-warm-pool-table td, .runner-warm-pool-queue li {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hui-border);
+}
+
+.runner-warm-pool-table tbody tr:last-child > *, .runner-warm-pool-queue li:last-child {
+  border-bottom: 0;
+}
+
+.runner-warm-pool-table th, .runner-warm-pool-table .button {
+  white-space: nowrap;
+}
+
+.runner-warm-pool-panel code, .runner-warm-pool-panel small {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.runner-warm-pool-panel small {
+  display: block;
+}
+
+.runner-warm-pool-queue {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--hui-border);
+  border-radius: 8px;
+}
+
+.runner-warm-pool-queue time {
+  text-align: right;
+}

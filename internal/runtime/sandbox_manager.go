@@ -142,6 +142,25 @@ func (m *Manager) DiscardRunContainer(ctx context.Context, runID string) {
 	}
 }
 
+// DiscardIdleRunContainer checks the exact container's bind and holds the
+// run's sandbox lock through teardown, including after a worker restart.
+func (m *Manager) DiscardIdleRunContainer(ctx context.Context, runID, workspaceRunID string) error {
+	if m == nil || runID == "" || workspaceRunID == "" || !dockerAvailable() {
+		return nil
+	}
+	lock, err := m.acquireLock(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer unlockFile(lock)
+	name := dockerContainerName(safeID(runID))
+	mounts, err := inspectDockerWorkspaceMounts(ctx, name)
+	if err != nil || mounts == nil || !dockerBindMatchesWorkspace(mounts.source, m.RunWorkspace(workspaceRunID)) {
+		return err
+	}
+	return removeDockerWorkspaceContainers(ctx, name)
+}
+
 // RunsWithIdleDockerSandbox narrows runIDs to those that still have a sandbox
 // container on this host and whose workspace no process currently holds open.
 func (m *Manager) RunsWithIdleDockerSandbox(ctx context.Context, runIDs []string) ([]string, error) {

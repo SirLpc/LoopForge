@@ -4,6 +4,7 @@ import (
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
 	"agentflow/internal/runtime"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -284,6 +285,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 		return ref, err
 	}
 	tracked := map[string][]string{}
+	var attributes []string
 	for _, line := range strings.Split(entries, "\x00") {
 		if line == "" {
 			continue
@@ -294,6 +296,14 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 			return ref, errors.New("invalid tracked entry")
 		}
 		tracked[path] = fields
+		if filepath.Base(path) == ".gitattributes" && strings.HasPrefix(fields[0], "100") {
+			attributes = append(attributes, path)
+		}
+	}
+	if len(attributes) > 0 {
+		if err := restoreWarmProofFiles(local, stage, head, attributes...); err != nil {
+			return ref, err
+		}
 	}
 	err = filepath.WalkDir(w.checkout, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -335,7 +345,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 				}
 				return filepath.SkipDir
 			}
-			if !warmBlobMatches(local, cache, lfs, path, fields[2], fields[0]) {
+			if !warmBlobMatches(local, stage, head, lfs, path, rel, fields[2], fields[0]) {
 				return fmt.Errorf("commit or restore changes in %s", rel)
 			}
 			return nil
@@ -358,7 +368,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 
 // Read actual bytes independently of index stat hints, excludes, filters,
 // hooks and submodule configuration in the writable checkout.
-func warmBlobMatches(ctx context.Context, cache string, lfs warmLFSManifest, path, oid, mode string) bool {
+func warmBlobMatches(ctx context.Context, stage, head string, lfs warmLFSManifest, path, rel, oid, mode string) bool {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -405,17 +415,20 @@ func warmBlobMatches(ctx context.Context, cache string, lfs warmLFSManifest, pat
 			return true
 		}
 	}
-	size, err := gitwork.C(ctx, cache, "cat-file", "-s", oid)
+	size, err := gitwork.C(ctx, stage, "cat-file", "-s", oid)
 	n, parseErr := strconv.ParseInt(size, 10, 64)
-	if err != nil || parseErr != nil || n > 1024 {
+	if err != nil || parseErr != nil {
 		return false
 	}
-	pointer, err := gitwork.C(ctx, cache, "cat-file", "blob", oid)
+	if n > 1024 {
+		return warmCheckoutBlobMatches(ctx, stage, head, rel, digest.Sum(nil))
+	}
+	pointer, err := gitwork.C(ctx, stage, "cat-file", "blob", oid)
 	if err != nil {
 		return false
 	}
 	if !strings.HasPrefix(pointer, "version https://git-lfs.github.com/spec/v1\n") {
-		return matches
+		return matches || warmCheckoutBlobMatches(ctx, stage, head, rel, digest.Sum(nil))
 	}
 	var object string
 	var length int64
@@ -430,6 +443,32 @@ func warmBlobMatches(ctx context.Context, cache string, lfs warmLFSManifest, pat
 	}
 	objectSize, verified := lfs.verified[object]
 	return verified && objectSize == length
+}
+
+func restoreWarmProofFiles(ctx context.Context, stage, head string, paths ...string) error {
+	args := []string{"--literal-pathspecs", "-c", "core.attributesFile=" + os.DevNull, "restore", "--source=" + head, "--worktree", "--"}
+	_, err := gitwork.C(ctx, stage, append(args, paths...)...)
+	return err
+}
+
+// Compare exact bytes reconstructed from the committed attributes in the
+// private proof checkout. Its Git config never comes from the writable checkout.
+func warmCheckoutBlobMatches(ctx context.Context, stage, head, rel string, actual []byte) bool {
+	if err := restoreWarmProofFiles(ctx, stage, head, rel); err != nil {
+		return false
+	}
+	path := filepath.Join(stage, rel)
+	if filepath.Base(rel) != ".gitattributes" {
+		defer os.Remove(path)
+	}
+	expected, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer expected.Close()
+	h := sha256.New()
+	_, err = io.Copy(h, expected)
+	return err == nil && bytes.Equal(h.Sum(nil), actual)
 }
 
 // Repeat destructive cleanup proof from the recorded commit after a crash.
