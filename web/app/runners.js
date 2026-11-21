@@ -125,7 +125,7 @@ function runnerCopyCommand(btn,text,message){
   navigator.clipboard.writeText(text).then(done).catch(()=>toast('复制失败，请手动选择复制'));
 }
 function renderRunnersView(){
-  const list=$('#runnersList');if(!list)return;
+  const list=$('#runnersList');if(!list||document.querySelector('[data-runner-warm-pool-panel]'))return;
   const host=location.host;
   const httpsOrigin=`https://${host}`,httpOrigin=`http://${host}`;
   const bindHTTPS=$('#bindHttpsOrigin'),bindHTTP=$('#bindHttpOrigin'),bindHost=$('#bindServerHost');
@@ -164,6 +164,7 @@ function renderRunnersView(){
   }
   const focusedMenu=document.activeElement?.dataset.runnerRuntimeMenu;
   const focusedUpdate=document.activeElement?.dataset.runnerCheckUpdate;
+  const focusedWarmPool=document.activeElement?.dataset.runnerWarmPool;
   closeRunnerRuntimeMenu();
   list.innerHTML=runners.map(r=>{
     const isDefault=r.id===defaultId;
@@ -190,6 +191,7 @@ function renderRunnersView(){
       <div class="runner-card-action">
         ${runnerRunLimitHTML(r)}
         <span class="runner-card-spacer"></span>
+        ${shared?'':runnerWarmWorkspaceButton(r)}
         ${isDefault?'<button class="button ghost small runner-text-button" type="button" data-set-default="">切回云端</button>':''}
         ${r.status==='online'?'':`<button class="button ghost small runner-text-button" type="button" data-remove-runner="${escapeHTML(r.id)}" title="机器已不再使用时移除绑定">移除</button>`}
         ${isDefault?'':`<button class="button hui-btn-soft small" type="button" ${defaultBlocker?`disabled title="${escapeHTML(defaultBlocker)}"`:''} data-set-default="${escapeHTML(r.id)}">设为默认</button>`}
@@ -234,9 +236,13 @@ function renderRunnersView(){
     btn.onclick=()=>checkRunnerUpdate(btn.dataset.runnerCheckUpdate);
     if(!btn.disabled&&btn.dataset.runnerCheckUpdate===focusedUpdate)btn.focus({preventScroll:true});
   });
+  list.querySelectorAll('[data-runner-warm-pool]').forEach(btn=>{
+    btn.onclick=()=>openRunnerWarmWorkspacePool(runners.find(r=>r.id===btn.dataset.runnerWarmPool));
+    if(btn.dataset.runnerWarmPool===focusedWarmPool)btn.focus({preventScroll:true});
+  });
   window.AgentFlowHarnessIcons?.hydrate?.(list);
   if(!runnerRefreshTimer)runnerRefreshTimer=setInterval(()=>{
-    if(!document.hidden&&activeViewName()==='runners'&&!runnerRuntimeTrigger&&!document.activeElement?.matches?.('[data-runner-run-limit],[data-runner-auth],[data-runner-key-help]'))refreshRunners(true);
+    if(!document.hidden&&activeViewName()==='runners'&&!runnerRuntimeTrigger&&!document.querySelector('[data-runner-warm-pool-panel]')&&!document.activeElement?.matches?.('[data-runner-run-limit],[data-runner-auth],[data-runner-key-help]'))refreshRunners(true);
   },15000);
 }
 async function removeRunner(runnerId){

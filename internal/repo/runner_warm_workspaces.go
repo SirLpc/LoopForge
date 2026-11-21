@@ -188,6 +188,9 @@ func (r *RunnersRepo) ReserveNextWarmWorkspace(runnerID string, now time.Time) (
 			return err
 		}
 		used := map[string]bool{}
+		for _, id := range machine.WarmPausedSlots {
+			used[id] = true
+		}
 		for _, row := range rows {
 			for _, id := range row.Demand.Slots {
 				used[id] = true

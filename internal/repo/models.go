@@ -525,8 +525,9 @@ type definitionRevisionRow struct {
 func (definitionRevisionRow) TableName() string { return "definition_revisions" }
 
 type runnerRow struct {
-	WarmSlots      []domain.WarmWorkspaceSlot `gorm:"column:warm_slots;serializer:json;type:json"`
-	WarmGeneration uint64                     `gorm:"column:warm_generation;not null;default:0"`
+	WarmSlots       []domain.WarmWorkspaceSlot `gorm:"column:warm_slots;serializer:json;type:json"`
+	WarmPausedSlots []string                   `gorm:"column:warm_paused_slots;serializer:json;type:json"`
+	WarmGeneration  uint64                     `gorm:"column:warm_generation;not null;default:0"`
 
 	ID               string     `gorm:"column:id;primaryKey;size:64"`
 	Name             string     `gorm:"column:name;size:255"`

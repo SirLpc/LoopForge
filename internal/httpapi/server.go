@@ -600,6 +600,8 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.PUT("/api/runners/default", api.runners.runnerDefaultSet)
 	g.DELETE("/api/runners/:id", api.runners.runnerRemove)
 	g.PUT("/api/runners/:id/run-limit", api.runners.runnerRunLimitSet)
+	g.GET("/api/runners/:id/warm-workspaces", api.runners.runnerWarmWorkspacePool)
+	g.PATCH("/api/runners/:id/warm-workspaces", api.runners.runnerWarmWorkspacePool)
 	g.GET("/api/runners/:id/maintenance", api.runners.runnerMaintenance)
 	g.POST("/api/runners/:id/maintenance", api.runners.runnerMaintenance)
 	g.POST("/api/runners/:id/models/probe", api.runners.probeRunnerModels)
