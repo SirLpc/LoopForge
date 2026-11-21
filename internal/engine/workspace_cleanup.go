@@ -178,6 +178,7 @@ func (e *Engine) cleanupRunWorkspace(runID string) {
 
 func (e *Engine) cleanupWorkspace(run domain.Run, now time.Time) {
 	if run.ExecutionContext.WorkspaceMode == domain.WorkspaceModeWarmPool {
+		e.cleanupWarmStaging(run)
 		e.cleanupWarmWorkspace(run, now)
 		return
 	}
@@ -255,6 +256,45 @@ func (e *Engine) cleanupWorkspace(run domain.Run, now time.Time) {
 		}
 	}
 	log.Printf("cleaned terminal workspace %s", run.ID)
+}
+
+// A warm SOP can also have a platform-side staging sandbox. Stop it before
+// the runner checks Docker mounts for return, keeping the staging files.
+// A child owns its staging sandbox even when it borrows the parent's slot.
+func (e *Engine) cleanupWarmStaging(run domain.Run) {
+	if e.sandboxes == nil || run.IsWorkspace() || run.WorkspaceRoot != e.sandboxes.Root() ||
+		!run.WorkspaceCleanedAt.IsZero() || (run.Status != "cancelled" && run.Status != "succeeded") {
+		return
+	}
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	current, ok := e.repo.RunState(run.ID)
+	if !ok || current.WorkspaceRoot != e.sandboxes.Root() || current.HasActiveNode() ||
+		!current.WorkspaceCleanedAt.IsZero() || (current.Status != "cancelled" && current.Status != "succeeded") {
+		return
+	}
+	e.runEnvMu.Lock()
+	env := e.runEnvs[run.ID]
+	e.runEnvMu.Unlock()
+	if env != nil {
+		if env.activeExecutions.Load() == 0 && !env.preparing.Load() {
+			if err := e.releaseRunEnvironment(run.ID, false); err != nil {
+				log.Printf("close warm staging sandbox %s: %v", run.ID, err)
+			}
+		}
+		return
+	}
+	// A restarted worker may have no handle for an old container. Verify the
+	// actual bind on this Docker host before removing it by run ID.
+	state, err := e.WarmWorkspaceStatus(workspaceRunID(current))
+	if err != nil || (state != domain.WarmWorkspaceReady && state != domain.WarmWorkspaceReleasing) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := e.sandboxes.DiscardIdleRunContainer(ctx, run.ID, workspaceRunID(current)); err != nil {
+		log.Printf("discard warm staging sandbox %s: %v", run.ID, err)
+	}
 }
 
 func (e *Engine) liveSandboxRunIDs() []string {

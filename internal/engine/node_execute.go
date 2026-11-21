@@ -553,7 +553,9 @@ func (e *Engine) executeNode(ctx context.Context, runID string, wf domain.Workfl
 		outputs = reported
 		retroWorkspace = ""
 	}
-	if strings.EqualFold(sb.Driver(), "docker") {
+	// A warm Runner has already bound the real checkout. Binding the platform
+	// staging directory would start an extra container that uses no slot.
+	if strings.EqualFold(sb.Driver(), "docker") && current.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
 		if err := e.bindDockerWorkspace(ctx, runID, node.ID, current.WorkflowSnapshot.SandboxSnapshot, sb); err != nil {
 			failNode(fmt.Errorf("bind docker workspace after checkout: %w", err), nodeRejects(node))
 			return
@@ -790,13 +792,10 @@ func (e *Engine) executeNode(ctx context.Context, runID string, wf domain.Workfl
 				// user's platform API key. Gates follow on the same machine and
 				// workspace. An empty selection keeps the cloud mode below.
 				workspace := runnerWorkspaceRel(current, node.ID)
-				result, dispatchErr := e.dispatchRunnerTask(ctx, execMachine, current, effectiveNode, sb, workspace, ex, agent, assets, prompt, invocationID, options, sink)
-				if dispatchErr == nil {
-					gateExec = func(command string, target executionTarget, gateSink runtime.EventSink) (string, error) {
-						return e.dispatchRunnerCommand(ctx, execMachine, runID, node.ID, workspace, bindExecutionTarget(command, target), gateSink)
-					}
+				gateExec = func(command string, target executionTarget, gateSink runtime.EventSink) (string, error) {
+					return e.dispatchRunnerCommand(ctx, execMachine, runID, node.ID, workspace, bindExecutionTarget(command, target), gateSink)
 				}
-				return result, dispatchErr
+				return e.dispatchRunnerTask(ctx, execMachine, current, effectiveNode, sb, workspace, ex, agent, assets, prompt, invocationID, options, sink)
 			}
 			repositories := current.RepositoryContexts()
 			boundAssets, skipped, bindErr := runtime.PrepareMCPServers(assets, runtime.MCPTarget{
