@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -195,7 +196,8 @@ func fetchWarmLFS(local, auth context.Context, db, scope, head string, repo doma
 // committed blobs before allowing a worktree to fall back to raw pointer text.
 func checkWarmWithoutLFS(ctx context.Context, stage, head string) error {
 	const version = "version https://git-lfs.github.com/spec/v1"
-	paths, err := gitwork.C(ctx, stage, "grep", "-l", "-z", "-I", "-F", "-x", "-e", version, head, "--")
+	pattern := "^" + regexp.QuoteMeta(version) + "$"
+	paths, err := gitwork.C(ctx, stage, "grep", "-l", "-z", "-I", "-E", "-e", pattern, head, "--")
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() == 1 {
