@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,7 @@ type warmWorkspaceAllocation struct {
 }
 
 type warmWorkspaceJournal struct {
+	Native        bool                               `json:"native,omitempty"`
 	Version       int                                `json:"version"`
 	WorkspaceRoot string                             `json:"workspaceRoot"`
 	Workspace     warmWorkspaceIdentity              `json:"workspaceIdentity"`
@@ -101,7 +103,7 @@ func (p *warmWorkspacePool) openJournal(dir string, workspaceID warmWorkspaceIde
 	switch {
 	case fresh:
 		p.state = warmWorkspaceJournal{
-			Version: 1, WorkspaceRoot: p.workspaceRoot, Workspace: workspaceID,
+			Version: 1, Native: p.native, WorkspaceRoot: p.workspaceRoot, Workspace: workspaceID,
 			Slots:  make(map[string]warmWorkspaceSlotRecord),
 			Leases: make(map[string]warmWorkspaceAllocation),
 		}
@@ -153,7 +155,7 @@ func decodeWarmWorkspaceJSON(file *os.File, value any) error {
 }
 
 func (p *warmWorkspacePool) validateJournal(workspaceID warmWorkspaceIdentity) error {
-	if p.state.Version != 1 || p.state.WorkspaceRoot != p.workspaceRoot ||
+	if p.state.Version != 1 || p.state.Native != p.native || p.state.WorkspaceRoot != p.workspaceRoot ||
 		p.state.Workspace != workspaceID || p.state.Slots == nil || p.state.Leases == nil {
 		return errors.New("warm workspace journal does not match the workspace root or format")
 	}
@@ -164,7 +166,7 @@ func (p *warmWorkspacePool) validateJournal(workspaceID warmWorkspaceIdentity) e
 			return fmt.Errorf("warm workspace registration changed for journaled slot %q", id)
 		}
 		if record.Identity.Ino == 0 || record.Parent.Ino == 0 ||
-			record.Identity.Dev != workspaceID.Dev || record.Parent.Dev != workspaceID.Dev {
+			!p.native && (record.Identity.Dev != workspaceID.Dev || record.Parent.Dev != workspaceID.Dev) {
 			return fmt.Errorf("warm workspace journal contains an invalid inode for slot %q", id)
 		}
 		if other, exists := identities[record.Identity]; exists {
@@ -309,7 +311,7 @@ func (p *warmWorkspacePool) registerSlot(slot warmWorkspaceSlot) (warmWorkspaceS
 	if !exists || identity.Ino == 0 {
 		return record, errors.New("slot path must be a real directory")
 	}
-	if identity.Dev != p.state.Workspace.Dev || parentID.Dev != p.state.Workspace.Dev {
+	if (!p.native && identity.Dev != p.state.Workspace.Dev) || parentID.Dev != identity.Dev {
 		return record, errors.New("slot and workspace root must be on the same filesystem")
 	}
 	if err := p.checkUnityProject(slot, slot.Path); err != nil {
@@ -334,7 +336,8 @@ func (p *warmWorkspacePool) checkUnityProject(slot warmWorkspaceSlot, checkout s
 	if err != nil {
 		return err
 	}
-	if identity.Dev != p.state.Workspace.Dev {
+	checkoutID, ok, err := warmWorkspaceEntry(checkout, warmWorkspaceIdentity{})
+	if err != nil || !ok || identity.Dev != checkoutID.Dev {
 		return errors.New("Unity project is on another filesystem")
 	}
 	return nil
@@ -356,6 +359,12 @@ func (p *warmWorkspacePool) recover() error {
 		}
 	}
 	for _, allocation := range p.state.Leases {
+		if p.native && len(allocation.Targets) > 0 {
+			if err := p.bindNativeAllocation(context.Background(), allocation); err != nil {
+				return err
+			}
+			continue
+		}
 		if allocation.Phase == warmWorkspaceReleased {
 			continue
 		}
@@ -454,7 +463,7 @@ func (p *warmWorkspacePool) close() error {
 		dirErr = p.journalDir.Close()
 		p.journalDir = nil
 	}
-	return errors.Join(lockErr, dirErr)
+	return errors.Join(lockErr, dirErr, p.closeNativeWarmSlots())
 }
 
 func checkDisabledWarmJournal(path string) error {

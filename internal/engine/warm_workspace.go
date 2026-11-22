@@ -92,6 +92,13 @@ func (e *Engine) guardWarmRequest(run domain.Run, req *domain.RunnerWorkspaceReq
 		return errors.New("stale workspace operation")
 	}
 	if lease != nil {
+		if req.TerminalOwner > 0 && (req.Operation == domain.RunnerWorkspaceOperationTerminal || req.Operation == domain.RunnerWorkspaceOperationWrite) {
+			if snapshot := run.WorkflowSnapshot.SandboxSnapshot; snapshot != nil && snapshot.Profile.Driver == domain.SandboxDriverNative {
+				if err := e.authorizeWarmActor(run, req.TerminalOwner); err != nil {
+					return err
+				}
+			}
+		}
 		req.WorkspaceRunID = lease.OwnerRunID
 		req.WorkspaceLayout = domain.RunnerWorkspaceLayoutShared
 	}
@@ -144,8 +151,8 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 		return empty, nil
 	}
 	if owner.ID != run.ID {
-		if snapshot := run.WorkflowSnapshot.SandboxSnapshot; snapshot == nil || snapshot.Profile.Driver != domain.SandboxDriverDocker {
-			return empty, errors.New("共享预热工作区需要 Docker 沙箱")
+		if snapshot := run.WorkflowSnapshot.SandboxSnapshot; snapshot == nil || !domain.WarmWorkspaceSandboxDriver(snapshot.Profile.Driver) {
+			return empty, errors.New("共享预热工作区需要受支持的隔离沙箱")
 		}
 		lease, err := e.readyWarmLease(run)
 		if err != nil {
@@ -153,8 +160,8 @@ func (e *Engine) EnsureWarmWorkspace(ctx context.Context, run domain.Run, actorI
 		}
 		return *lease, nil
 	}
-	if run.WorkflowSnapshot.SandboxSnapshot == nil || run.WorkflowSnapshot.SandboxSnapshot.Profile.Driver != domain.SandboxDriverDocker {
-		return empty, errors.New("预热工作区需要 Docker 沙箱")
+	if run.WorkflowSnapshot.SandboxSnapshot == nil || !domain.WarmWorkspaceSandboxDriver(run.WorkflowSnapshot.SandboxSnapshot.Profile.Driver) {
+		return empty, errors.New("预热工作区需要受支持的隔离沙箱")
 	}
 	runnerID := e.defaultExecutionRunner(owner)
 	repos := owner.RepositoryContexts()
@@ -287,8 +294,8 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 			return errors.New("shared workspace owner unavailable")
 		}
 		ec.WorkspaceMode = owner.ExecutionContext.WorkspaceMode
-		if ec.WorkspaceMode == domain.WorkspaceModeWarmPool && (profile.Driver != domain.SandboxDriverDocker || ec.ExecutionRunnerID != e.defaultExecutionRunner(owner)) {
-			return errors.New("borrowed warm workspace requires the owner's Docker runner")
+		if ec.WorkspaceMode == domain.WorkspaceModeWarmPool && (!warmWorkspaceOwnerDriverMatches(owner, profile) || ec.ExecutionRunnerID != e.defaultExecutionRunner(owner)) {
+			return errors.New("borrowed warm workspace requires the owner's runner and sandbox driver")
 		}
 		return nil
 	}
@@ -304,11 +311,11 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	if ec.WorkspaceMode != domain.WorkspaceModeWarmPool {
 		return nil
 	}
-	if profile.Driver != domain.SandboxDriverDocker {
-		return errors.New("预热工作区需要 Docker 沙箱")
+	if !domain.WarmWorkspaceSandboxDriver(profile.Driver) {
+		return errors.New("预热工作区需要受支持的隔离沙箱")
 	}
 	if !ec.ExecutionPinned && ec.WorkflowID != domain.ConversationWorkspaceWorkflowID {
-		e.selectPersonalWarmRunner(ec, repositories)
+		e.selectPersonalWarmRunner(ec, repositories, profile.Driver)
 	}
 	if ec.ExecutionRunnerID == "" && !ec.ExecutionPinned {
 		e.mu.Lock()
@@ -316,7 +323,7 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 		e.mu.Unlock()
 		if pool.serves(ec.ProjectID) {
 			for _, r := range e.eligiblePoolRunners(pool.Label) {
-				if repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
+				if r.SupportsWarmWorkspaceDriver(profile.Driver) && profile.Driver != domain.SandboxDriverNative && repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
 					ec.ExecutionRunnerID = r.ID
 					ec.ExecutionPool = domain.ExecutionModeCloud
 					break
@@ -327,6 +334,9 @@ func (e *Engine) freezeWarmWorkspace(ec *domain.TelemetryContext, repositories [
 	r, ok := e.repo.Runner(ec.ExecutionRunnerID)
 	if !ok {
 		return errors.New("请在当前执行机器登记项目仓库的预热工作区，或在已登记的机器新开对话")
+	}
+	if !r.SupportsWarmWorkspaceDriver(profile.Driver) || (profile.Driver == domain.SandboxDriverNative && (r.OwnerUserID <= 0 || r.OwnerUserID != ec.ResponsibleUserID)) {
+		return errors.New("当前执行机器不支持此预热工作区的沙箱，或未绑定本人")
 	}
 	return repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories)
 }
@@ -360,4 +370,9 @@ func (e *Engine) confirmWarmWorkspace(ctx context.Context, owner domain.Run, l d
 		}
 	}
 	return true, nil
+}
+
+func warmWorkspaceOwnerDriverMatches(owner domain.Run, profile domain.SandboxProfile) bool {
+	snapshot := owner.WorkflowSnapshot.SandboxSnapshot
+	return domain.WarmWorkspaceSandboxDriver(profile.Driver) && snapshot != nil && profile.Driver == snapshot.Profile.Driver
 }

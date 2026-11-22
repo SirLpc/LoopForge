@@ -23,8 +23,8 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 	}
 	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout || req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || req.Operation == domain.RunnerWorkspaceOperationWarmVerifyAccess {
 		req.Sandbox = run.WorkflowSnapshot.SandboxSnapshot
-		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
-			return req, errors.New("warm checkout requires Docker")
+		if req.Sandbox == nil || !domain.WarmWorkspaceSandboxDriver(req.Sandbox.Profile.Driver) {
+			return req, errors.New("warm checkout requires a supported isolated sandbox")
 		}
 		inv := new(domain.RunnerInvocation)
 		actor := run.ExecutionContext.ResponsibleUserID

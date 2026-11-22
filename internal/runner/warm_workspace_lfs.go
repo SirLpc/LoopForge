@@ -122,7 +122,7 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 		missing[item.OID] = item.Size
 	}
 	if len(missing) > 0 {
-		if err := fetchWarmLFS(local, auth, db, scope, head, repo); err != nil {
+		if err := fetchWarmLFS(local, auth, stage, db, scope, head, repo); err != nil {
 			return manifest, err
 		}
 	}
@@ -164,14 +164,22 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 	return manifest, nil
 }
 
-func fetchWarmLFS(local, auth context.Context, db, scope, head string, repo domain.RunnerRepository) error {
+func fetchWarmLFS(local, auth context.Context, stage, db, scope, head string, repo domain.RunnerRepository) error {
 	// A trusted transfer repository supplies both a private .git/lfs store and
 	// commit-specific endpoint rules. Relative lfs.storage is resolved inside the
 	// local and remote repos separately, including standalone-file transports.
 	if _, err := gitwork.C(local, scope, "init", "--template=", warmObjectFormat(head)); err != nil {
 		return err
 	}
-	if err := warmAlternate(filepath.Join(scope, ".git"), filepath.Join(db, "objects")); err != nil {
+	objects := filepath.Join(db, "objects")
+	alternates, err := os.ReadFile(filepath.Join(stage, ".git", "objects", "info", "alternates"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if len(alternates) > 0 {
+		objects = strings.TrimSuffix(string(alternates), "\n")
+	}
+	if err := warmAlternate(filepath.Join(scope, ".git"), objects); err != nil {
 		return err
 	}
 	config, err := gitwork.C(local, scope, "ls-tree", head, "--", ".lfsconfig")
@@ -298,6 +306,9 @@ func (m warmLFSManifest) hydrateFile(path, private string, mode os.FileMode, ite
 		return err
 	}
 	defer source.Close()
+	if private == "" {
+		private = filepath.Dir(path)
+	}
 	tmp, err := os.CreateTemp(private, ".warm-lfs-")
 	if err != nil {
 		return err

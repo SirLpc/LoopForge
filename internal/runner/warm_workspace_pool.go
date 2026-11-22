@@ -26,6 +26,8 @@ type warmWorkspaceSlot struct {
 }
 
 type warmWorkspacePool struct {
+	nativeSlots        []*os.File
+	native             bool
 	mu                 sync.Mutex
 	idleOrigins        map[string]string
 	slots              map[string]warmWorkspaceSlot
@@ -39,10 +41,10 @@ type warmWorkspacePool struct {
 }
 
 func openWarmWorkspacePool(configPath, workspaceRoot, statePath string) (*warmWorkspacePool, error) {
-	return openWarmWorkspacePoolWithin(configPath, workspaceRoot, statePath, "")
+	return openWarmWorkspacePoolWithinMode(configPath, workspaceRoot, statePath, false)
 }
 
-func openWarmWorkspacePoolWithin(configPath, workspaceRoot, statePath, storageRoot string) (*warmWorkspacePool, error) {
+func openWarmWorkspacePoolWithinMode(configPath, workspaceRoot, statePath string, native bool) (*warmWorkspacePool, error) {
 	configPath, err := filepath.Abs(configPath)
 	if err != nil {
 		return nil, err
@@ -62,11 +64,6 @@ func openWarmWorkspacePoolWithin(configPath, workspaceRoot, statePath, storageRo
 	if err != nil {
 		return nil, err
 	}
-	if storageRoot != "" {
-		if err := validateWarmDockerVolumeSlots(storageRoot, slots); err != nil {
-			return nil, err
-		}
-	}
 	workspace, err := openWarmWorkspaceDir(workspaceRoot, true)
 	if err != nil {
 		return nil, fmt.Errorf("open warm workspace root: %w", err)
@@ -76,7 +73,16 @@ func openWarmWorkspacePoolWithin(configPath, workspaceRoot, statePath, storageRo
 	if err != nil {
 		return nil, err
 	}
-	pool := &warmWorkspacePool{slots: slots, workspaceRoot: workspaceRoot, journalName: filepath.Base(statePath)}
+	pool := &warmWorkspacePool{native: native, slots: slots, workspaceRoot: workspaceRoot, journalName: filepath.Base(statePath)}
+	if native {
+		if err := qualifyNativeWarmMounts(workspaceRoot); err != nil {
+			return nil, err
+		}
+		if err := pool.lockNativeWarmSlots(); err != nil {
+			_ = pool.close()
+			return nil, err
+		}
+	}
 	if err := pool.openJournal(filepath.Dir(statePath), workspaceID); err != nil {
 		_ = pool.close()
 		return nil, err
@@ -243,6 +249,9 @@ func (p *warmWorkspacePool) reserve(lease domain.WarmWorkspaceLease) error {
 	next := p.state.clone()
 	for _, id := range lease.Slots {
 		record := p.state.Slots[id]
+		if p.native && nativeWarmEditorBusy(p.slots[id]) {
+			return fmt.Errorf("close Unity before leasing warm slot %q", id)
+		}
 		if record.NeedsInspection || active[id] || record.Generation >= lease.Generation {
 			return fmt.Errorf("warm workspace slot %q is unavailable for generation %d", id, lease.Generation)
 		}
@@ -309,7 +318,7 @@ func (p *warmWorkspacePool) place(ctx context.Context, lease domain.WarmWorkspac
 	} else if !maps.Equal(allocation.Targets, targets) {
 		return errors.New("warm workspace placement differs from the journal")
 	}
-	if allocation.Phase == warmWorkspacePlaced {
+	if allocation.Phase == warmWorkspacePlaced && !p.native {
 		_, err := p.inspectLease(allocation)
 		return err
 	}
@@ -365,7 +374,9 @@ func (p *warmWorkspacePool) inspectLease(allocation warmWorkspaceAllocation) (ma
 		position := p.inspectSlot(id, allocation.Targets[id])
 		positions[id] = position
 		known := position.atHome != position.atTarget
-		if allocation.Phase == warmWorkspaceReserved || allocation.Phase == warmWorkspaceReleased {
+		if p.native {
+			known = position.atHome && (allocation.Phase != warmWorkspacePlaced || position.atTarget)
+		} else if allocation.Phase == warmWorkspaceReserved || allocation.Phase == warmWorkspaceReleased {
 			known = position.atHome
 		} else if allocation.Phase == warmWorkspacePlaced {
 			known = position.atTarget && !position.atHome
@@ -392,6 +403,9 @@ func (p *warmWorkspacePool) inspectLease(allocation warmWorkspaceAllocation) (ma
 }
 
 func (p *warmWorkspacePool) move(ctx context.Context, allocation warmWorkspaceAllocation) error {
+	if p.native {
+		return p.bindNativeAllocation(ctx, allocation)
+	}
 	positions, err := p.inspectLease(allocation)
 	if err != nil {
 		return err
@@ -444,15 +458,17 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 	if err != nil {
 		return err
 	}
-	if !warmWorkspaceMoveComplete(allocation, positions) {
+	if !p.native && !warmWorkspaceMoveComplete(allocation, positions) {
 		return errors.New("warm workspace move is incomplete")
 	}
 	returning := allocation.Phase == warmWorkspaceReturning
 	// The rename may have happened immediately before an interruption. Re-sync
 	// both parents before removing the write-ahead intent, even on recovery.
 	for id, position := range positions {
-		if err := syncWarmWorkspaceParent(p.slots[id].Path); err != nil {
-			return err
+		if !p.native {
+			if err := syncWarmWorkspaceParent(p.slots[id].Path); err != nil {
+				return err
+			}
 		}
 		// Cancellation can finish with a verified home inode even when a
 		// blocked target ancestor prevents opening the workspace path.

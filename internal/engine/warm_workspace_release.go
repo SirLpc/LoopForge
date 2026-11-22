@@ -13,6 +13,12 @@ import (
 )
 
 func (e *Engine) authorizeWarmActor(run domain.Run, actor int64) error {
+	if snapshot := run.WorkflowSnapshot.SandboxSnapshot; snapshot != nil && snapshot.Profile.Driver == domain.SandboxDriverNative {
+		machine, ok := e.repo.Runner(e.defaultExecutionRunner(run))
+		if !ok || actor != machine.OwnerUserID {
+			return errors.New("fixed warm workspace requires the execution machine owner")
+		}
+	}
 	p, ok := e.repo.Project(run.ExecutionContext.ProjectID)
 	if actor <= 0 || !ok || p.ArchivedAt != nil {
 		return errors.New("workspace repository access unavailable")

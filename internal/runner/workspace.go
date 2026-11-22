@@ -110,7 +110,7 @@ func (d *Daemon) handleRunnerWorkspaceBrowser(ctx context.Context, request domai
 	if !runnerBrowserReads[request.Browser.Operation] {
 		d.touchRunSandboxes(request.RunID)
 	}
-	state, err := d.handleWorkspaceBrowserEndpoint(ctx, request)
+	state, err := runtime.HandleBrowser(ctx, request.RunID, *request.Browser)
 	if err != nil {
 		return domain.RunnerWorkspaceResponse{Status: 409, Error: err.Error()}
 	}
@@ -132,7 +132,7 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 	if domain.IsWarmWorkspaceOperation(request.Operation) {
 		return d.warmWorkspaceControl(ctx, request)
 	}
-	if err := d.checkDedicatedVolumeRequest(request); err != nil {
+	if err := d.checkNativeWarmRequest(request); err != nil {
 		return runnerWorkspaceError(err)
 	}
 	if d.warmWorkspacePool != nil || request.WarmWorkspaceLease != nil {
@@ -145,8 +145,8 @@ func (d *Daemon) readRunnerWorkspace(ctx context.Context, request domain.RunnerW
 		if err := d.checkWarmOperation(ctx, owner, request.Operation, request.WarmWorkspaceLease); err != nil {
 			return runnerWorkspaceError(err)
 		}
-		if request.WarmWorkspaceLease != nil && (request.Sandbox != nil && request.Sandbox.Profile.Driver != domain.SandboxDriverDocker || request.Operation == "conversation_process" && d.warmVolumeMount == nil) {
-			return runnerWorkspaceError(errors.New("warm operation requires a verified Docker sandbox"))
+		if request.WarmWorkspaceLease != nil && (request.Sandbox != nil && !d.matchesWarmSandbox(request.Sandbox) || request.Operation == "conversation_process" && !d.cfg.WarmNative) {
+			return runnerWorkspaceError(errWarmSandboxDriver)
 		}
 	}
 	if request.Operation == "conversation_process" {

@@ -45,8 +45,20 @@ func checkWarmHostProcesses(ctx context.Context, owns func(string) bool) error {
 		if err != nil {
 			return err
 		}
-		if err := checkWarmProcVisibility(mounts); err != nil {
-			return err
+		visible := false
+		for _, line := range strings.Split(string(mounts), "\n") {
+			parts := strings.Fields(line)
+			if len(parts) > 7 && parts[3] == "/" && parts[4] == "/proc" && strings.Contains(line, " - proc ") {
+				visible = true
+				for _, option := range strings.Split(parts[len(parts)-1], ",") {
+					if strings.HasPrefix(option, "hidepid=") && option != "hidepid=0" && option != "hidepid=off" {
+						return errors.New("workspace retained: complete host procfs visibility is required")
+					}
+				}
+			}
+		}
+		if !visible {
+			return errors.New("workspace retained: cannot verify host procfs mount")
 		}
 		return checkWarmLinuxProcesses(ctx, "/proc", owns)
 	case "darwin":
@@ -95,10 +107,6 @@ func checkWarmHostProcesses(ctx context.Context, owns func(string) bool) error {
 }
 
 func checkWarmLinuxProcesses(ctx context.Context, proc string, owns func(string) bool) error {
-	return walkWarmLinuxThreads(ctx, proc, func(task string) error { return checkWarmProcessHandles(task, owns) })
-}
-
-func walkWarmLinuxThreads(ctx context.Context, proc string, check func(string) error) error {
 	dirs, err := os.ReadDir(proc)
 	if err != nil {
 		return err
@@ -129,7 +137,7 @@ func walkWarmLinuxThreads(ctx context.Context, proc string, check func(string) e
 				return err
 			}
 			task := filepath.Join(base, "task", thread.Name())
-			if err := check(task); err != nil {
+			if err := checkWarmProcessHandles(task, owns); err != nil {
 				if _, statErr := os.Stat(task); os.IsNotExist(statErr) {
 					continue
 				}
@@ -183,23 +191,4 @@ func checkWarmProcessHandles(base string, owns func(string) bool) error {
 	err = scanner.Err()
 	mapped.Close()
 	return err
-}
-
-func checkWarmProcVisibility(mounts []byte) error {
-	visible := false
-	for _, line := range strings.Split(string(mounts), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) > 7 && parts[3] == "/" && parts[4] == "/proc" && strings.Contains(line, " - proc ") {
-			visible = true
-			for _, option := range strings.Split(parts[len(parts)-1], ",") {
-				if strings.HasPrefix(option, "hidepid=") && option != "hidepid=0" && option != "hidepid=off" {
-					return errors.New("workspace retained: complete host procfs visibility is required")
-				}
-			}
-		}
-	}
-	if !visible {
-		return errors.New("workspace retained: cannot verify host procfs mount")
-	}
-	return nil
 }

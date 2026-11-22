@@ -8,13 +8,13 @@ import (
 )
 
 // A warm SOP can use another registered machine without changing the user's default.
-func (e *Engine) selectPersonalWarmRunner(ec *domain.TelemetryContext, repositories []domain.RepositoryContext) {
+func (e *Engine) selectPersonalWarmRunner(ec *domain.TelemetryContext, repositories []domain.RepositoryContext, driver string) {
 	if ec.ResponsibleUserID <= 0 || ec.ExecutionPool == domain.ExecutionModeCloud || e.cloudPoolRequired(ec.ProjectID) {
 		return
 	}
 	if ec.ExecutionRunnerID != "" {
 		r, ok := e.repo.Runner(ec.ExecutionRunnerID)
-		if ok && r.Status == domain.RunnerStatusOnline && repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
+		if ok && r.SupportsWarmWorkspaceDriver(driver) && r.Status == domain.RunnerStatusOnline && repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
 			return
 		}
 	}
@@ -25,7 +25,7 @@ func (e *Engine) selectPersonalWarmRunner(ec *domain.TelemetryContext, repositor
 		}
 	}
 	for _, r := range e.repo.Runners() {
-		if r.OwnerUserID == ec.ResponsibleUserID && r.Status == domain.RunnerStatusOnline && repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
+		if r.SupportsWarmWorkspaceDriver(driver) && r.OwnerUserID == ec.ResponsibleUserID && r.Status == domain.RunnerStatusOnline && repo.CheckWarmWorkspaceRegistration(r, ec.ProjectID, repositories) == nil {
 			ec.ExecutionRunnerID = r.ID
 			return
 		}

@@ -1,36 +1,42 @@
-# WSL2 的预热工作区
+# WSL2 原生预热工作区
 
-这套部署把专用 Runner 和 Unity 检出放在同一台机器的 Docker Desktop Linux 引擎上。Runner 使用独立登记和状态文件。现有普通 Runner 可以继续处理已有的工作区。
+原生 Runner 直接使用 Windows 项目的原始 Git 检出。任务经 bwrap 执行，领取和归还只建立或撤销工作区的私有挂载。源码、Git 检出和 Unity Library 始终留在原目录。Windows Unity Hub 可以从同一项目目录打开任务修改后的文件。每个目录对应一个独占租约。
 
-## 存储与启动
+## 配置
 
-1. 创建独占的 Docker 本地卷，使用默认的 `local` 驱动选项。将整个卷挂到 Runner 容器中的固定目录，例如 `/loopforge-pool`。在卷中分别准备 `slots`、`workspace`、`config` 和 `tools`。初始化完成后退出准备数据的容器。
-2. 把 Runner 镜像内的可执行文件原样安装到 `/loopforge-pool/tools/agentflow-runner`，例如以 `0555` 权限安装。镜像内的 Runner 可执行文件也供短期进程检查容器使用。更换镜像时同步更新工具副本。
-3. 在卷中保存池配置与状态，槽位路径使用 Runner 容器内的绝对路径。两份 Git 检出的 `origin` 应与平台登记的仓库一致。Windows 源目录可保留用于原有工具。
-4. Runner 容器使用本机 Docker Unix socket 和可达的平台地址。启动该模式需要以下参数，登记凭据通过现有 Runner 配置方式提供。
+1. 在 WSL2 安装 Git、bwrap、SOP 使用的 Agent CLI，以及仓库需要的 Git LFS。关闭 Unity 后检查检出和索引干净。Runner 使用这份检出的 Git 元数据并保留本地分支。项目所在盘需允许 WSL 读写。
+2. 在 WSL 的 Linux 文件系统中为 Runner 创建独立的状态目录和工作区目录。状态目录和工作区目录须分开，沙箱会隔离整份状态目录。为原生 Runner 使用独立绑定和状态，保留旧 Runner 的状态以便处理存量租约。Runner 的工作区根目录应在 WSL 主目录下。将各槽位的原始绝对路径登记到池配置里，例如：
 
-```text
--warm-workspace-pool-file /loopforge-pool/config/pool.json
--warm-docker-volume example-unity-warm
--warm-docker-volume-root /loopforge-pool
--workspace /loopforge-pool/workspace
--state /loopforge-pool/config/state.json
+```json
+{
+  "slots": [
+    {
+      "id": "example-desktop",
+      "projectId": "example-project",
+      "repositoryId": "example-client",
+      "path": "/mnt/d/UnityProjects/example",
+      "unityProjectPath": "client"
+    }
+  ]
+}
 ```
 
-配置也可通过 `AGENTFLOW_RUNNER_WORKSPACE_POOL_FILE`、`AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME` 和 `AGENTFLOW_RUNNER_WARM_DOCKER_VOLUME_ROOT` 提供。Docker Desktop 模式通过更换镜像升级。详见[通用登记与验收指南](warm-workspace-pool.md)。
+3. 使用绑定当前用户的 Runner 配置，在 WSL 的私有挂载命名空间启动：
 
-平台和专用 Runner 需要支持 `/runners/warm-tasks/claim`。这个接口只领取分派到本机且已有预热租约的任务。专用 Runner 启动时会检查平台是否提供该接口。
+```bash
+unshare --user --map-root-user --mount --propagation private -- \
+  agentflow-runner -warm-native \
+  -warm-workspace-pool-file ~/.config/loopforge-native/pool.json \
+  -workspace ~/.local/share/loopforge-native/workspace \
+  -state ~/.config/loopforge-native/state.json
+```
 
-将 Runner 接入可访问平台的自定义 Docker 网络。将 `AGENTFLOW_CONVERSATION_DOCKER_NETWORK` 设为该网络名称，`AGENTFLOW_CONVERSATION_RELAY_HOST` 设为 Runner 在该网络上的容器名称或别名，会话容器使用这个地址连接 Runner 的中继。
+平台地址和绑定凭据沿用 Runner 现有配置方式。也可使用 `AGENTFLOW_RUNNER_WARM_NATIVE=1`。新建 SOP 或对话选择 native 沙箱，并绑定有对应登记的个人执行机器。项目使用「预热工作区池」。运行环境在创建工作区时冻结。
 
-## 归还检查
+## Windows Unity 验收
 
-专用 Runner 接收带预热租约的仓库任务。项目对话的文本阶段和仓库阶段均使用 Docker 隔离，每次只挂载当前会话的目录和已获租约的工作区。Docker 运行工具共享目录应位于卷内的 `tools` 目录。
+准备验收时可以在「执行机器 → 我的机器 → 预热工作区」暂停该槽位调度。已开始的任务可以结束，新的租约等待。等当前任务结束并关闭原工作区的终端后，在 Windows Unity Hub 打开原项目，例如 `D:\UnityProjects\example\client`。关闭 Unity 后恢复该槽位调度。Runner 在领取、切换分支、启动写操作和归还时也会检查 Unity 的项目锁文件。
 
-任务容器挂载当前租约对应的卷子路径。Git 对象和辅助工具通过只读子路径挂载。归还前，Runner 检查引擎中运行和停止的容器。未知的重叠挂载、无法读取的进程状态或未交付的文件都会让槽位继续由原所有者保留。
+归还需要提交并推送应保留的代码、归档运行产物并关闭相关终端。当前检出的分支和文件在归还后仍可用于本地验收，下一条租约开始时再按其冻结的 Git 引用增量更新。切换现有部署前，先在旧 Runner 完成存量交付和归还。历史 Docker 卷上的代码可以通过已交付的 Git 分支继续使用。
 
-进程检查在同一镜像的临时容器中运行。该容器使用 Docker 宿主 PID 视图、无网络和只读根文件系统，临时增加读取进程句柄所需的能力。Runner 主容器沿用普通 PID 隔离。Docker 管理员仅在槽位退出调度且已空闲时维护文件。
-
-## 试运行与回退
-
-先用临时卷和测试检出执行领取、任务挂载、Git 操作、拒绝错误归还和重新领取。再检查真实槽位的 Git 远端和 Unity 缓存，完成一次项目仓库读写和归还。退出专用模式前等待租约归还，保留卷及登记状态可用于排查已分配的工作区。Windows 与 Linux 运行环境不同的 Unity Editor 可能需要重新导入资产。
+通用池协议见[Runner 预热工作区池](warm-workspace-pool.md)。

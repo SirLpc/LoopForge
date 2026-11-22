@@ -5,6 +5,7 @@ import (
 	"agentflow/internal/procwatch"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,16 +21,14 @@ import (
 )
 
 type dockerSandbox struct {
-	id, name, workspace             string
-	profile                         domain.SandboxProfile
-	requirements                    SandboxRequirements
-	dockerfile                      domain.DockerfileDefinition
-	builtImage                      string
-	warmTaskID                      string // protected by mu
-	warmBrowserID, warmBrowserRunID string // protected by browserMu
-	mu                              sync.Mutex
-	browserMu                       sync.Mutex
-	started                         bool
+	id, name, workspace string
+	profile             domain.SandboxProfile
+	requirements        SandboxRequirements
+	dockerfile          domain.DockerfileDefinition
+	builtImage          string
+	mu                  sync.Mutex
+	browserMu           sync.Mutex
+	started             bool
 	// execGate lets parallel branches exec concurrently (read side) while a
 	// cwd-recovery Recreate (write side) waits for them instead of docker
 	// rm-ing the container under a sibling's running command.
@@ -48,10 +47,6 @@ func (s *dockerSandbox) Driver() string    { return "docker" }
 func (s *dockerSandbox) Close(ctx context.Context) error {
 	s.mu.Lock()
 	s.started = false
-	if s.requirements.WarmDockerVolume != nil {
-		defer s.mu.Unlock()
-		return s.removeTaskContainers(ctx)
-	}
 	image := s.builtImage
 	s.builtImage = ""
 	s.mu.Unlock()
@@ -170,10 +165,6 @@ func (s *dockerSandbox) Exec(ctx context.Context, command CommandSpec, sink Even
 }
 
 func (s *dockerSandbox) execOnce(ctx context.Context, command CommandSpec, sink EventSink) (out string, err error) {
-	target, err := s.executionTarget()
-	if err != nil {
-		return "", err
-	}
 	args := []string{"exec"}
 	if command.Stdin != nil || isManagedClaude(command) {
 		args = append(args, "-i")
@@ -190,7 +181,7 @@ func (s *dockerSandbox) execOnce(ctx context.Context, command CommandSpec, sink 
 	}
 	toolchain := s.toolchainExecEnv()
 	args = append(args, toolchain...)
-	args = append(args, target)
+	args = append(args, s.name)
 	argv := dockerWorkspaceExecArgv(command.Argv)
 	if command.WorkingDir != "" {
 		argv = append([]string{"sh", "-lc", dockerMCPCallLaunch + `PATH=/opt/loopforge/conversation-cli/bin:/opt/loopforge/conversation-cli/.local/bin:$PATH; export PATH
@@ -203,7 +194,7 @@ cd "$1" && shift && exec "$@"`, "conversation", command.WorkingDir}, dropShellLo
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			stopArgs := append(append(append([]string{"exec"}, toolchain...), target), dockerConversationStopArgv(processFile)...)
+			stopArgs := append(append(append([]string{"exec"}, toolchain...), s.name), dockerConversationStopArgv(processFile)...)
 			if stopErr := exec.CommandContext(stopCtx, "docker", stopArgs...).Run(); stopErr != nil {
 				err = errors.Join(err, fmt.Errorf("停止 CLI 子进程失败: %w", stopErr))
 			}
@@ -700,15 +691,21 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	if err != nil {
 		return err
 	}
-	volume := s.requirements.WarmDockerVolume
 	if mounts != nil {
-		existing, err := s.reusableDockerContainer(ctx, mounts, recreate)
-		if err != nil {
-			return err
+		if !dockerBindMatchesWorkspace(mounts.source, workspace) {
+			return fmt.Errorf("docker sandbox %s is bound to %s, not %s", name, mounts.source, workspace)
 		}
-		if existing != "" {
-			if err := exec.CommandContext(ctx, "docker", "start", existing).Run(); err == nil {
-				if err := waitDockerWorkspaceReady(ctx, existing); err == nil {
+		for _, objects := range s.requirements.GitObjectDirs {
+			if !dockerBindMatchesWorkspace(mounts.readOnlyObjects[objects], objects) {
+				recreate = true
+			}
+		}
+		if !recreate && !mounts.legacyMasks {
+			if err := s.verifyWarmDocker(ctx); err != nil {
+				return err
+			}
+			if err := exec.CommandContext(ctx, "docker", "start", name).Run(); err == nil {
+				if err := waitDockerWorkspaceReady(ctx, name); err == nil {
 					s.started = true
 					return nil
 				}
@@ -720,13 +717,8 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 		return err
 	}
 	image := built
-	args := []string{"create", "--name", name, "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges"}
-	workspaceMount, err := dockerPathMount(volume, workspace, "/workspace", false)
-	if err != nil {
-		return err
-	}
-	args = append(args, workspaceMount...)
-	if len(s.requirements.GitObjectDirs) > 0 || volume != nil {
+	args := []string{"create", "--name", name, "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "-v", workspace + ":/workspace"}
+	if len(s.requirements.GitObjectDirs) > 0 {
 		args = append(args, "--label", "io.loopforge.warm-workspace="+workspace)
 	}
 	// Native installs own private (0700) workspaces as the service user.
@@ -755,13 +747,7 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	if network != "" {
 		args = append(args, "--network", network)
 	}
-	if root := s.requirements.ConversationRoot; root != "" && volume != nil {
-		conversation, err := warmVolumeConversationArgs(volume, root, workspace)
-		if err != nil {
-			return err
-		}
-		args = append(args, conversation...)
-	} else if root != "" {
+	if root := s.requirements.ConversationRoot; root != "" {
 		args = append(args, "-v", root+":"+root+":ro", "-v", filepath.Join(root, "home")+":"+filepath.Join(root, "home"), "-v", workspace+":"+filepath.Join(root, "ws"))
 		guards, err := conversationGuardMounts(root)
 		if err != nil {
@@ -775,7 +761,7 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	}
 	args = append(args, objectArgs...)
 	stateRequirements := s.requirements
-	if len(stateRequirements.GitObjectDirs) > 0 || volume != nil {
+	if len(stateRequirements.GitObjectDirs) > 0 {
 		stateRequirements.CLIStates = nil
 	}
 	stateArgs, err := dockerAgentStateMountRequirements(stateRequirements)
@@ -784,11 +770,10 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	}
 	args = append(args, stateArgs...)
 	if cliDir := RuntimeCLIDir(); cliDir != "" {
-		cliMount, err := dockerRuntimeCLIMount(volume, cliDir)
-		if err != nil {
-			return err
+		if err := os.MkdirAll(cliDir, 0o755); err != nil {
+			return fmt.Errorf("prepare runtime CLI directory: %w", err)
 		}
-		args = append(args, cliMount...)
+		args = append(args, "--mount", "type=bind,src="+cliDir+",dst="+cliDir+",readonly")
 	}
 	if p.ReadOnlyRootFS {
 		args = append(args, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m")
@@ -801,36 +786,27 @@ func (s *dockerSandbox) start(ctx context.Context, recreate bool) error {
 	// Resolve the replacement image and mounts before retiring a workspace with
 	// legacy masks. Its new container ID invalidates old preparation receipts.
 	if mounts != nil || recreate {
-		if err := s.removeTaskContainers(ctx); err != nil {
+		if err := removeDockerWorkspaceContainers(ctx, name); err != nil {
 			return err
 		}
 	}
 	s.builtImage = built
-	var createErrors strings.Builder
-	create := exec.CommandContext(ctx, "docker", args...)
-	create.Stderr = &createErrors
-	created, err := create.Output()
-	if err != nil {
-		if volume == nil {
-			dropEphemeralDockerImage(s.builtImage)
-		}
+	if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+		dropEphemeralDockerImage(s.builtImage)
 		s.builtImage = ""
-		return fmt.Errorf("docker create: %w: %s", err, createErrors.String())
+		return fmt.Errorf("docker create: %w: %s", err, out)
 	}
-	startTarget, err := s.createdStartTarget(ctx, created)
-	if err != nil {
+	if err := s.verifyWarmDocker(ctx); err != nil {
 		return err
 	}
-	if out, err := exec.CommandContext(ctx, "docker", "start", startTarget).CombinedOutput(); err != nil {
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", startTarget).Run()
-		if volume == nil {
-			dropEphemeralDockerImage(s.builtImage)
-		}
+	if out, err := exec.CommandContext(ctx, "docker", "start", name).CombinedOutput(); err != nil {
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
+		dropEphemeralDockerImage(s.builtImage)
 		s.builtImage = ""
 		return fmt.Errorf("docker start: %w: %s", err, out)
 	}
-	if err := waitDockerWorkspaceReady(ctx, startTarget); err != nil {
-		_ = exec.Command("docker", "rm", "-f", startTarget).Run()
+	if err := waitDockerWorkspaceReady(ctx, name); err != nil {
+		_ = exec.Command("docker", "rm", "-f", name).Run()
 		s.started = false
 		return err
 	}
@@ -999,11 +975,17 @@ func isolateLocalDriver(profile domain.SandboxProfile, dockerfile domain.Dockerf
 func dockerGitObjectMounts(requirements SandboxRequirements) ([]string, error) {
 	var args []string
 	for _, dir := range requirements.GitObjectDirs {
-		mount, err := dockerPathMount(requirements.WarmDockerVolume, dir, dir, true)
-		if err != nil {
+		// Docker parses --mount as CSV, including bind paths containing commas.
+		var mount strings.Builder
+		writer := csv.NewWriter(&mount)
+		if err := writer.Write([]string{"type=bind", "src=" + dir, "dst=" + dir, "readonly"}); err != nil {
 			return nil, err
 		}
-		args = append(args, mount...)
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			return nil, err
+		}
+		args = append(args, "--mount", strings.TrimSuffix(mount.String(), "\n"))
 	}
 	return args, nil
 }

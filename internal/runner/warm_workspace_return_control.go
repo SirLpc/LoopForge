@@ -79,3 +79,13 @@ func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.
 	}
 	return runnerWorkspacePayload(refs)
 }
+
+func (d *Daemon) fenceWarmWorkspaceReturn(ctx context.Context, root string, checkProcesses func(context.Context, string) error) error {
+	if d.cfg.WarmNative {
+		return d.fenceNativeWarmReturn(ctx, root)
+	}
+	if err := runtime.FenceWarmWorkspaceContainers(ctx, root); err != nil {
+		return err
+	}
+	return checkProcesses(ctx, root)
+}

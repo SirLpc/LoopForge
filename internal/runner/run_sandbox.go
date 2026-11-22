@@ -187,9 +187,15 @@ func (d *Daemon) localTaskSandboxSpec(task domain.RunnerTask) (runtime.SandboxRe
 		return requirements, resources
 	}
 	requirements.GitCacheRoot = p.gitCacheRoot()
+	if p.native {
+		requirements.NativeWarm = d.nativeWarmIsolation()
+		// The local isolation adapter masks this directory directly, including
+		// its location when it is nested below the Runner's workspace root.
+		requirements.GitCacheRoot = ""
+		return requirements, resources
+	}
 	if dirs, ok := p.workspaceObjectDirectories(d.taskWorkspace(task)); ok {
 		requirements.GitObjectDirs = dirs
-		requirements.WarmDockerVolume = d.warmVolumeMount
 	}
 	return requirements, resources
 }

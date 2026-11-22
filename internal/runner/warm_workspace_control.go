@@ -60,6 +60,9 @@ func (p *warmWorkspacePool) inventory() []domain.WarmWorkspaceSlot {
 				p.idleOrigins[id] = origin
 				if origin != "" {
 					state = "available"
+					if p.native && nativeWarmEditorBusy(slot) {
+						state = "reserved"
+					}
 				}
 			}
 		}
@@ -76,8 +79,8 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	}
 	// Git preparation and release proofs have their own lifetimes. A short
 	// control call may report placement, never readiness from placement alone.
-	if d.warmDockerDesktop != nil && !d.warmHostVisible.Load() && (req.Operation == domain.RunnerWorkspaceOperationWarmPrepare || req.Operation == domain.RunnerWorkspaceOperationWarmCheckout) {
-		return domain.RunnerWorkspaceResponse{Status: 503, Error: "warm Docker Desktop host visibility is temporarily unverified"}
+	if d.cfg.WarmNative && !d.warmHostVisible.Load() && (req.Operation == domain.RunnerWorkspaceOperationWarmPrepare || req.Operation == domain.RunnerWorkspaceOperationWarmCheckout) {
+		return domain.RunnerWorkspaceResponse{Status: 503, Error: "warm execution environment is temporarily unverified"}
 	}
 	if req.Operation != domain.RunnerWorkspaceOperationWarmStatus && d.warmDockerUnavailable() {
 		return runnerWorkspaceError(errWarmDockerUnavailable)
@@ -111,8 +114,8 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 		}
 		return runnerWorkspacePayload(map[string]string{"phase": "authorized"})
 	case domain.RunnerWorkspaceOperationWarmCheckout:
-		if req.Sandbox == nil || req.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
-			return runnerWorkspaceError(errors.New("warm checkout requires Docker"))
+		if !d.matchesWarmSandbox(req.Sandbox) {
+			return runnerWorkspaceError(errWarmSandboxDriver)
 		}
 		gate := d.requestGate(req)
 		if !gate.TryLock() {

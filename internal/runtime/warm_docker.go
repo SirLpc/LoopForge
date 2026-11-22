@@ -11,22 +11,13 @@ import (
 )
 
 type warmDockerMount struct {
-	Type, Name, Source, Destination, Propagation string
-	RW                                           bool
+	Type, Source, Destination, Propagation string
+	RW                                     bool
 }
 
 type warmDockerInspection struct {
-	ID, Name, Image string
-	Config          struct {
-		Image, User string
-		Labels      map[string]string
-	}
-	State      struct{ Running bool }
 	Mounts     []warmDockerMount
 	HostConfig struct {
-		Binds                                                        []string
-		Mounts                                                       []warmDockerMountRequest
-		Tmpfs                                                        map[string]string
 		Privileged                                                   bool
 		CapAdd, CapDrop, SecurityOpt, VolumesFrom, DeviceCgroupRules []string
 		Devices, DeviceRequests                                      []json.RawMessage
@@ -87,47 +78,16 @@ func (i warmDockerInspection) validateHost() error {
 }
 
 func (s *dockerSandbox) verifyWarmDocker(ctx context.Context) error {
-	if len(s.requirements.GitObjectDirs) == 0 && s.requirements.WarmDockerVolume == nil {
+	if len(s.requirements.GitObjectDirs) == 0 {
 		return nil
 	}
-	_, err := s.inspectedWarmTask(ctx)
-	return err
-}
-
-func (s *dockerSandbox) inspectedWarmTask(ctx context.Context) (*warmDockerInspection, error) {
-	target, err := s.executionTarget()
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", s.name).Output()
 	if err != nil {
-		return nil, err
-	}
-	var actual *warmDockerInspection
-	if s.requirements.WarmDockerVolume != nil {
-		actual, err = s.inspectVolumeTask(ctx, target, target)
-	} else {
-		actual, err = inspectWarmDocker(ctx, target)
-		if err == nil && actual != nil {
-			err = actual.validateTask(s.workspace, s.requirements, RuntimeCLIDir())
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if actual == nil {
-		return nil, errors.New("warm Docker sandbox disappeared")
-	}
-	return actual, nil
-}
-
-func inspectWarmDocker(ctx context.Context, name string) (*warmDockerInspection, error) {
-	out, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", name).CombinedOutput()
-	if dockerObjectGone(string(out), err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect warm Docker container: %w", err)
+		return fmt.Errorf("inspect warm Docker container: %w", err)
 	}
 	var rows []warmDockerInspection
 	if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
-		return nil, errors.New("invalid warm Docker inspection")
+		return errors.New("invalid warm Docker inspection")
 	}
-	return &rows[0], nil
+	return rows[0].validate(s.workspace, s.requirements.GitObjectDirs, RuntimeCLIDir())
 }

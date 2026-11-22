@@ -25,7 +25,12 @@ type warmGitCommand struct {
 // The helper's worktree and available commands are fixed independently of
 // its JSON input. Only its dedicated Docker container receives delivery keys.
 func RunWarmGitHelperCLI(args []string) bool {
-	if len(args) != 1 || args[0] != "warm-git-helper" {
+	root := "/workspace"
+	switch {
+	case len(args) == 1 && args[0] == "warm-git-helper":
+	case len(args) == 2 && args[0] == "warm-git-helper-native" && filepath.IsAbs(args[1]) && filepath.Clean(args[1]) == args[1]:
+		root = args[1]
+	default:
 		return false
 	}
 	var op warmGitCommand
@@ -33,14 +38,13 @@ func RunWarmGitHelperCLI(args []string) bool {
 	if err := json.NewDecoder(io.LimitReader(os.Stdin, 20<<20)).Decode(&op); err != nil {
 		resp = runnerWorkspaceError(err)
 	} else {
-		resp = op.execute(context.Background())
+		resp = op.executeAt(context.Background(), root, args[0] == "warm-git-helper-native")
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(resp)
 	return true
 }
 
-func (op warmGitCommand) execute(ctx context.Context) domain.RunnerWorkspaceResponse {
-	const root = "/workspace"
+func (op warmGitCommand) executeAt(ctx context.Context, root string, native bool) domain.RunnerWorkspaceResponse {
 	if op.Outputs != nil {
 		return runnerWorkspacePayload(collectTaskOutputs(root, op.Outputs))
 	}
@@ -49,6 +53,19 @@ func (op warmGitCommand) execute(ctx context.Context) domain.RunnerWorkspaceResp
 			return runnerWorkspaceError(errors.New("unsupported warm Git read"))
 		}
 		return readWorkspaceContent(ctx, root, *op.Read)
+	}
+	if native {
+		if op.Invocation == nil {
+			return runnerWorkspaceError(errors.New("missing fixed warm checkout repositories"))
+		}
+		for _, repo := range invocationRepositories(op.Invocation) {
+			if !validWarmWorkspaceRelativePath(repo.Dir) {
+				return runnerWorkspaceError(errors.New("invalid fixed warm checkout path"))
+			}
+			if err := verifyNativeWarmConfig(ctx, filepath.Join(root, repo.Dir), "/tmp"); err != nil {
+				return runnerWorkspaceError(err)
+			}
+		}
 	}
 	if len(op.KnownHosts) > 0 {
 		file, err := os.CreateTemp("", "warm-git-hosts-")
@@ -82,15 +99,17 @@ func (op warmGitCommand) execute(ctx context.Context) domain.RunnerWorkspaceResp
 }
 
 func (d *Daemon) runWarmGit(ctx context.Context, task domain.RunnerTask, command warmGitCommand) domain.RunnerWorkspaceResponse {
-	if task.Sandbox == nil || task.Sandbox.Profile.Driver != domain.SandboxDriverDocker {
-		return runnerWorkspaceError(errors.New("warm Git requires the frozen Docker sandbox"))
+	if !d.matchesWarmSandbox(task.Sandbox) {
+		return runnerWorkspaceError(errWarmSandboxDriver)
 	}
 	data, err := json.Marshal(command)
 	if err != nil {
 		return runnerWorkspaceError(err)
 	}
 	var out []byte
-	if command.Action == "" {
+	if d.cfg.WarmNative {
+		out, err = d.runNativeWarmGit(ctx, task, command, data)
+	} else if command.Action == "" {
 		requirements, resources := d.localTaskSandboxSpec(task)
 		_, id, _ := runSandboxKey(task, requirements, resources)
 		out, err = runtime.RunWarmGitOffline(ctx, id, d.taskWorkspace(task), requirements, resources.Dockerfile, data, command.Outputs != nil && command.Outputs.RecoverOutputs)

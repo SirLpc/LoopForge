@@ -99,3 +99,49 @@ func TestWarmSOPSelectsOwnersRegisteredRunner(t *testing.T) {
 		})
 	}
 }
+
+func TestWarmSOPNativeSelectsOnlyOwnersNativeRunner(t *testing.T) {
+	e, s := cvEEngine(t)
+	e.ConfigureExecution("fixture", "host", time.Minute, false)
+	const owner = 42
+	project := domain.Project{ID: "native-project", OwnerID: owner, WorkspaceMode: domain.WorkspaceModeWarmPool}
+	if err := s.PutProject(project); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.SandboxProfile{ID: "native-warm", Name: "Native", Driver: domain.SandboxDriverNative, ProjectID: project.ID}
+	if err := s.PutSandbox(profile); err != nil {
+		t.Fatal(err)
+	}
+	wf := domain.WorkflowDefinition{ID: "native-routing", Name: "Native", SandboxProfileID: profile.ID, Nodes: []domain.WorkflowNode{{ID: "check", Type: "command", Command: "true"}}}
+	if err := s.PutWorkflow(wf); err != nil {
+		t.Fatal(err)
+	}
+	source := domain.RepositoryContext{RepositoryID: "game", CloneURL: "https://example.test/game.git"}
+	for _, machine := range []domain.Runner{
+		{ID: "docker", OwnerUserID: owner},
+		{ID: "foreign-native", OwnerUserID: 99, Labels: []string{domain.RunnerLabelNativeWarmWorkspace}},
+		{ID: "my-native", OwnerUserID: owner, Labels: []string{domain.RunnerLabelNativeWarmWorkspace}},
+	} {
+		if err := s.PutRunner(machine); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		slots := []domain.WarmWorkspaceSlot{{ID: "slot", ProjectID: project.ID, RepositoryID: source.RepositoryID, OriginSHA256: gitwork.RemoteFingerprint(source.CloneURL), State: "available"}}
+		if err := s.RunnerHeartbeat(machine.ID, nil, domain.RunnerVersionWarmWorkspace, now, now.Add(time.Hour), slots); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetDefaultRunner(owner, "docker", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	run, err := e.StartWithRepositoriesContext(wf.ID, "", []domain.RepositoryContext{source}, domain.TelemetryContext{ProjectID: project.ID, ResponsibleUserID: owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ExecutionContext.ExecutionRunnerID != "my-native" {
+		t.Fatalf("selected %s", run.ExecutionContext.ExecutionRunnerID)
+	}
+	if _, err := e.StartWithRepositoriesContext(wf.ID, "", []domain.RepositoryContext{source}, domain.TelemetryContext{ProjectID: project.ID, ResponsibleUserID: owner, ExecutionPinned: true, ExecutionRunnerID: "docker"}); err == nil {
+		t.Fatal("accepted Docker Runner for a native workspace")
+	}
+}

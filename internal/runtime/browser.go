@@ -230,10 +230,6 @@ func (s *dockerSandbox) ensureBrowser(ctx context.Context, runID string, sink Ev
 	if err := s.ensureStarted(ctx); err != nil {
 		return domain.MCPServerDefinition{}, err
 	}
-	parent, err := s.executionTarget()
-	if err != nil {
-		return domain.MCPServerDefinition{}, err
-	}
 	s.browserMu.Lock()
 	defer s.browserMu.Unlock()
 	image, err := browserImageName()
@@ -250,12 +246,8 @@ func (s *dockerSandbox) ensureBrowser(ctx context.Context, runID string, sink Ev
 		return domain.MCPServerDefinition{}, err
 	}
 	name := dockerBrowserContainerName(s.name)
-	if s.requirements.WarmDockerVolume != nil {
-		if err := s.ensureWarmVolumeBrowser(ctx, runID, image, name, parent); err != nil {
-			return domain.MCPServerDefinition{}, err
-		}
-		name = s.warmBrowserID
-	} else if out, inspectErr := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}|{{.Config.Image}}|{{index .Config.Labels \""+browserRunLabel+"\"}}", name).Output(); inspectErr != nil || strings.TrimSpace(string(out)) != "true|"+image+"|"+runID {
+	out, inspectErr := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}|{{.Config.Image}}|{{index .Config.Labels \""+browserRunLabel+"\"}}", name).Output()
+	if inspectErr != nil || strings.TrimSpace(string(out)) != "true|"+image+"|"+runID {
 		_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
 		args := []string{"run", "-d", "--name", name, "--init",
 			"--label", browserRunLabel + "=" + runID, "--label", browserOwnerLabel + "=" + s.name,

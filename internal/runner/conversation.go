@@ -46,10 +46,8 @@ func (d *Daemon) conversationProcess(ctx context.Context, request domain.RunnerW
 		return runnerWorkspaceError(fmt.Errorf("conversation control channel unavailable"))
 	}
 	var factory runtime.ConversationSandboxFactory
-	if d.warmVolumeMount != nil {
-		request.Sandbox, factory = d.warmDockerConversationFactory(request, req, workspace)
-	} else if request.RunID == "" {
-		factory = func(envCtx context.Context, _ string) (runtime.Sandbox, func(), error) {
+	if request.RunID == "" {
+		factory = func(envCtx context.Context, nativeRoot string) (runtime.Sandbox, func(), error) {
 			var lease *managedcli.ClaimLease
 			var err error
 			var inventory managedcli.Inventory
@@ -80,6 +78,9 @@ func (d *Daemon) conversationProcess(ctx context.Context, request domain.RunnerW
 				return nil, nil, fmt.Errorf("执行机器未安装 CLI %s", provider)
 			}
 			req.Command.Argv[0] = binary
+			if d.cfg.WarmNative {
+				return d.openNativeWarmConversation(envCtx, nativeRoot, release)
+			}
 			return nil, release, nil
 		}
 	} else {

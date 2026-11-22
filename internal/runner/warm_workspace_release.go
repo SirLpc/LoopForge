@@ -50,7 +50,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 			if i < 0 {
 				return nil, errors.New("missing partially prepared repository")
 			}
-			check := warmReturnTree{root: filepath.Dir(a.Targets[id]), checkout: a.Targets[id]}
+			check := warmReturnTree{root: filepath.Dir(a.Targets[id]), checkout: a.Targets[id], native: p.native}
 			actual, err := check.verify(ctx, p.slots[id], p.gitCache(id), repos[i])
 			if err != nil {
 				return nil, err
@@ -97,7 +97,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 	for _, r := range repos {
 		slot := p.slots[lease.Slots[r.RepositoryID]]
 		target := targets[slot.ID]
-		proof := warmReturnTree{root: root, checkout: target, archived: archived, collected: map[string]string{}}
+		proof := warmReturnTree{root: root, checkout: target, archived: archived, collected: map[string]string{}, native: p.native}
 		ref, err := proof.verify(ctx, slot, p.gitCache(slot.ID), r)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", r.Dir, err)
@@ -146,6 +146,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 
 type warmReturnTree struct {
 	root, checkout      string
+	native              bool
 	archived, collected map[string]string
 	remove              []string
 }
@@ -163,7 +164,7 @@ func (w *warmReturnTree) archive(path string, d fs.DirEntry) error {
 	if err != nil {
 		return err
 	}
-	if info.Size() > 1<<20 || info.Mode().Perm()&0111 != 0 {
+	if info.Size() > 1<<20 || !w.native && info.Mode().Perm()&0111 != 0 {
 		return fmt.Errorf("archive cannot restore %s exactly", rel)
 	}
 	b, err := os.ReadFile(path)
@@ -241,15 +242,33 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 	if err := validateWarmLFSConfig(local, cache, head, r.CloneURL); err != nil {
 		return ref, err
 	}
-	if err := verifyWarmRefs(local, meta, cache, branch, true); err != nil {
+	if !w.native {
+		if err := verifyWarmRefs(local, meta, cache, branch, true); err != nil {
+			return ref, err
+		}
+	} else if err := verifyNativeWarmConfig(local, w.checkout, private); err != nil {
 		return ref, err
 	}
+
 	stage := filepath.Join(private, "check")
 	if _, err := gitwork.C(local, private, "init", "--template=", warmObjectFormat(head), stage); err != nil {
 		return ref, err
 	}
-	if err := warmAlternate(filepath.Join(stage, ".git"), filepath.Join(cache, "objects")); err != nil {
-		return ref, err
+	rules := warmCheckoutFileRules{fileMode: true, symlinks: true}
+	if w.native {
+		rules, err = nativeWarmProofConfig(local, w.checkout, stage)
+		if err != nil {
+			return ref, err
+		}
+	}
+	var alternateErr error
+	if w.native {
+		alternateErr = nativeWarmProofAlternates(filepath.Join(stage, ".git"), cache, w.checkout)
+	} else {
+		alternateErr = warmAlternate(filepath.Join(stage, ".git"), filepath.Join(cache, "objects"))
+	}
+	if alternateErr != nil {
+		return ref, alternateErr
 	}
 	lfs, err := prepareWarmLFS(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, r), head, r, (*os.File).Sync)
 	if err != nil {
@@ -345,7 +364,7 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 				}
 				return filepath.SkipDir
 			}
-			if !warmBlobMatches(local, stage, head, lfs, path, rel, fields[2], fields[0]) {
+			if !warmBlobMatchesWithRules(local, stage, head, lfs, path, rel, fields[2], fields[0], rules) {
 				return fmt.Errorf("commit or restore changes in %s", rel)
 			}
 			return nil
@@ -369,6 +388,14 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 // Read actual bytes independently of index stat hints, excludes, filters,
 // hooks and submodule configuration in the writable checkout.
 func warmBlobMatches(ctx context.Context, stage, head string, lfs warmLFSManifest, path, rel, oid, mode string) bool {
+	return warmBlobMatchesWithRules(ctx, stage, head, lfs, path, rel, oid, mode, warmCheckoutFileRules{fileMode: true, symlinks: true})
+}
+
+type warmCheckoutFileRules struct {
+	fileMode, symlinks bool
+}
+
+func warmBlobMatchesWithRules(ctx context.Context, stage, head string, lfs warmLFSManifest, path, rel, oid, mode string, rules warmCheckoutFileRules) bool {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -380,7 +407,16 @@ func warmBlobMatches(ctx context.Context, stage, head string, lfs warmLFSManifes
 	fmt.Fprintf(h, "blob %d%c", st.Size(), 0)
 	if mode == "120000" {
 		if st.Mode()&os.ModeSymlink == 0 {
-			return false
+			if rules.symlinks || !st.Mode().IsRegular() {
+				return false
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				return false
+			}
+			defer f.Close()
+			_, err = io.Copy(h, f)
+			return err == nil && hex.EncodeToString(h.Sum(nil)) == oid
 		}
 		dest, err := os.Readlink(path)
 		if err != nil {
@@ -389,7 +425,7 @@ func warmBlobMatches(ctx context.Context, stage, head string, lfs warmLFSManifes
 		io.WriteString(h, dest)
 		return hex.EncodeToString(h.Sum(nil)) == oid
 	}
-	if !st.Mode().IsRegular() || (st.Mode()&0100 != 0) != (mode == "100755") {
+	if !st.Mode().IsRegular() || rules.fileMode && (st.Mode()&0100 != 0) != (mode == "100755") {
 		return false
 	}
 	f, err := os.Open(path)
@@ -486,7 +522,7 @@ func warmCheckoutBlobMatches(ctx context.Context, stage, head, actualPath, rel, 
 			return false
 		}
 	}
-	cleanOID, err := gitwork.C(ctx, stage, "-c", attributesFile, "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "hash-object", "--path="+rel, "--", actualPath)
+	cleanOID, err := gitwork.C(ctx, stage, "-c", attributesFile, "-c", "core.safecrlf=false", "hash-object", "--path="+rel, "--", actualPath)
 	return err == nil && cleanOID == oid
 }
 

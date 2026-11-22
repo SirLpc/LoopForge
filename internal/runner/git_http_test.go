@@ -13,7 +13,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if runtime.RunWarmDockerProbeCLI(os.Args[1:]) || RunWarmGitHelperCLI(os.Args[1:]) || runtime.RunMCPCallCLI(os.Args[1:]) || runtime.RunGitHelperCLI(os.Args[1:]) {
+	if RunWarmGitHelperCLI(os.Args[1:]) || runtime.RunMCPCallCLI(os.Args[1:]) || runtime.RunGitHelperCLI(os.Args[1:]) {
 		return
 	}
 	os.Exit(m.Run())

@@ -105,7 +105,7 @@ func handleDevServerHTTP(ctx context.Context, runID string, req *domain.BrowserH
 	res, err := client.Do(out)
 	if err != nil {
 		if errors.Is(err, ErrDevServerUnreachable) {
-			forgetDevServerEndpoint(browserRequestCacheKey(ctx, runID), endpoint)
+			forgetDevServerEndpoint(runID, endpoint)
 		}
 		var unreachable devServerDialError
 		if errors.As(err, &unreachable) {
@@ -146,7 +146,6 @@ var devServerHop = map[string]bool{
 func devServerHopHeader(name string) bool { return devServerHop[strings.ToLower(name)] }
 
 func devServerClientFor(ctx context.Context, runID string) (*http.Client, browserEndpoint, bool) {
-	key := browserRequestCacheKey(ctx, runID)
 	now := time.Now()
 	devServerClients.Lock()
 	for id, c := range devServerClients.items {
@@ -155,20 +154,20 @@ func devServerClientFor(ctx context.Context, runID string) (*http.Client, browse
 			delete(devServerClients.items, id)
 		}
 	}
-	cached := devServerClients.items[key]
-	if cached != nil && browserEndpointMatchesRequest(ctx, cached.endpoint) && now.Sub(cached.checked) < devServerEndpointTTL {
+	cached := devServerClients.items[runID]
+	if cached != nil && now.Sub(cached.checked) < devServerEndpointTTL {
 		cached.used = now
 		devServerClients.Unlock()
 		return cached.client, cached.endpoint, true
 	}
 	devServerClients.Unlock()
-	endpoint, ok := requestBrowserEndpoint(ctx, runID, devServerLookup)
+	endpoint, ok := devServerLookup(ctx, runID)
 	if !ok {
 		return nil, browserEndpoint{}, false
 	}
 	devServerClients.Lock()
 	defer devServerClients.Unlock()
-	cached = devServerClients.items[key]
+	cached = devServerClients.items[runID]
 	if cached != nil && cached.endpoint == endpoint {
 		cached.checked, cached.used = now, now
 		return cached.client, endpoint, true
@@ -205,7 +204,7 @@ func devServerClientFor(ctx context.Context, runID string) (*http.Client, browse
 			return http.ErrUseLastResponse
 		},
 	}
-	devServerClients.items[key] = &devServerClient{endpoint: endpoint, checked: now, used: now, client: client}
+	devServerClients.items[runID] = &devServerClient{endpoint: endpoint, checked: now, used: now, client: client}
 	return client, endpoint, true
 }
 

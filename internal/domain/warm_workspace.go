@@ -1,5 +1,7 @@
 package domain
 
+import "slices"
+
 type WorkspaceMode string
 
 const (
@@ -104,3 +106,16 @@ const WarmWorkspaceProtocolV1 = "1"
 // WarmWorkspaceClaimPath is the dedicated Runner claim endpoint. A separate
 // path prevents an older server from silently leasing checkout tasks.
 const WarmWorkspaceClaimPath = "/runners/warm-tasks/claim"
+
+// RunnerLabelNativeWarmWorkspace marks a dedicated native pool. Unlabelled
+// runners continue to serve Docker warm leases.
+const RunnerLabelNativeWarmWorkspace = "loopforge-warm-native"
+
+func WarmWorkspaceSandboxDriver(driver string) bool {
+	return driver == SandboxDriverDocker || driver == SandboxDriverNative
+}
+
+func (r Runner) SupportsWarmWorkspaceDriver(driver string) bool {
+	native := slices.Contains(r.Labels, RunnerLabelNativeWarmWorkspace)
+	return (native && driver == SandboxDriverNative) || (!native && driver == SandboxDriverDocker)
+}

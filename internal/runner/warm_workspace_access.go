@@ -88,8 +88,14 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 				a.PreparingGit = true
 				return p.saveAllocation(a)
 			}
-			if err := prepareWarmCheckoutWithProof(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore, previous, beforeWrite); err != nil {
-				return err
+			var preparationErr error
+			if p.native {
+				preparationErr = prepareNativeWarmCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID], repo, restore, beforeWrite)
+			} else {
+				preparationErr = prepareWarmCheckoutWithProof(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore, previous, beforeWrite)
+			}
+			if preparationErr != nil {
+				return preparationErr
 			}
 			if err := gitwork.RecordBaseline(targets[slotID], repo.Ref); err != nil {
 				return err
@@ -182,6 +188,11 @@ func (d *Daemon) checkWarmOperation(ctx context.Context, owner, operation string
 	if _, err := p.inspectLease(a); err != nil {
 		return err
 	}
+	if p.native && nativeWarmWorkspaceMayWrite(operation) {
+		if err := p.checkNativeWarmEditors(a); err != nil {
+			return err
+		}
+	}
 	if domain.IsWorkspaceCheckpointTransferOperation(operation) || operation == domain.RunnerWorkspaceOperationCheckpoint {
 		return errors.New("whole-workspace checkpoints are unavailable for pooled workspaces")
 	}
@@ -193,8 +204,8 @@ func (d *Daemon) checkWarmOperation(ctx context.Context, owner, operation string
 }
 
 func (d *Daemon) checkWarmTask(ctx context.Context, task domain.RunnerTask) error {
-	if d.cfg.WarmDockerVolume != "" && task.WarmWorkspaceLease == nil {
-		return errUnleasedDedicatedVolume
+	if d.cfg.WarmNative && task.WarmWorkspaceLease == nil {
+		return errUnleasedNativeWarmRunner
 	}
 	owner := d.taskGateKey(task)
 	if err := d.checkWarmOperation(ctx, owner, task.Action, task.WarmWorkspaceLease); err != nil {
@@ -202,6 +213,9 @@ func (d *Daemon) checkWarmTask(ctx context.Context, task domain.RunnerTask) erro
 	}
 	if task.WarmWorkspaceLease == nil {
 		return nil
+	}
+	if task.Action == domain.RunnerTaskActionAlignBaseline {
+		return errors.New("throwaway checkout tasks cannot use a leased workspace")
 	}
 	if d.taskWorkspace(task) != filepath.Join(d.warmWorkspacePool.workspaceRoot, "runs", owner, "workspace") {
 		return errors.New("warm task must use the shared checkout")
@@ -213,8 +227,8 @@ func (d *Daemon) checkWarmTask(ctx context.Context, task domain.RunnerTask) erro
 		}
 		dir.Close()
 	}
-	if task.Action == "" && (task.Sandbox == nil || task.Sandbox.Profile.Driver != domain.SandboxDriverDocker || task.Invocation == nil && task.Command == "") {
-		return errors.New("warm task requires Docker execution")
+	if task.Action == "" && (!d.matchesWarmSandbox(task.Sandbox) || task.Invocation == nil && task.Command == "") {
+		return errWarmSandboxDriver
 	}
 	return nil
 }

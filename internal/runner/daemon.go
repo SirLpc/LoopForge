@@ -59,8 +59,6 @@ type Daemon struct {
 	workspaceTerminals   runtime.TerminalPool
 	checkpointTransfers  runtime.CheckpointTransfers
 	warmWorkspacePool    *warmWorkspacePool
-	warmDockerDesktop    *runtime.WarmDockerDesktop
-	warmVolumeMount      *runtime.WarmDockerVolume
 	warmHostVisible      atomic.Bool
 	workspaceGates       sync.Map // run ID -> *sync.RWMutex; fences manual writes locally
 }
@@ -88,11 +86,9 @@ type Config struct {
 	ManagedCLIRoot string
 	// WarmWorkspacePoolFile opts the runner into local warm workspace registration.
 	WarmWorkspacePoolFile string
+	WarmNative            bool
 	// WarmDockerEndpointPinned means the CLI fixed Docker to its startup Unix socket.
 	WarmDockerEndpointPinned bool
-	// WarmDockerVolume enables the dedicated Docker Desktop local-volume mode.
-	WarmDockerVolume     string
-	WarmDockerVolumeRoot string
 }
 
 type daemonState struct {
@@ -124,6 +120,9 @@ func New(cfg Config) (*Daemon, error) {
 		if err != nil {
 			return nil, err
 		}
+		if cfg.WarmNative {
+			path = filepath.Join(filepath.Dir(path), "native-state", filepath.Base(path))
+		}
 		cfg.StatePath = path
 	}
 	if cfg.MaxConcurrency < 1 {
@@ -147,12 +146,10 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, err
 	}
 	cfg.DefaultWorkspaceRoot = root
-	cfg.WarmDockerVolume = strings.TrimSpace(cfg.WarmDockerVolume)
-	cfg.WarmDockerVolumeRoot = strings.TrimSpace(cfg.WarmDockerVolumeRoot)
-	if err := validateWarmDockerVolumeConfig(cfg); err != nil {
+	if err := configureNativeWarmRunner(&cfg); err != nil {
 		return nil, err
 	}
-	if cfg.WarmDockerVolume != "" {
+	if cfg.WarmNative {
 		cfg.DisableAutoUpdate = true
 	}
 	if cfg.Name == "" {
@@ -160,7 +157,7 @@ func New(cfg Config) (*Daemon, error) {
 		cfg.Name = host
 	}
 	client := NewClient(cfg.ServerURL)
-	client.warmOnly = cfg.WarmDockerVolume != ""
+	client.warmOnly = cfg.WarmNative
 	return &Daemon{cfg: cfg, client: client, executor: runtime.NewExecutorRunner(),
 		controls: map[string]chan string{}, pendingControls: map[string]string{}, heartbeatWake: make(chan struct{}, 1)}, nil
 }
@@ -183,19 +180,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	if d.cfg.WarmWorkspacePoolFile != "" {
-		if err := d.openWarmDockerVolume(ctx); err != nil {
-			return err
-		}
-		pool, err := openWarmWorkspacePoolWithin(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json", d.cfg.WarmDockerVolumeRoot)
+		pool, err := openWarmWorkspacePoolWithinMode(d.cfg.WarmWorkspacePoolFile, d.cfg.DefaultWorkspaceRoot, d.cfg.StatePath+".warm-workspace.json", d.cfg.WarmNative)
 		if err != nil {
 			return fmt.Errorf("open warm workspace pool: %w", err)
 		}
 		d.warmWorkspacePool = pool
 		d.client.warmProtocol = (domain.Runner{RunnerVersion: Version()}).SupportsWarmWorkspace()
 		defer pool.close()
-		if err := d.qualifyWarmDockerVolume(ctx); err != nil {
-			return err
-		}
 	}
 	if err := d.ensureRegistered(ctx); err != nil {
 		return err

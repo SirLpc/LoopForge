@@ -60,6 +60,7 @@ func controlledBaseEnvironment(base []string) []string {
 		"CLAUDE_CODE_USE_BEDROCK=", "CLAUDE_CODE_USE_VERTEX=", "CLAUDE_CODE_USE_FOUNDRY=",
 		"CODEBUDDY_INTERNET_ENVIRONMENT=",
 		"AGENTFLOW_GIT_TOKEN=",
+		"AGENTFLOW_RUNNER_BOOTSTRAP_TOKEN=",
 		"GH_TOKEN=",
 		"GITHUB_TOKEN=",
 		"AGENTFLOW_MCP_CONFIG=",
@@ -212,8 +213,10 @@ func (s *processSandbox) command(ctx context.Context, command CommandSpec, base 
 			cmd.Env = upsertEnv(cmd.Env, key, "/tmp")
 		}
 	}
-	if host := processDockerHost(cmd.Env); host != "" {
-		cmd.Env = upsertEnv(cmd.Env, "DOCKER_HOST", host)
+	if s.requirements.NativeWarm == nil {
+		if host := processDockerHost(cmd.Env); host != "" {
+			cmd.Env = upsertEnv(cmd.Env, "DOCKER_HOST", host)
+		}
 	}
 	return cmd, nil
 }
@@ -519,12 +522,15 @@ func bwrapArgsCommand(workspace string, requirements SandboxRequirements) ([]str
 		"--die-with-parent", "--new-session",
 		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
 		"--ro-bind", "/", "/",
-		"--bind", root, root,
-		"--chdir", root,
-		"--tmpfs", "/tmp",
-		"--proc", "/proc",
-		"--dev-bind", "/dev", "/dev",
 	}
+	if native := requirements.NativeWarm; native != nil {
+		args = append(args, "--tmpfs", "/tmp", "--tmpfs", native.WorkspaceRoot)
+	}
+	args = append(args, "--bind", root, root, "--chdir", root)
+	if requirements.NativeWarm == nil {
+		args = append(args, "--tmpfs", "/tmp")
+	}
+	args = append(args, "--proc", "/proc", "--dev-bind", "/dev", "/dev")
 	if conversation := requirements.ConversationRoot; conversation != "" {
 		// Same layout as the Docker workspace: the native CLI keeps its HOME
 		// and cwd (<root>/ws, here the run workspace) across both modes.
@@ -563,6 +569,14 @@ func bwrapArgsCommand(workspace string, requirements SandboxRequirements) ([]str
 	}
 	if requirements.GitCacheRoot != "" {
 		args = append(args, "--remount-ro", requirements.GitCacheRoot)
+	}
+	if native := requirements.NativeWarm; native != nil {
+		masks, err := nativeWarmMasks(native)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, masks...)
+		args = append(args, "--remount-ro", native.WorkspaceRoot)
 	}
 	args = append(args, "--")
 	return args, nil

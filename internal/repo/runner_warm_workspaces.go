@@ -403,7 +403,7 @@ func (r *RunnersRepo) CheckWarmTarget(run domain.Run, state domain.WarmWorkspace
 		return nil
 	}
 	var machine runnerRow
-	err := r.DB.Select("id", "status", "runner_version", "warm_slots").Take(&machine, "id = ?", run.ExecutionContext.ExecutionRunnerID).Error
+	err := r.DB.Select("id", "status", "runner_version", "warm_slots", "labels", "owner_user_id").Take(&machine, "id = ?", run.ExecutionContext.ExecutionRunnerID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("%w：执行机器已移除，请在已登记仓库的机器新开对话", errWarmTargetIncompatible)
 	}
@@ -413,7 +413,14 @@ func (r *RunnersRepo) CheckWarmTarget(run domain.Run, state domain.WarmWorkspace
 	if machine.Status != domain.RunnerStatusOnline && state == domain.WarmWorkspaceQueued {
 		return nil // preserve an existing wait across a temporary disconnect
 	}
-	if err := CheckWarmWorkspaceRegistration(runnerFromRow(machine), run.ExecutionContext.ProjectID, run.RepositoryContexts()); err != nil {
+	target := runnerFromRow(machine)
+	if snapshot := run.WorkflowSnapshot.SandboxSnapshot; snapshot != nil {
+		driver := snapshot.Profile.Driver
+		if !target.SupportsWarmWorkspaceDriver(driver) || (driver == domain.SandboxDriverNative && (target.OwnerUserID <= 0 || target.OwnerUserID != run.ExecutionContext.ResponsibleUserID)) {
+			return fmt.Errorf("%w：当前执行机器不支持该预热沙箱或未绑定本人", errWarmTargetIncompatible)
+		}
+	}
+	if err := CheckWarmWorkspaceRegistration(target, run.ExecutionContext.ProjectID, run.RepositoryContexts()); err != nil {
 		return errors.Join(errWarmTargetIncompatible, err)
 	}
 	return nil

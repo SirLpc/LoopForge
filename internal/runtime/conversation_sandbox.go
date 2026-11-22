@@ -22,9 +22,6 @@ func ConfigureConversationSandbox(ctx context.Context, sandbox Sandbox, root str
 	if err != nil {
 		return err
 	}
-	if s, ok := unwrapSandbox(sandbox).(*dockerSandbox); ok && s.requirements.WarmDockerVolume != nil && s.requirements.ConversationRoot != root {
-		return fmt.Errorf("warm conversations require their own qualified sandbox")
-	}
 	if err = os.MkdirAll(filepath.Join(root, "ws"), 0700); err != nil {
 		return err
 	}
@@ -176,13 +173,9 @@ func ensureConversationCLI(ctx context.Context, sandbox Sandbox, provider, home 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	target, err := s.conversationCLIContainer(ctx, home)
-	if err != nil {
-		return "", err
-	}
 	// Probe the actual execution user, including numeric Docker USER values.
 	// Root preparation must preserve that identity when the native CLI starts.
-	identity, err := exec.CommandContext(ctx, "docker", "exec", "--workdir", "/", target, "sh", "-c", "id -u; id -g").CombinedOutput()
+	identity, err := exec.CommandContext(ctx, "docker", "exec", "--workdir", "/", s.name, "sh", "-c", "id -u; id -g").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("读取工作区 CLI 用户失败: %w: %s", err, conversationSetupOutput(identity))
 	}
@@ -201,12 +194,12 @@ func ensureConversationCLI(ctx context.Context, sandbox Sandbox, provider, home 
 	if err != nil {
 		return "", err
 	}
-	setupArgs := append(append([]string{"exec", "--user", "0:0", "--workdir", "/"}, toolchain...), target, "sh", "-lc", setup, "loopforge-cli-setup", ids[0], ids[1], home)
+	setupArgs := append(append([]string{"exec", "--user", "0:0", "--workdir", "/"}, toolchain...), s.name, "sh", "-lc", setup, "loopforge-cli-setup", ids[0], ids[1], home)
 	output, err := exec.CommandContext(ctx, "docker", setupArgs...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("准备 %s 原生CLI失败（工作区镜像需支持 Node.js/npm 和 Python3）：%w: %s", provider, err, conversationSetupOutput(output))
 	}
-	checkArgs := append(append(append([]string{"exec", "--workdir", "/"}, toolchain...), target), withToolchainPath([]string{"python3", "-c", "import os,pwd; pwd.getpwuid(os.geteuid())"})...)
+	checkArgs := append(append(append([]string{"exec", "--workdir", "/"}, toolchain...), s.name), withToolchainPath([]string{"python3", "-c", "import os,pwd; pwd.getpwuid(os.geteuid())"})...)
 	if check, err := exec.CommandContext(ctx, "docker", checkArgs...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("验证工作区 CLI 用户失败: %w: %s", err, conversationSetupOutput(check))
 	}

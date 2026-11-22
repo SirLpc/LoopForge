@@ -16,7 +16,7 @@ import (
 var errWarmDockerUnavailable = errors.New("warm workspace requires a pinned local Docker endpoint")
 
 func (d *Daemon) warmDockerUnavailable() bool {
-	return d.cfg.WarmWorkspacePoolFile != "" && !d.cfg.WarmDockerEndpointPinned
+	return !d.cfg.WarmNative && d.cfg.WarmWorkspacePoolFile != "" && !d.cfg.WarmDockerEndpointPinned
 }
 
 // Run on startup and the normal runtime rescan, outside the heartbeat loop.
@@ -27,10 +27,15 @@ func (d *Daemon) refreshWarmHostVisibility(ctx context.Context) {
 	}
 	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	check := runtime.CheckWarmHostVisibility
-	if d.warmDockerDesktop != nil {
-		check = d.warmDockerDesktop.Ready
+	if d.cfg.WarmNative {
+		err := d.nativeWarmReady(probe)
+		d.warmHostVisible.Store(err == nil)
+		if err != nil {
+			log.Printf("warm slots withheld: %v", err)
+		}
+		return
 	}
+	check := runtime.CheckWarmHostVisibility
 	err := check(probe)
 	d.warmHostVisible.Store(err == nil)
 	if err != nil {
@@ -41,7 +46,7 @@ func (d *Daemon) refreshWarmHostVisibility(ctx context.Context) {
 // Only a configured, protocol-compatible process with a reachable Docker
 // daemon can advertise physical capacity. Admission still checks the sandbox.
 func (d *Daemon) warmWorkspaceInventory(dockerReady func() bool) []domain.WarmWorkspaceSlot {
-	if d.warmWorkspacePool == nil || d.warmDockerUnavailable() || !d.client.warmProtocol || !d.warmHostVisible.Load() || !dockerReady() {
+	if d.warmWorkspacePool == nil || d.warmDockerUnavailable() || !d.client.warmProtocol || !d.warmHostVisible.Load() || (!d.cfg.WarmNative && !dockerReady()) {
 		return nil
 	}
 	return d.warmWorkspacePool.inventory()

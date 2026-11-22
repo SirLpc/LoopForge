@@ -3,24 +3,15 @@ package runtime
 import (
 	"context"
 	"strings"
-	"sync"
 
 	"agentflow/internal/domain"
 )
 
-// WarmDockerVolume identifies storage qualified locally by the runner. Root is
-// its mount in the runner, Backing is Docker's inspected volume mountpoint,
-// and Helper is the runner-provisioned executable inside Root.
-type WarmDockerVolume struct {
-	Name, Root, Backing, Helper string
-	browserParents              sync.Map // witnessed sidecar ID -> verified task ID, local to this Runner
-}
-
 // SandboxRequirements describes the host state and runtime features a provider
 // needs before a Run sandbox is created.
 type SandboxRequirements struct {
-	WarmDockerVolume *WarmDockerVolume `json:"-"`
-	GitCacheRoot     string            `json:",omitempty"`
+	NativeWarm   *NativeWarmIsolation `json:"-"`
+	GitCacheRoot string               `json:",omitempty"`
 	// GitObjectDirs come exclusively from the runner-local lease journal.
 	GitObjectDirs []string `json:",omitempty"`
 	// ConversationRoot is the private, persistent native CLI state directory.
