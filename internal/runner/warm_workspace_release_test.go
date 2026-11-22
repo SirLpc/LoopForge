@@ -37,40 +37,57 @@ func warmReturnFixture(t *testing.T) (warmPoolFixture, *warmWorkspacePool, domai
 	return f, p, l, g
 }
 
-func TestWarmWorkspaceReleaseWithCommittedCRLFAttribute(t *testing.T) {
+func TestWarmWorkspaceReleaseWithCommittedLineEndingAttributes(t *testing.T) {
 	for _, tc := range []struct {
-		name, content string
-		wantReturn    bool
+		name, attributes, committed, content string
+		wantReturn                           bool
 	}{
-		{name: "clean checkout", content: "@echo off\r\necho original\r\n", wantReturn: true},
-		{name: "uncommitted edit", content: "@echo off\r\necho edited\r\n"},
-		{name: "mixed line endings", content: "@echo off\r\necho original\n"},
+		{"clean CRLF checkout", "text eol=crlf", "original\nsecond line\n", "original\r\nsecond line\r\n", true},
+		{"mixed endings with CRLF policy", "text eol=crlf", "original\nsecond line\n", "original\r\nsecond line\n", true},
+		{"mixed endings with LF policy", "text eol=lf", "original\nsecond line\n", "original\r\nsecond line\n", true},
+		{"mixed endings with automatic text detection", "text=auto", "original\nsecond line\n", "original\r\nsecond line\n", true},
+		{"uncommitted edit", "text eol=lf", "original\nsecond line\n", "edited\r\nsecond line\n", false},
+		{"binary attribute", "-text eol=lf", "original\nsecond line\n", "original\r\nsecond line\n", false},
+		{"automatic detection of binary content", "text=auto", "original\x00\n", "original\x00\r\n", false},
+		{"different ident expansion", "text eol=lf ident", "$Id$\n", "$Id: other $\r\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, p, lease, g := warmReturnFixture(t)
-			warmGitWrite(t, g.checkout, ".gitattributes", "*.bat text eol=crlf\n")
-			warmGitWrite(t, g.checkout, "script.bat", "@echo off\r\necho original\r\n")
-			runGitT(t, g.checkout, "add", ".gitattributes", "script.bat")
-			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-qm", "batch file")
+			warmGitWrite(t, g.checkout, ".gitattributes", "file.txt "+tc.attributes+"\n")
+			warmGitWrite(t, g.checkout, "file.txt", tc.committed)
+			runGitT(t, g.checkout, "add", ".gitattributes", "file.txt")
+			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-qm", "tracked file")
 			runGitT(t, g.checkout, "push", "origin", "HEAD")
-			warmGitWrite(t, g.checkout, "script.bat", tc.content)
+			warmGitWrite(t, g.checkout, "file.txt", tc.content)
 
 			refs, err := p.proveReturn(t.Context(), lease, []domain.RunnerRepository{g.repo})
 			if !tc.wantReturn {
-				if err == nil || !strings.Contains(err.Error(), "commit or restore changes in script.bat") {
-					t.Fatalf("edited batch file did not block return: %v", err)
+				if err == nil || !strings.Contains(err.Error(), "changes in file.txt") {
+					t.Fatalf("changed file did not block return: %v", err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("clean CRLF checkout could not return: %v", err)
+				t.Fatalf("checkout with equivalent line endings could not return: %v", err)
 			}
 			if err := p.commitReturn(t.Context(), lease, refs); err != nil {
 				t.Fatal(err)
 			}
-			content, err := os.ReadFile(filepath.Join(p.slots["a"].Path, "script.bat"))
+			content, err := os.ReadFile(filepath.Join(p.slots["a"].Path, "file.txt"))
 			if err != nil || string(content) != tc.content {
 				t.Fatalf("returned file = %q, err = %v", content, err)
+			}
+			next := lease
+			next.OwnerRunID = "next-owner"
+			next.Generation++
+			if err := p.reserve(next); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.place(t.Context(), next, map[string]string{"a": "checkout"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.prepareLeaseCheckout(t.Context(), next, &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}}); err != nil {
+				t.Fatalf("the next lease could not use the returned checkout: %v", err)
 			}
 		})
 	}

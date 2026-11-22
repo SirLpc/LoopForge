@@ -421,14 +421,14 @@ func warmBlobMatches(ctx context.Context, stage, head string, lfs warmLFSManifes
 		return false
 	}
 	if n > 1024 {
-		return warmCheckoutBlobMatches(ctx, stage, head, rel, digest.Sum(nil))
+		return warmCheckoutBlobMatches(ctx, stage, head, path, rel, oid, digest.Sum(nil))
 	}
 	pointer, err := gitwork.C(ctx, stage, "cat-file", "blob", oid)
 	if err != nil {
 		return false
 	}
 	if !strings.HasPrefix(pointer, "version https://git-lfs.github.com/spec/v1\n") {
-		return matches || warmCheckoutBlobMatches(ctx, stage, head, rel, digest.Sum(nil))
+		return matches || warmCheckoutBlobMatches(ctx, stage, head, path, rel, oid, digest.Sum(nil))
 	}
 	var object string
 	var length int64
@@ -451,9 +451,9 @@ func restoreWarmProofFiles(ctx context.Context, stage, head string, paths ...str
 	return err
 }
 
-// Compare exact bytes reconstructed from the committed attributes in the
-// private proof checkout. Its Git config never comes from the writable checkout.
-func warmCheckoutBlobMatches(ctx context.Context, stage, head, rel string, actual []byte) bool {
+// Compare the reconstructed checkout bytes, then allow Git's text line-ending
+// normalization. Attributes and Git config come from the private proof checkout.
+func warmCheckoutBlobMatches(ctx context.Context, stage, head, actualPath, rel, oid string, actual []byte) bool {
 	if err := restoreWarmProofFiles(ctx, stage, head, rel); err != nil {
 		return false
 	}
@@ -467,8 +467,27 @@ func warmCheckoutBlobMatches(ctx context.Context, stage, head, rel string, actua
 	}
 	defer expected.Close()
 	h := sha256.New()
-	_, err = io.Copy(h, expected)
-	return err == nil && bytes.Equal(h.Sum(nil), actual)
+	if _, err = io.Copy(h, expected); err != nil {
+		return false
+	}
+	if bytes.Equal(h.Sum(nil), actual) {
+		return true
+	}
+
+	// Other check-in conversions can discard changes beyond line endings.
+	attributesFile := "core.attributesFile=" + os.DevNull
+	attrs, err := gitwork.C(ctx, stage, "-c", attributesFile, "check-attr", "-z", "filter", "ident", "working-tree-encoding", "--", rel)
+	fields := strings.Split(attrs, "\x00")
+	if err != nil || len(fields) != 10 {
+		return false
+	}
+	for _, value := range []string{fields[2], fields[5], fields[8]} {
+		if value != "unspecified" && value != "unset" {
+			return false
+		}
+	}
+	cleanOID, err := gitwork.C(ctx, stage, "-c", attributesFile, "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "hash-object", "--path="+rel, "--", actualPath)
+	return err == nil && cleanOID == oid
 }
 
 // Repeat destructive cleanup proof from the recorded commit after a crash.

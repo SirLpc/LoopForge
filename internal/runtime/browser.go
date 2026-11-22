@@ -243,7 +243,7 @@ func (s *dockerSandbox) ensureBrowser(ctx context.Context, runID string, sink Ev
 	if !dockerImageExists(ctx, image) && sink != nil {
 		sink(domain.TelemetryEvent{Category: "sandbox", Name: "browser.prepare", Phase: "start", Message: "首次准备 Agent 浏览器镜像（Chromium + Playwright MCP），可能需要几分钟"})
 	}
-	buildCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	buildCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	image, err = EnsureBrowserImage(buildCtx)
 	cancel()
 	if err != nil {
