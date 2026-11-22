@@ -14,7 +14,7 @@ import (
 )
 
 func nativeWarmGit(ctx context.Context, checkout string, args ...string) (string, error) {
-	return gitwork.C(ctx, checkout, append([]string{
+	return gitwork.CStdout(ctx, checkout, append([]string{
 		"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "filter.lfs.process=git-lfs filter-process --skip",
 		"-c", "filter.lfs.smudge=git-lfs smudge --skip -- %f",

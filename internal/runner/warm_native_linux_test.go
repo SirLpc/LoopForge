@@ -5,12 +5,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/runtime"
 )
+
+func TestWarmNativeRunnerAcceptsClaimResolvedDriver(t *testing.T) {
+	d := &Daemon{cfg: Config{WarmNative: true}}
+	for _, test := range []struct {
+		driver string
+		match  bool
+	}{
+		{domain.SandboxDriverNative, true},
+		{domain.SandboxDriverBwrap, true},
+		{domain.SandboxDriverDocker, false},
+		{domain.SandboxDriverSeatbelt, false},
+		{domain.SandboxDriverLocal, false},
+	} {
+		t.Run(test.driver, func(t *testing.T) {
+			spec := &domain.RunnerSandboxSpec{Profile: domain.SandboxProfile{Driver: test.driver}}
+			if got := d.matchesWarmSandbox(spec); got != test.match {
+				t.Fatalf("matchesWarmSandbox = %t, want %t", got, test.match)
+			}
+		})
+	}
+}
 
 func TestWarmNativePoolKeepsOriginalCheckout(t *testing.T) {
 	if os.Getenv("LOOPFORGE_TEST_NATIVE_MOUNTS") != "1" {
@@ -142,6 +164,47 @@ func TestWarmNativeCheckoutKeepsGitAndLibrary(t *testing.T) {
 	warmGitWrite(t, f.checkout, "new-code", "local edit")
 	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err == nil {
 		t.Fatal("accepted a modified source file")
+	}
+}
+
+func TestWarmNativeCheckoutDistinguishesGitStatusFromWarnings(t *testing.T) {
+	f := nativeWarmTestClone(t, newWarmGitFixture(t))
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	wrapper := `#!/bin/sh
+for arg do
+	if [ "$arg" = "status" ]; then
+		printf '%s\n' 'warning: untracked cache is disabled on this system or location' >&2
+		if [ "$FAIL_TEST_GIT_STATUS" = 1 ]; then
+			printf '%s\n' 'fatal: cannot read index' >&2
+			exit 128
+		fi
+		break
+	fi
+done
+exec ` + strconv.Quote(git) + ` "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prepare := func() error {
+		return prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil })
+	}
+	if err := prepare(); err != nil {
+		t.Fatalf("clean checkout with a Git warning: %v", err)
+	}
+	t.Setenv("FAIL_TEST_GIT_STATUS", "1")
+	if err := prepare(); err == nil || !strings.Contains(err.Error(), "fatal: cannot read index") {
+		t.Fatalf("failed Git status should preserve its diagnostic: %v", err)
+	}
+	t.Setenv("FAIL_TEST_GIT_STATUS", "0")
+	warmGitWrite(t, f.checkout, "local-edit", "keep me")
+	if err := prepare(); err == nil || !strings.Contains(err.Error(), "?? local-edit") {
+		t.Fatalf("dirty checkout with a Git warning should still be rejected: %v", err)
 	}
 }
 
@@ -311,8 +374,17 @@ func TestWarmNativeLeasePreparesAndReturnsOriginalRepository(t *testing.T) {
 	root := filepath.Join(f.workspace, "runs", lease.OwnerRunID, "workspace")
 	defer func() { _ = unmountNativeWarmDir(filepath.Join(root, repo.Dir)) }()
 	control(domain.RunnerWorkspaceOperationWarmCheckout)
-	requirements, _ := d.localTaskSandboxSpec(domain.RunnerTask{Sandbox: sandbox, WarmWorkspaceLease: lease})
-	sb, err := runtime.OpenRemoteSandbox(t.Context(), "native-checkout-run", root, sandbox.Profile, requirements, runtime.SandboxResources{})
+	claimedSandbox := *sandbox
+	claimedSandbox.Profile.Driver = domain.SandboxDriverBwrap
+	task := domain.RunnerTask{
+		RunID: lease.OwnerRunID, RunnerID: lease.RunnerID, Workspace: "runs/run-one/workspace",
+		Command: "true", Sandbox: &claimedSandbox, WarmWorkspaceLease: lease,
+	}
+	if err := d.checkWarmTask(t.Context(), task); err != nil {
+		t.Fatalf("claimed warm task: %v", err)
+	}
+	requirements, _ := d.localTaskSandboxSpec(task)
+	sb, err := runtime.OpenRemoteSandbox(t.Context(), "native-checkout-run", root, claimedSandbox.Profile, requirements, runtime.SandboxResources{})
 	if err != nil {
 		t.Fatal(err)
 	}

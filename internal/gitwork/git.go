@@ -14,6 +14,10 @@ import (
 // Run executes git with the context's host-scoped credential helper or SSH
 // key. Output is trimmed and redacted; on failure it is part of the error.
 func Run(ctx context.Context, workspace string, args ...string) (string, error) {
+	return run(ctx, workspace, false, args)
+}
+
+func run(ctx context.Context, workspace string, stdoutOnly bool, args []string) (string, error) {
 	token := TokenFrom(ctx)
 	sshEnv, cleanup, err := sshCommandEnvironment(ctx, args)
 	if err != nil {
@@ -29,7 +33,15 @@ func Run(ctx context.Context, workspace string, args ...string) (string, error) 
 	if home != "" {
 		cmd.Env = WithEnvValue(cmd.Env, "HOME", home)
 	}
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	if stdoutOnly {
+		out, err = cmd.Output()
+		if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) > 0 {
+			out = append(append(out, '\n'), exit.Stderr...)
+		}
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 	text := redactContextGitSecrets(ctx, Redact(strings.TrimSpace(string(out)), token))
 	if err != nil {
 		if text != "" {
@@ -113,6 +125,11 @@ func command(ctx context.Context, workspace string, sshEnv map[string]string, ar
 // C runs `git -C workspace args...`.
 func C(ctx context.Context, workspace string, args ...string) (string, error) {
 	return Run(ctx, workspace, append([]string{"-C", workspace}, args...)...)
+}
+
+// CStdout returns only standard output on success. Failures include Git's diagnostics.
+func CStdout(ctx context.Context, workspace string, args ...string) (string, error) {
+	return run(ctx, workspace, true, append([]string{"-C", workspace}, args...))
 }
 
 // RevParse resolves ref to a commit SHA.

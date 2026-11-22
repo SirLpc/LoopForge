@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 
 	"agentflow/internal/domain"
@@ -43,7 +44,9 @@ func (d *Daemon) matchesWarmSandbox(sandbox *domain.RunnerSandboxSpec) bool {
 		return false
 	}
 	if d.cfg.WarmNative {
-		return sandbox.Profile.Driver == domain.SandboxDriverNative
+		// The task claim API can resolve native to bwrap before dispatch.
+		return sandbox.Profile.Driver == domain.SandboxDriverNative ||
+			goruntime.GOOS == "linux" && sandbox.Profile.Driver == domain.SandboxDriverBwrap
 	}
 	return sandbox.Profile.Driver == domain.SandboxDriverDocker
 }
