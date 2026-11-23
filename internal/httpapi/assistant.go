@@ -184,6 +184,14 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
+	sink, _ := c.Request.Context().Value(assistantGenerationSinkKey{}).(func(string, any))
+	if sink == nil && exists && !shared {
+		if !directAssistantTranscriptPrefix(old.Messages, req.Messages) {
+			c.JSON(409, gin.H{"error": "会话已更新，请重新打开后发送"})
+			return
+		}
+		copy(req.Messages, old.Messages)
+	}
 	if shared {
 		if exists {
 			if !sharedTranscriptPrefix(old.Messages, req.Messages) {
@@ -235,7 +243,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		c.JSON(409, gin.H{"error": refusal})
 		return
 	}
-	sink, _ := c.Request.Context().Value(assistantGenerationSinkKey{}).(func(string, any))
 	if sink == nil {
 		if job, ok := h.readGeneration(ownerID, req.SessionID); ok && job.Status == "running" {
 			c.JSON(409, gin.H{"error": "此会话正在后台生成"})
@@ -278,22 +285,27 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 	modelCtx, cancelModel := context.WithCancel(ctx)
 	defer cancelModel()
 	chatCompleted := false
+	var directRecorder *assistantGenerationRecorder
 	if sink == nil {
 		var parked *warmConversationHandoff
 		ctx = context.WithValue(ctx, warmGenerationHandoffKey{}, &parked)
 		pending := savedConversation
 		pending.Messages = req.Messages
+		if pending.IssueID == "" {
+			pending.IssueID = req.linkedIssueID
+		}
 		pending.Model, pending.Effort, pending.Executor = req.Model, req.Effort, req.Executor
 		if pending.Title == "" {
 			pending.Title = truncateRunes(req.Messages[0].Content, 36)
 		}
-		job, diagnostics, finish, err := h.claimDirectGeneration(ctx, req, ownerID, user, pending, cancelModel)
+		job, recorder, finish, err := h.claimDirectGeneration(ctx, req, ownerID, user, pending, cancelModel)
 		if err != nil {
 			c.JSON(409, gin.H{"error": err.Error()})
 			return
 		}
 		defer func() { finish(chatCompleted) }()
-		modelCtx = context.WithValue(modelCtx, assistantDiagnosticsKey{}, diagnostics)
+		directRecorder = recorder
+		modelCtx = context.WithValue(modelCtx, assistantDiagnosticsKey{}, recorder.diagnostics)
 		modelCtx = context.WithValue(modelCtx, assistantControlScopeKey{}, assistantControlScope{RunID: req.RunID, SessionID: req.SessionID, GenerationID: job.ID, MessageIndex: len(req.Messages) - 1})
 	}
 	var toolSession *AgentToolSession
@@ -408,6 +420,13 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			emit = sink
 		}
 		forward := emit
+		emitToClient := emit
+		if directRecorder != nil {
+			forward = func(kind string, value any) {
+				directRecorder.sink(kind, value)
+				emitToClient(kind, value)
+			}
+		}
 		var secretStream assistantSecretStream
 		publish := func(events []assistantStreamEvent) {
 			for _, event := range events {

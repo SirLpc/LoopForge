@@ -28,11 +28,12 @@ func (h *assistantHandlers) deleteConversation(userID int64, id string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
 	}
-	if conv.End != nil && conv.End.State == domain.AssistantSessionEnding &&
-		(conv.End.Deadline == nil || time.Now().Before(*conv.End.Deadline)) {
+	if remaining, err := h.repo.AssistantSessionEndRemaining(conv.End); err != nil {
+		return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
+	} else if remaining > 0 {
 		return repo.ErrAssistantSessionEnding
 	}
-	leases, err := h.returnConversationWarmWorkspaces(context.Background(), conv, time.Time{})
+	leases, err := h.returnConversationWarmWorkspaces(context.Background(), conv, time.Time{}, nil)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errWarmConversationRetained, err)
 	}
@@ -45,7 +46,7 @@ func (h *assistantHandlers) deleteConversation(userID int64, id string) error {
 	return nil
 }
 
-func (h *assistantHandlers) returnConversationWarmWorkspaces(ctx context.Context, conv domain.AssistantSession, drainUntil time.Time) (map[string]*domain.WarmWorkspaceLease, error) {
+func (h *assistantHandlers) returnConversationWarmWorkspaces(ctx context.Context, conv domain.AssistantSession, drainUntil time.Time, checkAttempt func() error) (map[string]*domain.WarmWorkspaceLease, error) {
 	leases := map[string]*domain.WarmWorkspaceLease{}
 	for _, runID := range ownWorkspaceRunIDs(conv) {
 		if err := ctx.Err(); err != nil {
@@ -67,21 +68,29 @@ func (h *assistantHandlers) returnConversationWarmWorkspaces(ctx context.Context
 		if err != nil {
 			return nil, err
 		}
-		if found {
-			leases[runID] = &l
-		} else {
+		if !found {
 			leases[runID] = nil
+			continue
 		}
-		if err := h.returnWarmWorkspace(ctx, run, drainUntil); err != nil {
+		leases[runID] = &l
+		if err := h.returnWarmWorkspace(ctx, run, l, drainUntil, checkAttempt); err != nil {
 			return nil, err
 		}
 	}
 	return leases, nil
 }
 
-func (h *assistantHandlers) returnWarmWorkspace(ctx context.Context, run domain.Run, drainUntil time.Time) error {
+func (h *assistantHandlers) returnWarmWorkspace(ctx context.Context, run domain.Run, lease domain.WarmWorkspaceLease, drainUntil time.Time, checkAttempt func() error) error {
 	for {
-		err := h.engine.ReleaseWarmWorkspace(ctx, run, 0)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if checkAttempt != nil {
+			if err := checkAttempt(); err != nil {
+				return err
+			}
+		}
+		err := h.engine.ReleaseWarmWorkspace(ctx, run, 0, lease)
 		if !errors.Is(err, repo.ErrWorkspaceInUse) || !time.Now().Before(drainUntil) {
 			return err
 		}

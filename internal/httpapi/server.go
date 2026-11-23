@@ -649,7 +649,11 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.GET("/deploy/agentflow-gate-mcp", serveGateMCPBinary)
 	mcpHandler := mcpserver.New(mcpserver.LocalInvoker{Handler: g}).HTTPHandler()
 	g.Any("/mcp", func(c *gin.Context) {
-		ctx := withConversationSession(c.Request.Context(), c.GetHeader(chatSessionHeader))
+		sessionID := strings.TrimSpace(c.GetHeader(chatSessionHeader))
+		if c.Request.Method == http.MethodPost && sessionID != "" && !asst.admitChatOperation(c, sessionID) {
+			return
+		}
+		ctx := withConversationSession(c.Request.Context(), sessionID)
 		mcpHandler.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
 	})
 	g.POST("/internal/workspace-checkpoint", func(c *gin.Context) { e.HandleWorkspaceCheckpoint(c.Writer, c.Request) })

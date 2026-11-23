@@ -3,17 +3,24 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/engine"
 	"agentflow/internal/gitwork"
 	"agentflow/internal/repo"
+	"agentflow/internal/runtime"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func requestChatEnd(t *testing.T, h *assistantHandlers, user domain.User, id string, status int) domain.AssistantSession {
@@ -223,5 +230,99 @@ func TestAssistantSessionEndRetainsOnReturnFailure(t *testing.T) {
 	waitForChatEnd(t, h, g, "ended")
 	if len(requests) != 2 || <-requests != second.ID || <-requests != second.ID {
 		t.Fatal("retry checked more than the remaining owner")
+	}
+}
+
+func TestEndedChatRejectsConfirmedMCPWrite(t *testing.T) {
+	h, user := workbenchFixture(t)
+	const id = "ended-confirmation"
+	if err := h.repo.PutAssistantSession(user.ID, domain.AssistantSession{ID: id, ProjectID: "workbench"}); err != nil {
+		t.Fatal(err)
+	}
+	requestChatEnd(t, h, user, id, 202)
+	waitForChatEnd(t, h, domain.AssistantGeneration{SessionID: id, UserID: user.ID}, "ended")
+	router := New(h.repo, engine.New(h.repo, runtime.NewManager(t.TempDir())), nil, "", "")
+	const operation = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"issues_save","arguments":{"body":{"projectId":"workbench","title":"confirmed MCP write"}}}}`
+	for _, scoped := range []bool{true, false} {
+		req := httptest.NewRequest("POST", "/mcp", strings.NewReader(operation))
+		req = req.WithContext(context.WithValue(req.Context(), requestUserContextKey{}, domainUserToAuth(user)))
+		req.Header.Set("Content-Type", "application/json")
+		if scoped {
+			req.Header.Set(chatSessionHeader, id)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if scoped && w.Code != 409 || !scoped && (w.Code != 200 || !strings.Contains(w.Body.String(), "confirmed MCP write")) {
+			t.Fatalf("scoped=%v: %d %s", scoped, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestEndMaterializesLegacyMediaInStoredHistory(t *testing.T) {
+	h, user := workbenchFixture(t)
+	const id = "ended-legacy-media"
+	dir := filepath.Join(assistantCLIWorkspaceForUser(user.ID), "generated-images")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	png, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lWQAAAAASUVORK5CYII=")
+	if err := os.WriteFile(filepath.Join(dir, "legacy.png"), png, 0600); err != nil {
+		t.Fatal(err)
+	}
+	session := domain.AssistantSession{ID: id, Messages: []domain.AssistantMessage{{Role: "assistant",
+		Content: `{"message":"图已保存 /tmp/generated-images/legacy.png","drafts":[]}`, CreatedAt: time.Now()}}}
+	if err := h.repo.PutAssistantSession(user.ID, session); err != nil {
+		t.Fatal(err)
+	}
+	requestChatEnd(t, h, user, id, 202)
+	ended := waitForChatEnd(t, h, domain.AssistantGeneration{SessionID: id, UserID: user.ID}, "ended")
+	if len(ended.Messages[0].Attachments) != 1 {
+		t.Fatalf("legacy attachment was not frozen: %+v", ended.Messages[0])
+	}
+	for range 2 {
+		c, w := workbenchContext(user, "GET", "/api/assistant/sessions/"+id, bytes.NewBuffer(nil))
+		c.Params = gin.Params{{Key: "id", Value: id}}
+		h.session(c)
+		var read domain.AssistantSession
+		if err := json.Unmarshal(w.Body.Bytes(), &read); err != nil ||
+			len(read.Messages[0].Attachments) != 1 || read.Messages[0].Attachments[0].ID != ended.Messages[0].Attachments[0].ID {
+			t.Fatalf("GET changed attachment identity: %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestEndRetriesWhenInterruptedReplyCannotBeSaved(t *testing.T) {
+	h, user := workbenchFixture(t)
+	const id = "end-interrupted"
+	generation := domain.AssistantGeneration{ID: "interrupted", UserID: user.ID, SessionID: id,
+		Status: "running", MessageCount: 1, Stream: &domain.AssistantStreamSnapshot{Answer: "恢复中的片段"}}
+	pending := domain.AssistantSession{ID: id, Messages: []domain.AssistantMessage{{Role: "user", Content: "检查项目"}}}
+	if err := h.repo.BeginAssistantGeneration(generation, pending); err != nil {
+		t.Fatal(err)
+	}
+	generation.Status = "interrupted"
+	if err := h.repo.CheckpointAssistantGeneration(generation); err != nil {
+		t.Fatal(err)
+	}
+	var interruptedOnce atomic.Bool
+	const hook = "test:end-interrupted-reply"
+	if err := h.repo.DB.Callback().Create().Before("gorm:create").Register(hook, func(tx *gorm.DB) {
+		if tx.Statement.Table == "assistant_sessions" && interruptedOnce.CompareAndSwap(false, true) {
+			tx.AddError(errors.New("partial reply write interrupted"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer h.repo.DB.Callback().Create().Remove(hook)
+
+	requestChatEnd(t, h, user, id, 202)
+	failed := waitForChatEnd(t, h, generation, "failed")
+	if !strings.Contains(failed.End.Error, "partial reply write interrupted") {
+		t.Fatalf("the failed history save was not reported: %+v", failed.End)
+	}
+	requestChatEnd(t, h, user, id, 202)
+	ended := waitForChatEnd(t, h, generation, "ended")
+	if len(ended.Messages) != 2 || !strings.Contains(ended.Messages[1].Content, "恢复中的片段") {
+		t.Fatalf("retry lost interrupted reply: %+v", ended.Messages)
 	}
 }

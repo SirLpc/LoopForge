@@ -1,16 +1,16 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-const state = vi.hoisted(() => ({ transcript: [], generation: null, generationGate: null, preferences: {}, end: null }));
+const state = vi.hoisted(() => ({ transcript: [], generation: null, generationGate: null, preferences: {}, end: null, usersReply: null }));
 const { apiMock, writeMock } = vi.hoisted(() => {
   const apiMock = vi.fn(async (path) => {
     if (path === "/api/auth/current")
       return { user: { id: 1, loginName: "tester", codeBuddyApiKeyConfigured: true } };
     if (path === "/api/projects") return [{ id: "p1", name: "项目一", ownerId: 1, members: [1] }];
     if (path === "/api/assistant/models")
-      return { default: "m1", sponsoredModel: "m1", models: [{ id: "m1", name: "模型一" }] };
+      return { default: "m1", sponsoredModel: state.usersReply ? undefined : "m1", models: [{ id: "m1", name: "模型一" }] };
     if (path === "/api/assistant/preferences") return structuredClone(state.preferences);
-    if (path === "/api/users") return [{ id: 1, loginName: "tester", codeBuddyApiKeyConfigured: true }];
+    if (path === "/api/users") return state.usersReply ? state.usersReply() : [{ id: 1, loginName: "tester", codeBuddyApiKeyConfigured: true }];
     if (path === "/api/assistant/sessions") return [];
     if (path.startsWith("/api/assistant/sessions/s2")) {
       if (path.includes("/generation")) throw Object.assign(new Error("not found"), { status: 404 });
@@ -94,6 +94,7 @@ describe("sending while a reply runs", () => {
     state.generationGate = null;
     state.preferences = {};
     state.end = null;
+    state.usersReply = null;
     globalThis.EventSource = FakeEventSource;
   });
   afterEach(() => {
@@ -163,6 +164,19 @@ describe("sending while a reply runs", () => {
     unmount();
   });
 
+  test("a return already failed in another tab holds the local queue", async () => {
+    const { result, unmount } = await openRunning();
+    await act(async () => { await result.current.send({ text: "等我确认再发送" }); });
+    state.end = { state: "failed", attemptId: "remote-attempt", error: "请关闭终端" };
+    await finish("cancelled");
+    await waitFor(() => expect(result.current.session?.end?.state).toBe("failed"));
+    expect(result.current.queueHeld).toBe(true);
+    expect(generationPosts()).toHaveLength(0);
+    act(() => result.current.resumeQueue());
+    await waitFor(() => expect(generationPosts()).toHaveLength(1));
+    unmount();
+  });
+
   test("a late end response leaves the newly selected conversation usable", async () => {
     const { result, unmount } = await openRunning();
     let respond;
@@ -177,6 +191,22 @@ describe("sending while a reply runs", () => {
     });
     expect(result.current.session?.id).toBe("s2");
     expect(result.current.readOnly).toBe(false);
+    unmount();
+  });
+
+  test("a queued send awaiting credentials keeps its original conversation", async () => {
+    state.usersReply = () => [{ id: 1, loginName: "tester" }];
+    const { result, unmount } = await openRunning();
+    await act(async () => { await result.current.send({ text: "只属于第一条会话" }); });
+    let resolveCredentials;
+    state.usersReply = () => new Promise((resolve) => { resolveCredentials = resolve; });
+    await finish("completed");
+    await waitFor(() => expect(resolveCredentials).toBeTypeOf("function"));
+    act(() => result.current.open("s2"));
+    await waitFor(() => expect(result.current.session?.id).toBe("s2"));
+    await act(async () => { resolveCredentials([{ id: 1, codeBuddyApiKeyConfigured: true }]); });
+    expect(generationPosts()).toHaveLength(0);
+    expect(result.current.session?.id).toBe("s2");
     unmount();
   });
 

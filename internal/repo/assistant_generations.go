@@ -354,6 +354,9 @@ func (r *AssistantRepo) SteerAssistantGeneration(userID int64, sessionID, id str
 		if payload.SteeringClosed {
 			return errAssistantGenerationEnded
 		}
+		if payload.Direct {
+			return errors.New("同步回复可以停止，停止后可继续发送")
+		}
 		if err := cancelPendingWarmWorkspace(tx, payload); err != nil {
 			return err
 		}

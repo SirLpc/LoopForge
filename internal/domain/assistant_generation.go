@@ -9,6 +9,7 @@ import (
 type AssistantGeneration struct {
 	// Projected from the durable queue, independent of the bounded activity tail.
 	WarmWorkspaceWaiting bool `json:"warmWorkspaceWaiting,omitempty"`
+	Direct               bool `json:"direct,omitempty"`
 
 	StartedAt        time.Time                  `json:"startedAt,omitempty"`
 	Trigger          string                     `json:"trigger,omitempty"`

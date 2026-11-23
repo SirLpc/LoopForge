@@ -254,7 +254,10 @@ func TestCommitTurnTranscriptKeepsSameSteerOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			generation := domain.AssistantGeneration{ID: "interrupted-turn", SessionID: session.ID, UserID: user.ID,
-				Stream: &domain.AssistantStreamSnapshot{Answer: "partial reply"}}
+				Status: "running", Stream: &domain.AssistantStreamSnapshot{Answer: "partial reply"}}
+			if err := h.repo.BeginAssistantGeneration(generation); err != nil {
+				t.Fatal(err)
+			}
 			steer := &domain.AssistantSteer{Content: "continue", TriggerID: tc.id}
 			for range 2 {
 				if err := h.commitTurnTranscript(generation, steer, false); err != nil {

@@ -106,6 +106,7 @@ function sessionWritesBlocked(session) {
 export function useChat() {
   const stopRequestRef = useRef(null);
   const endRequests = useRef(new Set());
+  const heldEndFailures = useRef(new Map());
   const [pendingEnds, setPendingEnds] = useState(() => new Set());
   const [user, setUser] = useState(null),
     [projects, setProjects] = useState([]),
@@ -193,7 +194,7 @@ export function useChat() {
     setSessions(rows || []);
     const current = sessionRef.current;
     const row = (rows || []).find((item) => item.id === current?.id);
-    if (row?.end && (row.end.state !== current.end?.state || row.end.error !== current.end?.error)) {
+    if (row?.end && (row.end.state !== current.end?.state || row.end.attemptId !== current.end?.attemptId || row.end.error !== current.end?.error)) {
       const stored = await api(sessionPath(row.id)).catch(() => null);
       if (stored && currentId.current === row.id) setSession(stored);
       return;
@@ -822,6 +823,15 @@ export function useChat() {
   });
   useEffect(() => {
     const id = activeId;
+    const end = sessionRef.current?.id === id ? sessionRef.current?.end : null;
+    if (end?.state === "failed") {
+      const key = end.attemptId || end.error || "failed";
+      if (heldEndFailures.current.get(id) !== key) {
+        heldEndFailures.current.set(id, key);
+        setQueues((old) => holdQueue(old, id, true));
+        return;
+      }
+    }
     const next = nextQueued(queues, id);
     if (!next || writesBlocked(id) || dispatchingRef.current || submittingRef.current) return;
     if (steeringRef.current) return;
@@ -924,7 +934,11 @@ export function useChat() {
     messagesOverride = null,
     fromQueue = false,
   }) {
-    if (writesBlocked(currentId.current) || (!text.trim() && !attachments.length)) return false;
+    const originId = currentId.current;
+    const originProject = projectRef.current;
+    if (writesBlocked(originId) || (!text.trim() && !attachments.length)) return false;
+    const stillSelected = () => currentId.current === originId &&
+      projectRef.current === originProject && !writesBlocked(originId);
     const approval = fromQueue
       ? queuedApproval({ approvalMode, approvalUserId }, user?.id)
       : { approvalMode, approvalUserId: user?.id };
@@ -975,6 +989,7 @@ export function useChat() {
       !user.isGuest
     ) {
       const rows = await api("/api/users").catch(() => null);
+      if (!stillSelected()) return false;
       if (rows) setUsers(rows);
       const fresh = rows?.find((u) => u.id === user.id);
       if (fresh && !fresh.codeBuddyApiKeyConfigured) {
@@ -1008,6 +1023,7 @@ export function useChat() {
           },
           "PUT",
         );
+        if (!stillSelected()) return false;
         setSession(s);
         currentId.current = id;
         setActiveId(id);
@@ -1129,7 +1145,7 @@ export function useChat() {
     endRequests.current.add(id);
     setPendingEnds(new Set(endRequests.current));
     setQueues((old) => holdQueue(old, id, true));
-    setError("");
+    if (currentId.current === id) setError("");
     try {
       const stored = await write(`${sessionPath(id)}/end`, {});
       setSessions((rows) => rows.map((row) => row.id === id ? { ...row, end: stored.end } : row));
@@ -1218,6 +1234,10 @@ export function useChat() {
     let executed = false;
     try {
       let stored = await api(sessionPath(id));
+      if (sessionWritesBlocked(stored)) {
+        if (currentId.current === id) setSession(stored);
+        throw Error("会话正在结束或已结束，无法确认这项操作。");
+      }
       let reply = JSON.parse(stored.messages[messageIndex].content);
       let draft = reply.drafts[draftIndex];
       if (draft.saved || draft.inherited) return null;

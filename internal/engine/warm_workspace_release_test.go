@@ -2,6 +2,7 @@ package engine
 
 import (
 	"agentflow/internal/domain"
+	"agentflow/internal/repo"
 	"context"
 	"encoding/json"
 	"errors"
@@ -483,5 +484,25 @@ func TestWarmNativeReleaseCommitCarriesOnlyReceiptArtifacts(t *testing.T) {
 	}
 	if err := e.ReleaseWarmWorkspace(t.Context(), run, 1); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWarmWorkspaceReleaseRejectsChangedObservedEpoch(t *testing.T) {
+	e, run := warmSOPWithReadySlot(t, "waiting")
+	lease, _, ok, err := e.repo.WarmWorkspaceAllocation(run.ID)
+	if err != nil || !ok {
+		t.Fatalf("warm allocation: %v", err)
+	}
+	stale := lease
+	stale.Epoch++
+	e.WorkspaceCheckpointTransport = func(context.Context, domain.Run, domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		t.Error("stale request reached Runner")
+		return domain.RunnerWorkspaceResponse{}, nil
+	}
+	if err := e.ReleaseWarmWorkspace(t.Context(), run, 1, stale); !errors.Is(err, repo.ErrConversationWorkspaceChanged) {
+		t.Fatalf("unexpected stale return result: %v", err)
+	}
+	if state, _ := e.WarmWorkspaceStatus(run.ID); state != domain.WarmWorkspaceReady {
+		t.Fatalf("stale operation changed allocation state: %s", state)
 	}
 }

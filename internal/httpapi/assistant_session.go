@@ -83,7 +83,7 @@ func (h *assistantHandlers) listSessions(c *gin.Context) {
 	}
 	statuses := h.repo.AssistantGenerationStatuses(current.ID, ids)
 	for i := range out {
-		out[i] = assistantSessionEndView(out[i])
+		out[i] = h.assistantSessionEndView(out[i])
 		out[i].GenerationStatus = "idle"
 		out[i].GenerationID = ""
 		out[i].Unread = false
@@ -265,10 +265,10 @@ func (h *assistantHandlers) session(c *gin.Context) {
 		}
 		if readOnly {
 			project, _ := h.repo.Project(item.ProjectID)
-			c.JSON(200, readOnlyConversation{AssistantSession: assistantSessionEndView(item), ReadOnly: true, ProjectName: project.Name})
+			c.JSON(200, readOnlyConversation{AssistantSession: h.assistantSessionEndView(item), ReadOnly: true, ProjectName: project.Name})
 			return
 		}
-		if !item.Shared && !readOnly {
+		if !item.Shared && (item.End == nil || item.End.State == domain.AssistantSessionEndFailed) {
 			if job, ok := h.readGeneration(ownerID, id); !ok || job.Status != "running" {
 				if materializeWorkspaceImages(ownerID, &item) {
 					if err := saveAssistantConversation(h.repo, ownerID, item); err == nil {
@@ -284,7 +284,7 @@ func (h *assistantHandlers) session(c *gin.Context) {
 				item.IssueID = run.ExecutionContext.IssueID
 			}
 		}
-		c.JSON(200, decorateRunSessionView(h.repo, assistantSessionEndView(item)))
+		c.JSON(200, decorateRunSessionView(h.repo, h.assistantSessionEndView(item)))
 	case "PUT":
 		if job, ok := h.readGeneration(ownerID, id); ok && job.Status == "running" {
 			c.JSON(409, gin.H{"error": "生成期间不能改写会话"})

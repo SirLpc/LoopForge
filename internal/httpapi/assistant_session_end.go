@@ -56,23 +56,11 @@ func (h *assistantHandlers) endSession(c *gin.Context) {
 		}()
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(status, assistantSessionEndView(session))
+	c.JSON(status, h.assistantSessionEndView(session))
 }
 
 func (h *assistantHandlers) completeSessionEnd(ctx context.Context, session domain.AssistantSession) {
-	ctx, stop := context.WithDeadline(ctx, *session.End.Deadline)
-	defer stop()
-	drainUntil := time.Now().Add(assistantEndDrainBudget)
-	drainCtx, stopDrain := context.WithDeadline(ctx, drainUntil)
-	settled, err := h.waitForSessionEndDrain(drainCtx, session)
-	stopDrain()
-	if err == nil {
-		var leases map[string]*domain.WarmWorkspaceLease
-		leases, err = h.returnConversationWarmWorkspaces(ctx, settled, drainUntil)
-		if err == nil {
-			err = h.repo.FinishAssistantSessionEnd(settled, leases, "")
-		}
-	}
+	err := h.finalizeSessionEnd(ctx, session)
 	if err == nil || errors.Is(err, repo.ErrAssistantSessionEndChanged) {
 		return
 	}
@@ -85,18 +73,66 @@ func (h *assistantHandlers) completeSessionEnd(ctx context.Context, session doma
 	}
 }
 
+func (h *assistantHandlers) finalizeSessionEnd(ctx context.Context, session domain.AssistantSession) error {
+	remaining, err := h.repo.AssistantSessionEndRemaining(session.End)
+	if err != nil {
+		return err
+	}
+	if remaining <= 0 {
+		return repo.ErrAssistantSessionEndChanged
+	}
+	ctx, stop := context.WithTimeout(ctx, remaining)
+	defer stop()
+	drainUntil := time.Now().Add(assistantEndDrainBudget)
+	drainCtx, stopDrain := context.WithDeadline(ctx, drainUntil)
+	settled, err := h.waitForSessionEndDrain(drainCtx, session)
+	stopDrain()
+	if err != nil {
+		return err
+	}
+	checkAttempt := func() error {
+		_, _, err := h.repo.AssistantSessionEndReady(session.UserID, session.ID, session.End.AttemptID)
+		return err
+	}
+	leases, err := h.returnConversationWarmWorkspaces(ctx, settled, drainUntil, checkAttempt)
+	if err != nil {
+		return err
+	}
+	if err := checkAttempt(); err != nil {
+		return err
+	}
+	// Legacy replies may still refer to files kept in the assistant's local
+	// workspace. Persist their attachment IDs before making reads immutable.
+	materialized := settled
+	materialized.Messages = append([]domain.AssistantMessage(nil), settled.Messages...)
+	if materializeWorkspaceImages(settled.UserID, &materialized) {
+		return h.repo.FinishAssistantSessionEnd(settled, leases, "", materialized.Messages)
+	}
+	return h.repo.FinishAssistantSessionEnd(settled, leases, "")
+}
+
 func (h *assistantHandlers) waitForSessionEndDrain(ctx context.Context, session domain.AssistantSession) (domain.AssistantSession, error) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		// This also reaps stale generations and saves their partial replies.
-		g, _ := h.currentGeneration(session.UserID, session.ID)
-		settled, ready, err := h.repo.AssistantSessionEndReady(session.UserID, session.ID, session.End.AttemptID)
+		// Allow the existing stale-turn recovery to reap the process, then
+		// inspect the authoritative generation under this attempt.
+		h.readGeneration(session.UserID, session.ID)
+		settled, g, err := h.repo.AssistantSessionEndReady(session.UserID, session.ID, session.End.AttemptID)
 		if err != nil {
 			return settled, err
 		}
 		_, admitting := h.warmAdmissions.Load(g.ID)
-		if ready && !generationExecutingHere(g.ID) && !admitting {
+		if g.Status != "running" && !generationExecutingHere(g.ID) && !admitting {
+			if g.Status == "interrupted" {
+				appended, err := h.persistInterruptedReply(settled, g)
+				if err != nil {
+					return settled, err
+				}
+				if appended {
+					return h.repo.AssistantSessionForDeletion(session.UserID, session.ID)
+				}
+			}
 			return settled, nil
 		}
 		select {
@@ -107,15 +143,40 @@ func (h *assistantHandlers) waitForSessionEndDrain(ctx context.Context, session 
 	}
 }
 
-func assistantSessionEndView(session domain.AssistantSession) domain.AssistantSession {
-	if session.End == nil {
-		return session
+func (h *assistantHandlers) assistantSessionEndView(session domain.AssistantSession) domain.AssistantSession {
+	if session.End != nil && session.End.State == domain.AssistantSessionEnding {
+		remaining, err := h.repo.AssistantSessionEndRemaining(session.End)
+		if err == nil && remaining <= 0 {
+			session.End = &domain.AssistantSessionEnd{State: domain.AssistantSessionEndFailed,
+				AttemptID: session.End.AttemptID, Error: "结束会话超时，请重试"}
+		}
 	}
-	end := *session.End
-	end.AttemptID = ""
-	if end.State == domain.AssistantSessionEnding && end.Deadline != nil && !time.Now().Before(*end.Deadline) {
-		end = domain.AssistantSessionEnd{State: domain.AssistantSessionEndFailed, Error: "结束会话超时，请重试"}
-	}
-	session.End = &end
 	return session
+}
+
+// Browser-confirmed operations carry their originating chat in a header.
+// Admit them before MCP dispatch so a stale page cannot execute an old draft.
+func (h *assistantHandlers) admitChatOperation(c *gin.Context, id string) bool {
+	user, ok := h.requestUser(c.Request, true)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
+		return false
+	}
+	ownerID, _, err := h.conversationScope(c, id, "", "", user.ID)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return false
+	}
+	err = h.repo.AssistantSessionWriteAccess(ownerID, id)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, repo.ErrAssistantSessionEnding), errors.Is(err, repo.ErrAssistantSessionEnded):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取会话状态"})
+	}
+	return false
 }

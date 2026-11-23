@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"agentflow/internal/domain"
@@ -55,20 +54,23 @@ func turnTranscriptMessage(g domain.AssistantGeneration, model string, stopped b
 // keepInterruptedReply appends an interrupted turn at most once, and only while
 // the transcript still ends at the question that turn was answering.
 func (h *assistantHandlers) keepInterruptedReply(g domain.AssistantGeneration) {
-	if g.MessageCount <= 0 || len(g.Reply) > 0 {
-		return
-	}
 	session, ok := h.repo.AssistantSession(g.UserID, g.SessionID)
-	if !ok || len(session.Messages) != g.MessageCount {
-		return
+	if ok {
+		if _, err := h.persistInterruptedReply(session, g); err != nil {
+			log.Printf("assistant unfinished reply session=%s: %v", g.SessionID, err)
+		}
+	}
+}
+
+func (h *assistantHandlers) persistInterruptedReply(session domain.AssistantSession, g domain.AssistantGeneration) (bool, error) {
+	if g.MessageCount <= 0 || len(g.Reply) > 0 || len(session.Messages) != g.MessageCount {
+		return false, nil
 	}
 	message, ok := turnTranscriptMessage(g, session.Model, true)
 	if !ok {
-		return
+		return false, nil
 	}
-	if _, err := h.repo.AppendUnfinishedAssistantReply(g.UserID, g.SessionID, g.ID, g.MessageCount, message); err != nil {
-		log.Printf("assistant unfinished reply session=%s: %v", g.SessionID, err)
-	}
+	return h.repo.AppendUnfinishedAssistantReply(session.UserID, session.ID, g.ID, g.MessageCount, message)
 }
 
 // readGeneration reaps a stale turn only when this process is not still
@@ -79,20 +81,9 @@ func (h *assistantHandlers) readGeneration(ownerID int64, sessionID string) (dom
 	return readAssistantGeneration(h.repo, ownerID, sessionID)
 }
 
-// assistantDirectGenerations holds the synchronous shared turns this process
-// is executing. They have no live stream, so they are not in
-// assistantLiveGenerations, but their own readers must not reap them either.
-var assistantDirectGenerations sync.Map
-
 // generationExecutingHere reports whether this process is running the turn.
 func generationExecutingHere(id string) bool {
-	if id == "" {
-		return false
-	}
-	if _, ok := assistantLiveGenerations.Load(id); ok {
-		return true
-	}
-	_, ok := assistantDirectGenerations.Load(id)
+	_, ok := assistantLiveGenerations.Load(id)
 	return ok
 }
 

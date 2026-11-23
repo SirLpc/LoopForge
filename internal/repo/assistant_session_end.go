@@ -116,17 +116,40 @@ func lockAssistantSessionGeneration(tx *gorm.DB, session domain.AssistantSession
 
 var ErrAssistantSessionEndChanged = errors.New("会话结束操作已更新，请刷新后重试")
 
-func (r *AssistantRepo) AssistantSessionEndReady(userID int64, id, attemptID string) (domain.AssistantSession, bool, error) {
+func (r *AssistantRepo) AssistantSessionEndReady(userID int64, id, attemptID string) (domain.AssistantSession, domain.AssistantGeneration, error) {
+	var g domain.AssistantGeneration
 	session, err := r.AssistantSessionForDeletion(userID, id)
 	if err != nil {
-		return session, false, err
+		return session, g, err
 	}
 	if !r.currentAssistantSessionEnd(r.DB, session, attemptID) {
-		return session, false, ErrAssistantSessionEndChanged
+		return session, g, ErrAssistantSessionEndChanged
 	}
-	var active int64
-	err = r.DB.Model(&assistantGenerationRow{}).Where("session_id = ? AND user_id = ? AND status = ?", session.ID, session.UserID, "running").Count(&active).Error
-	return session, active == 0 && err == nil, err
+	var row assistantGenerationRow
+	err = r.DB.Take(&row, "session_id = ? AND user_id = ?", session.ID, session.UserID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return session, g, nil
+	}
+	return session, decodeGeneration(row), err
+}
+
+func (r *AssistantRepo) AssistantSessionWriteAccess(userID int64, id string) error {
+	session, err := r.AssistantSessionForDeletion(userID, id)
+	if err != nil {
+		return err
+	}
+	return r.assistantSessionWriteError(r.DB, session)
+}
+
+func (r *AssistantRepo) AssistantSessionEndRemaining(end *domain.AssistantSessionEnd) (time.Duration, error) {
+	if end == nil || end.State != domain.AssistantSessionEnding || end.Deadline == nil {
+		return 0, nil
+	}
+	now, ok := r.heartbeatNow(r.DB)
+	if !ok {
+		return 0, errors.New("无法读取会话操作时间")
+	}
+	return end.Deadline.Sub(now), nil
 }
 
 func (r *AssistantRepo) currentAssistantSessionEnd(tx *gorm.DB, session domain.AssistantSession, attemptID string) bool {
@@ -134,7 +157,7 @@ func (r *AssistantRepo) currentAssistantSessionEnd(tx *gorm.DB, session domain.A
 		errors.Is(r.assistantSessionWriteError(tx, session), ErrAssistantSessionEnding)
 }
 
-func (r *AssistantRepo) FinishAssistantSessionEnd(expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease, endError string) error {
+func (r *AssistantRepo) FinishAssistantSessionEnd(expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease, endError string, history ...[]domain.AssistantMessage) error {
 	if expected.End == nil {
 		return ErrAssistantSessionEndChanged
 	}
@@ -152,7 +175,7 @@ func (r *AssistantRepo) FinishAssistantSessionEnd(expected domain.AssistantSessi
 				return ErrAssistantSessionEndChanged
 			}
 			if endError != "" {
-				current.End = &domain.AssistantSessionEnd{State: domain.AssistantSessionEndFailed, Error: endError}
+				current.End = &domain.AssistantSessionEnd{State: domain.AssistantSessionEndFailed, AttemptID: expected.End.AttemptID, Error: endError}
 				return tx.Model(&row).UpdateColumn("payload", mustJSON(current)).Error
 			}
 			now, ok := r.heartbeatNow(tx)
@@ -181,6 +204,12 @@ func (r *AssistantRepo) FinishAssistantSessionEnd(expected domain.AssistantSessi
 				if err == nil && runFromRow(workspace).IsWorkspace() {
 					current.OwnWorkspaceRunIDs = append(current.OwnWorkspaceRunIDs, current.WorkspaceRunID)
 				}
+			}
+			if len(history) != 0 {
+				if !bytes.Equal(mustJSON(current.Messages), mustJSON(expected.Messages)) {
+					return ErrAssistantSessionEndChanged
+				}
+				current.Messages = history[0]
 			}
 			current.WorkspaceRunID = ""
 			current.RuntimeMode = domain.AssistantModePlatform

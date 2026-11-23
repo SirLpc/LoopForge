@@ -43,7 +43,7 @@
 
 **文件** 新建 `internal/httpapi/assistant_session_end.go`、`internal/httpapi/assistant_session_end_test.go`，修改 `internal/httpapi/server.go`、`assistant_session.go`、`assistant_conversation_cleanup.go`，扩展 `internal/repo/assistant_session_end.go` 和相关测试。
 
-**接口** `POST /api/assistant/sessions/:id/end`。新建或已有有效操作返回 `202` 和会话状态，已结束返回 `200`，未登录返回 `401`，缺少权限或专用生命周期返回 `403`，会话缺失返回 `404`。`(*AssistantRepo).AssistantSessionEndReady(userID int64, id, attemptID string) (domain.AssistantSession, bool, error)` 读取同一次操作及持久生成状况。`(*AssistantRepo).FinishAssistantSessionEnd(expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease, endError string) error` 按 `expected.End.AttemptID` 写入结果。
+**接口** `POST /api/assistant/sessions/:id/end`。新建或已有有效操作返回 `202` 和会话状态，已结束返回 `200`，未登录返回 `401`，缺少权限或专用生命周期返回 `403`，会话缺失返回 `404`。`(*AssistantRepo).AssistantSessionEndReady(userID int64, id, attemptID string) (domain.AssistantSession, domain.AssistantGeneration, error)` 读取同一次操作及持久生成状况。`(*AssistantRepo).FinishAssistantSessionEnd(expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease, endError string, history ...[]domain.AssistantMessage) error` 按 `expected.End.AttemptID` 写入结果。
 
 - [ ] 在现有预热测试 fixture 上写 `TestAssistantSessionEndReturnsWarmWorkspaces`，断言权限、`202 → ended`、Runner 检查及确认操作顺序、消息和附件仍在、第二次调用 `200`、SOP 借用未触发归还。写 `TestAssistantSessionEndDrainsGeneration` 覆盖运行中、预热排队和仍在退出的本地生成。写 `TestAssistantSessionEndRetainsOnReturnFailure`，用两个工作区验证第一个已归还而第二个失败后 `state == "failed"`、错误可读、重试仅需归还剩余工作区。Repo `TestAssistantSessionEndRejectsStaleAttempt` 验证过期尝试可重试，旧完成调用和变更后的租约代次均不能写入 `ended`。
 - [ ] 运行 `go test ./internal/repo ./internal/httpapi -run 'TestAssistantSessionEnd' -count=1`，确认本任务新增用例先失败。

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 )
@@ -66,7 +67,10 @@ func warmRestoreFiles(run domain.Run, refs []domain.WarmWorkspaceRef) ([]domain.
 	return out, nil
 }
 
-func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actorID int64) error {
+func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actorID int64, observed ...domain.WarmWorkspaceLease) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if sharesWorkspace(run) {
 		return errors.New("only the workspace owner can release its lease")
 	}
@@ -78,8 +82,14 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 		return nil
 	}
 	l, state, found, err := e.repo.WarmWorkspaceAllocation(run.ID)
-	if err != nil || !found || state == domain.WarmWorkspaceReleased || state == domain.WarmWorkspaceCanceled {
+	if err != nil {
 		return err
+	}
+	if len(observed) != 0 && (!found || !sameObservedWarmLease(l, observed[0])) {
+		return repo.ErrConversationWorkspaceChanged
+	}
+	if !found || state == domain.WarmWorkspaceReleased || state == domain.WarmWorkspaceCanceled {
+		return nil
 	}
 	token := ConversationWorkspaceToken(ctx, run.ID)
 	handoff := token != "" && actorID > 0 && current.IsWorkspace()
@@ -91,6 +101,19 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 		defer e.repo.FinishWorkspaceUse(run.ID, token, time.Now(), nil, "")
 	} else if err = e.repo.RenewWorkspaceUse(run.ID, token, time.Now()); err != nil {
 		return err
+	}
+	if len(observed) != 0 {
+		latest, latestState, found, err := e.repo.WarmWorkspaceAllocation(run.ID)
+		if err != nil {
+			return err
+		}
+		if !found || !sameObservedWarmLease(latest, l) {
+			return repo.ErrConversationWorkspaceChanged
+		}
+		if latestState == domain.WarmWorkspaceReleased || latestState == domain.WarmWorkspaceCanceled {
+			return nil
+		}
+		state = latestState
 	}
 	current, ok = e.repo.RunState(run.ID)
 	if !ok || !e.conversationWorkspaceIdle(current) || !handoff && e.conversationGenerationRunning(current) {
@@ -193,6 +216,11 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 		return e.repo.ConfirmNativeWarmWorkspaceReturn(l, token, receiptID, time.Now())
 	}
 	return e.repo.ConfirmWarmWorkspaceBinding(l, domain.WarmWorkspaceReleased)
+}
+
+func sameObservedWarmLease(a, b domain.WarmWorkspaceLease) bool {
+	return a.OwnerRunID == b.OwnerRunID && a.RunnerID == b.RunnerID &&
+		a.Epoch == b.Epoch && a.Generation == b.Generation && maps.Equal(a.Slots, b.Slots)
 }
 
 func (e *Engine) keepWarmReturnLease(parent context.Context, runID, token string, interval time.Duration) (context.Context, func()) {
