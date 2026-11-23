@@ -44,6 +44,7 @@ type warmWorkspaceSlotRecord struct {
 }
 
 type warmWorkspaceAllocation struct {
+	NativeReturn     *nativeWarmReturnState             `json:"nativeReturn,omitempty"`
 	NativeCheckout   *nativeWarmCheckoutIntent          `json:"nativeCheckout,omitempty"`
 	PreparedRefs     map[string]domain.WarmWorkspaceRef `json:"preparedRefs,omitempty"`
 	PreparingGit     bool                               `json:"preparingGit,omitempty"`
@@ -190,6 +191,11 @@ func (p *warmWorkspacePool) validateJournal(workspaceID warmWorkspaceIdentity) e
 				lease.Slots[intent.Target.RepositoryID] != intent.SlotID ||
 				!intent.valid() {
 				return errors.New("warm workspace journal contains an invalid native checkout intent")
+			}
+		}
+		if receipt := allocation.NativeReturn; receipt != nil {
+			if !p.native || !receipt.valid() || receipt.Invalidated == allocation.ReturnProven {
+				return errors.New("warm workspace journal contains an invalid native return receipt")
 			}
 		}
 		switch allocation.Phase {
@@ -369,6 +375,11 @@ func (p *warmWorkspacePool) recover() error {
 	}
 	for _, allocation := range p.state.Leases {
 		if p.native && len(allocation.Targets) > 0 {
+			// An unfinished native return must recheck files through the
+			// original slot paths before it can release the whole group.
+			if allocation.Phase == warmWorkspaceReturning {
+				continue
+			}
 			if err := p.bindNativeAllocation(context.Background(), allocation); err != nil {
 				return err
 			}

@@ -42,6 +42,12 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 	if a.ReturnProven {
 		return a.ReturnRefs, nil
 	}
+	if p.native && a.NativeCheckout != nil {
+		a, err = p.recoverNativeCheckoutForReturn(ctx, a, repos)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if a.Phase == warmWorkspaceReserved || a.Phase == warmWorkspacePlaced && !a.GitReady && !a.PreparingGit && !a.CheckoutComplete {
 		// Some repositories may already be prepared when a later fetch fails.
 		// Verify each finished checkout before returning the unadmitted group.
@@ -61,8 +67,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		a.ReturnProven = true
-		return nil, p.saveAllocation(a)
+		return nil, p.saveWarmReturnProof(a, nil, nil)
 	}
 	if a.Phase != warmWorkspacePlaced || !a.GitReady {
 		return nil, errors.New("warm checkout is not prepared for return")
@@ -108,24 +113,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 		skip[target] = true
 	}
 	extra := warmReturnTree{root: root, archived: archived, collected: map[string]string{}}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if skip[path] {
-			return filepath.SkipDir
-		}
-		// The root control directory stays with this run, never with a returned
-		// checkout. Preserve it in place for this owner's next use.
-		if path == filepath.Join(root, ".agentflow") && d.IsDir() {
-			return filepath.SkipDir
-		}
-		if d.IsDir() {
-			return nil
-		}
-		return extra.archive(path, d)
-	})
-	if err != nil {
+	if err := extra.verifyExtra(ctx, skip); err != nil {
 		return nil, err
 	}
 	maps.Copy(refs[0].Artifacts, extra.collected)
@@ -138,10 +126,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 	if err != nil {
 		return nil, err
 	}
-	a.ReturnProven = true
-	a.ReturnRefs = refs
-	a.ReturnRemove = remove
-	return refs, p.saveAllocation(a)
+	return refs, p.saveWarmReturnProof(a, refs, remove)
 }
 
 type warmReturnTree struct {
@@ -150,6 +135,24 @@ type warmReturnTree struct {
 	native              bool
 	archived, collected map[string]string
 	remove              []string
+}
+
+func (w *warmReturnTree) verifyExtra(ctx context.Context, skip map[string]bool) error {
+	return filepath.WalkDir(w.root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if skip[path] || path == filepath.Join(w.root, ".agentflow") && d.IsDir() {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		return w.archive(path, d)
+	})
 }
 
 func (w *warmReturnTree) archive(path string, d fs.DirEntry) error {
@@ -403,6 +406,12 @@ func warmCheckoutBlobMatches(ctx context.Context, stage, head, actualPath, rel, 
 	return cleanOID == oid, err
 }
 
+func sameWarmReturnRefs(a, b []domain.WarmWorkspaceRef) bool {
+	return slices.EqualFunc(a, b, func(a, b domain.WarmWorkspaceRef) bool {
+		return a.RepositoryID == b.RepositoryID && a.Commit == b.Commit && a.Branch == b.Branch && maps.Equal(a.Artifacts, b.Artifacts)
+	})
+}
+
 func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
 	p.mu.Lock()
 	a, err := p.loadLease(ctx, l)
@@ -413,9 +422,7 @@ func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorks
 	if err != nil {
 		return err
 	}
-	if !a.ReturnProven || !slices.EqualFunc(a.ReturnRefs, refs, func(a, b domain.WarmWorkspaceRef) bool {
-		return a.RepositoryID == b.RepositoryID && a.Commit == b.Commit && a.Branch == b.Branch && maps.Equal(a.Artifacts, b.Artifacts)
-	}) {
+	if !a.ReturnProven || !sameWarmReturnRefs(a.ReturnRefs, refs) {
 		return errors.New("missing durable acknowledgement of this return proof")
 	}
 	if a.Phase == warmWorkspacePlaced && len(a.ReturnRemove) != 0 {

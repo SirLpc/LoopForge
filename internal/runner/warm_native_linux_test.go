@@ -424,6 +424,7 @@ func TestWarmNativeLeasePreparesAndReturnsOriginalRepository(t *testing.T) {
 	runGitT(t, f.homeA, "-c", "user.name=test", "-c", "user.email=test@example.org", "commit", "-m", "sandbox edit")
 	runGitT(t, f.homeA, "push", "origin", "HEAD")
 	proof := control(domain.RunnerWorkspaceOperationWarmReleaseCheck)
+	request.WarmWorkspaceReturnID = proof.WarmWorkspaceReturnID
 	if err := json.Unmarshal(proof.Payload, &request.WarmWorkspaceRefs); err != nil {
 		t.Fatal(err)
 	}
@@ -471,14 +472,12 @@ func prepareNativeLeaseTest(t *testing.T, p *warmWorkspacePool, g warmGitFixture
 
 func returnNativeLeaseTest(t *testing.T, p *warmWorkspacePool, g warmGitFixture, l domain.WarmWorkspaceLease) []domain.WarmWorkspaceRef {
 	t.Helper()
-	refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
-	if err != nil {
-		t.Fatal(err)
+	d := nativeReturnTestDaemon(p, l)
+	req := nativeReturnTestProof(t, d, testNativeReturnRequest(l, g.repo))
+	if resp := d.warmWorkspaceControl(t.Context(), req); resp.Error != "" {
+		t.Fatal(resp.Error)
 	}
-	if err := p.commitReturn(t.Context(), l, refs); err != nil {
-		t.Fatal(err)
-	}
-	return refs
+	return req.WarmWorkspaceRefs
 }
 
 func TestWarmNativeLeaseRestoresPublishedHistoricalBranch(t *testing.T) {

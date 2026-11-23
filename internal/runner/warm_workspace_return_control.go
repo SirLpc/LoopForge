@@ -34,6 +34,10 @@ func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.
 	if err != nil {
 		return runnerWorkspaceError(err)
 	}
+	if p.native && req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCommit &&
+		(a.Phase == warmWorkspaceReleased || a.NativeReturn != nil && a.NativeReturn.Invalidated) {
+		return p.nativeReturnResponse(ctx, l, req)
+	}
 	if d.workspaceTerminals.HasRunScope(l.OwnerRunID) {
 		return workspaceBusyResponse("close the workspace terminal before return")
 	}
@@ -58,6 +62,9 @@ func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.
 		}
 	}
 	if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCommit {
+		if p.native {
+			return p.nativeReturnResponse(ctx, l, req)
+		}
 		if err := p.commitReturn(ctx, l, req.WarmWorkspaceRefs); err != nil {
 			return runnerWorkspaceError(err)
 		}
@@ -77,7 +84,13 @@ func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.
 		}
 		return r
 	}
-	return runnerWorkspacePayload(refs)
+	resp := runnerWorkspacePayload(refs)
+	if p.native {
+		p.mu.Lock()
+		resp.WarmWorkspaceReturnID = nativeWarmReturnID(p.state.Leases[l.OwnerRunID])
+		p.mu.Unlock()
+	}
+	return resp
 }
 
 func (d *Daemon) fenceWarmWorkspaceReturn(ctx context.Context, root string, checkProcesses func(context.Context, string) error) error {
