@@ -74,6 +74,9 @@ func (r *AssistantRepo) SetAssistantSessionIssue(userID int64, id, issueID strin
 			return fmt.Errorf("会话不存在")
 		}
 		s := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, s); err != nil {
+			return err
+		}
 		if s.Shared {
 			return fmt.Errorf("共享运行会话的需求由运行决定")
 		}
@@ -115,6 +118,9 @@ func (r *AssistantRepo) LinkAssistantSessionIssue(userID int64, id, issueID stri
 			return fmt.Errorf("会话不存在")
 		}
 		s := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, s); err != nil {
+			return err
+		}
 		if s.Shared || s.RunID != "" || s.IssueID != "" {
 			return nil
 		}

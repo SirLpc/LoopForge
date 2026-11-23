@@ -18,6 +18,9 @@ func (r *AssistantRepo) SetAssistantSessionSandbox(userID int64, id, sandboxID s
 			return fmt.Errorf("会话不存在")
 		}
 		s := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, s); err != nil {
+			return err
+		}
 		if s.Shared || s.RunID != "" {
 			return fmt.Errorf("任务会话使用任务的运行环境，不能切换")
 		}

@@ -118,6 +118,13 @@ func (r *AssistantRepo) PutSharedAssistantReceipt(userID int64, next domain.Assi
 			return err
 		}
 		old := decodeAssistantSession(row)
+		if writeErr := r.assistantSessionWriteError(tx, old); writeErr != nil {
+			var err error
+			next, err = assistantSessionTitleUpdate(old, next, writeErr)
+			if err != nil {
+				return err
+			}
+		}
 		a, _ := json.Marshal(old.Messages)
 		b, _ := json.Marshal(expected.Messages)
 		if !(old.Shared || ProjectSharedAssistantSession(old)) || !old.UpdatedAt.Equal(expected.UpdatedAt) || !bytes.Equal(a, b) {
@@ -206,6 +213,9 @@ func (r *AssistantRepo) ReplaceAssistantTurn(source domain.AssistantSession, ind
 			return err
 		}
 		old := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, old); err != nil {
+			return err
+		}
 		if !old.UpdatedAt.Equal(source.UpdatedAt) {
 			return fmt.Errorf("会话已更新，请重新打开后编辑")
 		}

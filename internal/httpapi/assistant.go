@@ -278,10 +278,16 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 	modelCtx, cancelModel := context.WithCancel(ctx)
 	defer cancelModel()
 	chatCompleted := false
-	if shared && sink == nil {
+	if sink == nil {
 		var parked *warmConversationHandoff
 		ctx = context.WithValue(ctx, warmGenerationHandoffKey{}, &parked)
-		job, diagnostics, finish, err := h.claimDirectSharedGeneration(ctx, req, ownerID, user, cancelModel)
+		pending := savedConversation
+		pending.Messages = req.Messages
+		pending.Model, pending.Effort, pending.Executor = req.Model, req.Effort, req.Executor
+		if pending.Title == "" {
+			pending.Title = truncateRunes(req.Messages[0].Content, 36)
+		}
+		job, diagnostics, finish, err := h.claimDirectGeneration(ctx, req, ownerID, user, pending, cancelModel)
 		if err != nil {
 			c.JSON(409, gin.H{"error": err.Error()})
 			return
@@ -835,8 +841,8 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 				conversation.WorkspaceRunID = toolSession.conversationWorkspace()
 			}
 			var saveErr error
-			if shared {
-				saveErr = h.repo.PutAssistantGenerationReply(ownerID, assistantControlScopeFrom(modelCtx).GenerationID, conversation)
+			if generationID := assistantControlScopeFrom(modelCtx).GenerationID; generationID != "" {
+				saveErr = h.repo.PutAssistantGenerationReply(ownerID, generationID, conversation)
 			} else {
 				saveErr = saveAssistantConversation(h.repo, ownerID, conversation)
 			}

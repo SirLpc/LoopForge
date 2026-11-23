@@ -163,7 +163,22 @@ func (s AssistantSession) Mode() string {
 	return AssistantModePlatform
 }
 
+const (
+	AssistantSessionEnding    = "ending"
+	AssistantSessionEnded     = "ended"
+	AssistantSessionEndFailed = "failed"
+)
+
+type AssistantSessionEnd struct {
+	State     string     `json:"state"`
+	AttemptID string     `json:"attemptId,omitempty"`
+	Deadline  *time.Time `json:"deadline,omitempty"`
+	EndedAt   *time.Time `json:"endedAt,omitempty"`
+	Error     string     `json:"error,omitempty"`
+}
+
 type AssistantSession struct {
+	End                   *AssistantSessionEnd      `json:"end,omitempty"`
 	ExecutionTarget       *AssistantExecutionTarget `json:"executionTarget,omitempty"`
 	ExecutionTargetLocked bool                      `json:"executionTargetLocked"`
 	RuntimeMode           string                    `json:"runtimeMode,omitempty"`

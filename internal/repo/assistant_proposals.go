@@ -22,6 +22,9 @@ func (r *AssistantRepo) PutAssistantSessionIfUnchanged(userID int64, next, expec
 			return err
 		}
 		old := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, old); err != nil {
+			return err
+		}
 		a, _ := json.Marshal(old.Messages)
 		b, _ := json.Marshal(expected.Messages)
 		if !old.UpdatedAt.Equal(expected.UpdatedAt) || !bytes.Equal(a, b) {

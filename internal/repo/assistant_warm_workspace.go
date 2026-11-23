@@ -93,6 +93,9 @@ func (r *AssistantRepo) ParkWarmGeneration(g domain.AssistantGeneration, run dom
 			return err
 		}
 		item := decodeAssistantSession(sess)
+		if err := r.assistantSessionWriteError(tx, item); err != nil {
+			return err
+		}
 		if item.ProjectID != run.ExecutionContext.ProjectID || item.RunID != "" || item.Execution().RunnerID != run.ExecutionContext.ExecutionRunnerID || item.WorkspaceRunID != wait.Previous || wait.RunID != run.ID || !run.IsWorkspace() || run.ExecutionContext.WorkspaceMode != domain.WorkspaceModeWarmPool {
 			return ErrConversationWorkspaceChanged
 		}
@@ -189,7 +192,7 @@ func (r *AssistantRepo) ClaimWarmContinuation(p WaitingAssistantGeneration, bind
 // Keep the idle owner reachable even if the previous directory is dirty or
 // the turn stops before it can enqueue. Recording ownership never binds it.
 func (r *AssistantRepo) RememberWarmConversationWorkspace(userID int64, sessionID, projectID, runID string) error {
-	return r.updateAssistantSessionWorkspace(userID, sessionID, projectID, func(s *domain.AssistantSession) {
+	return r.updateAssistantSessionWorkspace(userID, sessionID, projectID, false, func(s *domain.AssistantSession) {
 		if !slices.Contains(s.OwnWorkspaceRunIDs, runID) {
 			s.OwnWorkspaceRunIDs = append(s.OwnWorkspaceRunIDs, runID)
 		}

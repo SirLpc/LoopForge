@@ -647,10 +647,7 @@ func (h *assistantHandlers) commitTurnTranscript(g domain.AssistantGeneration, s
 	if !changed {
 		return nil
 	}
-	if session.Shared {
-		return h.repo.CommitAssistantTranscript(g.UserID, g.ID, session)
-	}
-	return saveAssistantConversation(h.repo, g.UserID, session)
+	return h.repo.CommitAssistantTranscript(g.UserID, g.ID, session)
 }
 
 func (h *assistantHandlers) followSteer(parent context.Context, prev domain.AssistantGeneration, steer *domain.AssistantSteer, actor *auth.User) {

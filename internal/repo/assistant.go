@@ -234,6 +234,15 @@ func (r *AssistantRepo) PutAssistantSession(userID int64, v domain.AssistantSess
 			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
+			if row.ID != "" && row.UserID == userID {
+				old := decodeAssistantSession(row)
+				if writeErr := r.assistantSessionWriteError(tx, old); writeErr != nil {
+					v, err = assistantSessionTitleUpdate(old, v, writeErr)
+					if err != nil {
+						return err
+					}
+				}
+			}
 			scoped := *r
 			base := *r.deps
 			base.DB = tx
@@ -310,6 +319,7 @@ func (r *AssistantRepo) putAssistantSession(userID int64, v domain.AssistantSess
 		return errors.New("assistant session belongs to another user")
 	}
 	old, exists := r.AssistantSession(userID, v.ID)
+	v.End = old.End
 	if exists {
 		if old.ProjectID == "" && strings.TrimSpace(v.ProjectID) != "" && (old.WorkspaceRunID != "" || len(old.OwnWorkspaceRunIDs) != 0) {
 			return ErrAssistantPersonalWorkspaceProject
@@ -440,7 +450,7 @@ func (r *AssistantRepo) SetAssistantSessionArchived(userID int64, id string, arc
 // generation that is still writing this session does not see a conflict.
 // projectID is checked under the lock to keep a workspace in its own scope.
 func (r *AssistantRepo) SetAssistantSessionWorkspaceRun(userID int64, id, projectID, runID string, own bool) error {
-	return r.updateAssistantSessionWorkspace(userID, id, projectID, func(item *domain.AssistantSession) {
+	return r.updateAssistantSessionWorkspace(userID, id, projectID, false, func(item *domain.AssistantSession) {
 		item.WorkspaceRunID = strings.TrimSpace(runID)
 		if own && item.WorkspaceRunID != "" && !slices.Contains(item.OwnWorkspaceRunIDs, item.WorkspaceRunID) {
 			item.OwnWorkspaceRunIDs = append(item.OwnWorkspaceRunIDs, item.WorkspaceRunID)
@@ -453,7 +463,7 @@ func (r *AssistantRepo) SetAssistantSessionWorkspaceRun(userID int64, id, projec
 // created by this failed attempt. The two changes share one session lock.
 func (r *AssistantRepo) RollbackAssistantSessionWorkspaceRun(userID int64, id, projectID, failedRunID, previousRunID string, discardFailedRun bool) (string, error) {
 	var activeRunID string
-	err := r.updateAssistantSessionWorkspace(userID, id, projectID, func(item *domain.AssistantSession) {
+	err := r.updateAssistantSessionWorkspace(userID, id, projectID, true, func(item *domain.AssistantSession) {
 		if item.WorkspaceRunID == failedRunID {
 			item.WorkspaceRunID = previousRunID
 		}
@@ -467,13 +477,16 @@ func (r *AssistantRepo) RollbackAssistantSessionWorkspaceRun(userID int64, id, p
 	return activeRunID, err
 }
 
-func (r *AssistantRepo) updateAssistantSessionWorkspace(userID int64, id, projectID string, update func(*domain.AssistantSession)) error {
+func (r *AssistantRepo) updateAssistantSessionWorkspace(userID int64, id, projectID string, rollback bool, update func(*domain.AssistantSession)) error {
 	return r.DB.Transaction(func(tx *gorm.DB) error {
 		var row assistantSessionRow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", assistantRecordID(id), userID).Take(&row).Error; err != nil {
 			return fmt.Errorf("会话不存在")
 		}
 		item := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, item); err != nil && !(rollback && errors.Is(err, ErrAssistantSessionEnding)) {
+			return err
+		}
 		if item.ProjectID != projectID {
 			return ErrAssistantSessionProjectChanged
 		}

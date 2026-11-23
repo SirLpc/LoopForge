@@ -195,10 +195,14 @@ func (r *AssistantRepo) BeginAssistantGeneration(g domain.AssistantGeneration, p
 			} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
+			saved := decodeAssistantSession(session)
+			if err := r.assistantSessionWriteError(tx, saved); err != nil {
+				return err
+			}
 			if len(pending) > 0 {
 				next := pending[0]
 				next.ExecutionTargetLocked = true
-				old := decodeAssistantSession(session)
+				old := saved
 				if next.IssueID != old.IssueID {
 					return fmt.Errorf("关联需求已更新，请重新发送")
 				}

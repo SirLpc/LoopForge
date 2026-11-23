@@ -25,6 +25,9 @@ func (r *AssistantRepo) SetAssistantRuntimeMode(userID int64, id, projectID, mod
 			return err
 		}
 		item := decodeAssistantSession(row)
+		if err := r.assistantSessionWriteError(tx, item); err != nil {
+			return err
+		}
 		var active assistantGenerationRow
 		err := tx.Where("session_id = ? AND status = ?", row.ID, "running").Take(&active).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {

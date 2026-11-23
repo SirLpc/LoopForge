@@ -66,6 +66,10 @@ func (r *AssistantRepo) AppendUnfinishedAssistantReply(ownerID int64, sessionID,
 	}
 	appended := false
 	err := r.DB.Transaction(func(tx *gorm.DB) error {
+		var row assistantSessionRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", sessionID, ownerID).Take(&row).Error; err != nil {
+			return err
+		}
 		var generation assistantGenerationRow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("session_id = ? AND user_id = ?", sessionID, ownerID).Take(&generation).Error; err != nil {
 			return err
@@ -73,11 +77,10 @@ func (r *AssistantRepo) AppendUnfinishedAssistantReply(ownerID int64, sessionID,
 		if generation.GenerationID != generationID {
 			return nil
 		}
-		var row assistantSessionRow
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", sessionID, ownerID).Take(&row).Error; err != nil {
-			return err
-		}
 		session := decodeAssistantSession(row)
+		if session.End != nil && session.End.State == domain.AssistantSessionEnded {
+			return nil
+		}
 		if len(session.Messages) != messageCount || session.Messages[messageCount-1].Role != "user" {
 			return nil
 		}
