@@ -13,6 +13,7 @@ import (
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
+	"agentflow/internal/runtime"
 )
 
 var errWarmReturnStale = errors.New("fixed warm checkout changed after return verification")
@@ -96,31 +97,35 @@ func (p *warmWorkspacePool) verifyNativeReturn(ctx context.Context, a warmWorksp
 		if !validWarmWorkspaceRelativePath(rel) || archived[rel] == "" {
 			return errors.New("invalid native warm return cleanup proof")
 		}
-		if proof.collected[rel] != archived[rel] {
-			if cleanupStarted {
-				path := filepath.Join(root, rel)
-				for id, target := range a.Targets {
-					inner, err := filepath.Rel(target, path)
-					if err == nil && validWarmWorkspaceRelativePath(inner) {
-						path = filepath.Join(p.slots[id].Path, inner)
-						break
-					}
-				}
-				_, err := os.Lstat(path)
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				if err != nil {
-					return err
+		if proof.collected[rel] == archived[rel] {
+			if a.Phase == warmWorkspaceReturning {
+				return warmTreeChanged("archived file reappeared at %s", rel)
+			}
+			continue
+		}
+		if cleanupStarted {
+			path := filepath.Join(root, rel)
+			for id, target := range a.Targets {
+				inner, err := filepath.Rel(target, path)
+				if err == nil && validWarmWorkspaceRelativePath(inner) {
+					path = filepath.Join(p.slots[id].Path, inner)
+					break
 				}
 			}
-			return warmTreeChanged("archived file changed at %s", rel)
+			_, err := os.Lstat(path)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
 		}
+		return warmTreeChanged("archived file changed at %s", rel)
 	}
 	return nil
 }
 
-func (p *warmWorkspacePool) commitNativeReturn(ctx context.Context, l domain.WarmWorkspaceLease, id string, refs []domain.WarmWorkspaceRef) error {
+func (p *warmWorkspacePool) commitNativeReturn(ctx context.Context, l domain.WarmWorkspaceLease, id string, refs []domain.WarmWorkspaceRef, files []domain.WorkspaceArtifactFile) error {
 	p.mu.Lock()
 	a, err := p.loadLease(ctx, l)
 	if err == nil && a.Phase != warmWorkspaceReleased {
@@ -146,7 +151,7 @@ func (p *warmWorkspacePool) commitNativeReturn(ctx context.Context, l domain.War
 		if !errors.Is(err, errWarmTreeChanged) {
 			return err
 		}
-		if invalidationErr := p.invalidateNativeReturn(ctx, a); invalidationErr != nil {
+		if invalidationErr := p.invalidateNativeReturn(ctx, a, files); invalidationErr != nil {
 			return invalidationErr
 		}
 		return errors.Join(errWarmReturnStale, err)
@@ -164,23 +169,85 @@ func (p *warmWorkspacePool) commitNativeReturn(ctx context.Context, l domain.War
 	return p.commitReturn(ctx, l, refs)
 }
 
-func (p *warmWorkspacePool) invalidateNativeReturn(ctx context.Context, a warmWorkspaceAllocation) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *warmWorkspacePool) invalidateNativeReturn(ctx context.Context, a warmWorkspaceAllocation, files []domain.WorkspaceArtifactFile) error {
+	cleanupStarted := a.Phase == warmWorkspaceReturning || a.NativeReturn != nil && a.NativeReturn.CleanupStarted
 	if a.Phase == warmWorkspaceReturning {
 		a.Phase = warmWorkspacePlaced
-		if err := p.bindNativeAllocation(ctx, a); err != nil {
+		p.mu.Lock()
+		err := p.bindNativeAllocation(ctx, a)
+		p.mu.Unlock()
+		if err != nil {
 			return err
 		}
 	}
+	if cleanupStarted {
+		if err := p.restoreNativeReturnArchives(ctx, a, files); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	a.ReturnProven = false
 	a.NativeReturn = &nativeWarmReturnState{ID: nativeWarmReturnID(a), Invalidated: true}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.saveAllocation(a)
+}
+
+func (p *warmWorkspacePool) restoreNativeReturnArchives(ctx context.Context, a warmWorkspaceAllocation, files []domain.WorkspaceArtifactFile) error {
+	if len(a.ReturnRemove) == 0 {
+		return nil
+	}
+	root := filepath.Join(p.workspaceRoot, "runs", a.Lease.OwnerRunID, "workspace")
+	base, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	archived := make(map[string]string)
+	for _, ref := range a.ReturnRefs {
+		maps.Copy(archived, ref.Artifacts)
+	}
+	byPath := make(map[string]domain.WorkspaceArtifactFile, len(files))
+	for _, file := range files {
+		byPath[file.Path] = file
+	}
+	var missing []domain.WorkspaceArtifactFile
+	for _, path := range a.ReturnRemove {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !validWarmWorkspaceRelativePath(path) || archived[path] == "" {
+			return errors.New("invalid native warm return cleanup path")
+		}
+		_, err := base.Lstat(path)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		file := byPath[path]
+		if file.SHA256 != archived[path] {
+			return fmt.Errorf("missing archived bytes to restore %s", path)
+		}
+		missing = append(missing, file)
+	}
+	if _, err := runtime.RestoreMissingWorkspaceArtifacts(root, missing); err != nil {
+		return err
+	}
+	for _, file := range missing {
+		if _, err := base.Lstat(file.Path); err != nil {
+			return fmt.Errorf("restore archived file %s: %w", file.Path, err)
+		}
+	}
+	return nil
 }
 
 func (p *warmWorkspacePool) nativeReturnResponse(ctx context.Context, l domain.WarmWorkspaceLease, req domain.RunnerWorkspaceRequest) domain.RunnerWorkspaceResponse {
 	id := req.WarmWorkspaceReturnID
-	err := p.commitNativeReturn(ctx, l, id, req.WarmWorkspaceRefs)
+	err := p.commitNativeReturn(ctx, l, id, req.WarmWorkspaceRefs, req.ArtifactFiles)
 	resp := runnerWorkspacePayload(map[string]string{"phase": "released"})
 	if err != nil {
 		resp = runnerWorkspaceError(err)

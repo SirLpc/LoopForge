@@ -48,7 +48,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 			return nil, err
 		}
 	}
-	if a.Phase == warmWorkspaceReserved || a.Phase == warmWorkspacePlaced && !a.GitReady && !a.PreparingGit && !a.CheckoutComplete {
+	if a.Phase == warmWorkspaceReserved || a.Phase == warmWorkspacePlaced && !a.GitReady && !a.PreparingGit && (!a.CheckoutComplete || p.native) {
 		// Some repositories may already be prepared when a later fetch fails.
 		// Verify each finished checkout before returning the unadmitted group.
 		for id, prepared := range a.PreparedRefs {

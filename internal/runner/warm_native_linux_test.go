@@ -3,16 +3,19 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
 	"agentflow/internal/runtime"
+	"golang.org/x/sys/unix"
 )
 
 func TestWarmNativeRunnerAcceptsClaimResolvedDriver(t *testing.T) {
@@ -700,5 +703,112 @@ done`)
 				t.Fatalf("lost local branch tip %s", got)
 			}
 		})
+	}
+}
+
+func TestWarmNativeCheckoutRejectsBranchNameConflictBeforeWriting(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	l := placeNativeLeaseTest(t, p, "first", 1)
+	before := runGitT(t, g.checkout, "rev-parse", "HEAD")
+	runGitT(t, g.checkout, "branch", "feature")
+	warmGitWrite(t, g.source, "incoming", "remote work")
+	g.publish(t)
+	g.repo.WorkBranch, g.repo.CreateNewWorkBranch = "feature/nested", true
+	err := prepareNativeLeaseTest(t, p, g, l, nil)
+	if err == nil || errors.Is(err, errNativeWarmCheckoutBusy) || !strings.Contains(err.Error(), "feature") {
+		t.Fatalf("wanted an actionable branch conflict, got %v", err)
+	}
+	if got := runGitT(t, g.checkout, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("branch conflict changed HEAD to %s", got)
+	}
+	if got := runGitT(t, g.checkout, "branch", "--show-current"); got != "master" {
+		t.Fatalf("branch conflict detached the original checkout: %s", got)
+	}
+}
+
+func TestWarmNativeLFSStagingSurvivesCrash(t *testing.T) {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("Git LFS is required")
+	}
+	oid := strings.Repeat("a", 64)
+	if checkout := os.Getenv("LOOPFORGE_TEST_LFS_CRASH_CHECKOUT"); checkout != "" {
+		manifest := warmLFSManifest{storage: os.Getenv("LOOPFORGE_TEST_LFS_CRASH_STORAGE"),
+			Files: []warmLFSFile{{Name: "asset.bin", OID: oid, Size: 4096}}}
+		ref, err := warmCheckoutRef(checkout, "repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal(applyNativeWarmCheckout(t.Context(), checkout, warmWorkspaceSlot{}, nativeWarmCheckoutIntent{Target: ref, LFSStageID: strings.Repeat("A", 26)}, true, manifest))
+	}
+	g := nativeWarmTestClone(t, newWarmGitFixture(t))
+	pointer := "version https://git-lfs.github.com/spec/v1\noid sha256:" + oid + "\nsize 4096\n"
+	warmGitWrite(t, g.checkout, "asset.bin", pointer)
+	runGitT(t, g.checkout, "add", "asset.bin")
+	runGitT(t, g.checkout, "-c", "user.name=Test", "-c", "user.email=git@example.test", "commit", "-qm", "asset")
+	storage := t.TempDir()
+	pipe := warmLFSObject(storage, oid)
+	if err := os.MkdirAll(filepath.Dir(pipe), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(pipe, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWarmNativeLFSStagingSurvivesCrash$")
+	cmd.Env = append(os.Environ(), "LOOPFORGE_TEST_LFS_CRASH_CHECKOUT="+g.checkout, "LOOPFORGE_TEST_LFS_CRASH_STORAGE="+storage)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	deadline := time.After(10 * time.Second)
+	var writer *os.File
+	for writer == nil {
+		var err error
+		writer, err = os.OpenFile(pipe, os.O_WRONLY|unix.O_NONBLOCK, 0)
+		if err != nil && !errors.Is(err, unix.ENXIO) {
+			t.Fatal(err)
+		}
+		if writer == nil {
+			select {
+			case err := <-done:
+				t.Fatalf("hydration exited before beginning to copy: %v", err)
+			case <-deadline:
+				t.Fatal("hydration never opened the source")
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	defer writer.Close()
+	if _, err := writer.WriteString("partial asset bytes"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		staged, err := filepath.Glob(filepath.Join(g.checkout, ".warm-lfs-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		insideGit, err := filepath.Glob(filepath.Join(g.checkout, ".git", "agentflow-warm-lfs-*", ".warm-lfs-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(staged)+len(insideGit) > 0 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("hydration exited before staging bytes: %v", err)
+		case <-deadline:
+			t.Fatal("hydration never created a staging file")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if status := runGitT(t, g.checkout, "status", "--porcelain"); status != "" {
+		t.Fatalf("interrupted LFS copy left an untracked worktree file: %s", status)
 	}
 }

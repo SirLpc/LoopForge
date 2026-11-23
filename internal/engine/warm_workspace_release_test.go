@@ -447,3 +447,41 @@ func TestWarmNativeReturnEngineInvalidatesMatchingReceipt(t *testing.T) {
 		})
 	}
 }
+
+func TestWarmNativeReleaseCommitCarriesOnlyReceiptArtifacts(t *testing.T) {
+	e, run := nativeWarmSOPWithReadySlot(t)
+	run.Artifacts = []domain.Artifact{
+		{Name: "result", RepositoryDir: "checkout", Path: "result.txt", Content: "archived"},
+		{Name: "extra", RepositoryDir: "checkout", Path: "other.txt", Content: "not in proof"},
+	}
+	if err := e.repo.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	e.WorkspaceCheckpointTransport = func(_ context.Context, _ domain.Run, req domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
+			var digest string
+			for _, file := range req.ArtifactFiles {
+				if file.Path == "checkout/result.txt" {
+					digest = file.SHA256
+				}
+			}
+			if digest == "" {
+				t.Fatal("missing archived file in proof request")
+			}
+			payload, err := json.Marshal([]domain.WarmWorkspaceRef{
+				{RepositoryID: "repo", Commit: "0123456789012345678901234567890123456789", Artifacts: map[string]string{"checkout/result.txt": digest}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: "receipt-a", Payload: payload}, nil
+		}
+		if len(req.ArtifactFiles) != 1 || req.ArtifactFiles[0].Path != "checkout/result.txt" || req.ArtifactFiles[0].Content != "archived" {
+			t.Fatalf("commit did not carry the exact receipt archive: %+v", req.ArtifactFiles)
+		}
+		return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: "receipt-a", Payload: []byte(`{"phase":"released"}`)}, nil
+	}
+	if err := e.ReleaseWarmWorkspace(t.Context(), run, 1); err != nil {
+		t.Fatal(err)
+	}
+}

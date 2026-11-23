@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -193,12 +194,9 @@ func TestWarmNativeReturnUnadmittedStillChecksPreparedSlots(t *testing.T) {
 }
 
 func TestWarmNativeReturnRecoversInterruptedGroup(t *testing.T) {
-	for _, dirty := range []bool{false, true} {
-		name := "unchanged"
-		if dirty {
-			name = "externally modified"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, mode := range []string{"unchanged", "externally modified", "archive recreated"} {
+		t.Run(mode, func(t *testing.T) {
+			dirty := mode != "unchanged"
 			p, one, two, l := twoNativeReturnTestSlots(t)
 			req := testNativeReturnRequest(l, one.repo, two.repo)
 			if err := p.prepareLeaseCheckout(t.Context(), l, req.PreparationInvocation); err != nil {
@@ -221,8 +219,11 @@ func TestWarmNativeReturnRecoversInterruptedGroup(t *testing.T) {
 			if err := unmountNativeWarmDir(a.Targets["a"]); err != nil {
 				t.Fatal(err)
 			}
-			if dirty {
+			switch mode {
+			case "externally modified":
 				warmGitWrite(t, one.checkout, "README.md", "external edit")
+			case "archive recreated":
+				warmGitWrite(t, one.checkout, "result.txt", "archived")
 			}
 			p = restartNativeLeaseTestPool(t, p)
 			if active := p.state.activeSlots(); !active["a"] || !active["b"] {
@@ -232,6 +233,9 @@ func TestWarmNativeReturnRecoversInterruptedGroup(t *testing.T) {
 			if dirty {
 				if got.Code != domain.WorkspaceErrorWarmReturnStale {
 					t.Fatalf("did not detect changes after partial unmount: %+v", got)
+				}
+				if got, err := os.ReadFile(filepath.Join(one.checkout, "result.txt")); err != nil || string(got) != "archived" {
+					t.Fatalf("interrupted release lost an archived file: %q %v", got, err)
 				}
 				for id, target := range a.Targets {
 					if !p.inspectSlot(id, target).atTarget {
@@ -309,5 +313,56 @@ done`)
 				t.Fatalf("return touched the wrong revision: %s", ref)
 			}
 		})
+	}
+}
+
+func TestWarmNativeCheckoutRechecksPreviouslyPreparedSlots(t *testing.T) {
+	for _, mode := range []string{"hidden tracked edit", "unity lock"} {
+		t.Run(mode, func(t *testing.T) {
+			p, a, b, l := twoNativeReturnTestSlots(t)
+			b.repo.Ref = "missing"
+			prepare := func() error {
+				return p.prepareLeaseCheckout(t.Context(), l, &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{a.repo, b.repo}})
+			}
+			if err := prepare(); err == nil || p.state.Leases[l.OwnerRunID].PreparedRefs["a"].Commit == "" {
+				t.Fatalf("expected partial two-slot preparation: %v", err)
+			}
+			want := errWarmTreeChanged
+			if mode == "unity lock" {
+				warmGitWrite(t, a.checkout, "Temp/UnityLockfile", "Editor")
+				want = errNativeWarmCheckoutBusy
+			} else {
+				runGitT(t, a.checkout, "update-index", "--assume-unchanged", "README.md")
+				warmGitWrite(t, a.checkout, "README.md", "not part of prepared ref")
+			}
+			b.repo.Ref = "master"
+			if err := prepare(); !errors.Is(err, want) {
+				t.Fatalf("reused invalid prepared slot: got %v, want %v", err, want)
+			}
+			if p.state.Leases[l.OwnerRunID].GitReady {
+				t.Fatal("admitted partially prepared group")
+			}
+		})
+	}
+}
+
+func TestWarmNativeReturnAfterCheckoutBeforeReady(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	l := placeNativeLeaseTest(t, p, "first", 1)
+	if err := prepareNativeLeaseTest(t, p, g, l, nil); err != nil {
+		t.Fatal(err)
+	}
+	a := p.state.Leases[l.OwnerRunID]
+	a.GitReady = false
+	if err := p.saveAllocation(a); err != nil {
+		t.Fatal(err)
+	}
+	d := nativeReturnTestDaemon(p, l)
+	commit := nativeReturnTestProof(t, d, testNativeReturnRequest(l, g.repo))
+	if len(commit.WarmWorkspaceRefs) != 0 {
+		t.Fatal("published recovery refs for a lease that never became ready")
+	}
+	if ack := d.warmWorkspaceControl(t.Context(), commit); ack.Error != "" {
+		t.Fatal(ack.Error)
 	}
 }

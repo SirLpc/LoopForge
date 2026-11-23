@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -148,7 +149,8 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		}
 		intent = nativeWarmCheckoutIntent{
 			SlotID: slot.ID, Before: current, BranchBefore: tip, Baseline: nativeWarmBaseline(local, cache, repo, restore, target),
-			Target: domain.WarmWorkspaceRef{RepositoryID: repo.RepositoryID, Branch: branch, Commit: target},
+			LFSStageID: rand.Text(),
+			Target:     domain.WarmWorkspaceRef{RepositoryID: repo.RepositoryID, Branch: branch, Commit: target},
 		}
 		if tip != "" && tip != target {
 			if _, err := gitwork.C(local, cache, "merge-base", "--is-ancestor", tip, target); err != nil {

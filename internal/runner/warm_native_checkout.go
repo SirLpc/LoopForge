@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -22,6 +23,7 @@ type nativeWarmCheckoutIntent struct {
 	BranchBefore string                  `json:"branchBefore,omitempty"`
 	Baseline     string                  `json:"baseline"`
 	Rewind       bool                    `json:"rewind,omitempty"`
+	LFSStageID   string                  `json:"lfsStageId,omitempty"`
 }
 
 func (i nativeWarmCheckoutIntent) valid() bool {
@@ -31,7 +33,8 @@ func (i nativeWarmCheckoutIntent) valid() bool {
 	return i.Before.RepositoryID == i.Target.RepositoryID && validBranch(i.Before.Branch) && validBranch(i.Target.Branch) &&
 		warmCommitID.MatchString(i.Before.Commit) && warmCommitID.MatchString(i.Target.Commit) &&
 		warmCommitID.MatchString(i.Baseline) && (i.BranchBefore == "" || warmCommitID.MatchString(i.BranchBefore)) &&
-		(!i.Rewind || i.Target.Branch != "" && i.BranchBefore != "")
+		(!i.Rewind || i.Target.Branch != "" && i.BranchBefore != "") &&
+		(i.LFSStageID == "" || validNativeLFSStageID(i.LFSStageID))
 }
 
 func nativeWarmBranchTip(ctx context.Context, checkout, branch string) (string, error) {
@@ -39,13 +42,20 @@ func nativeWarmBranchTip(ctx context.Context, checkout, branch string) (string, 
 		return "", nil
 	}
 	name := "refs/heads/" + branch
-	out, err := nativeWarmGit(ctx, checkout, "for-each-ref", "--format=%(refname) %(objectname)", name)
+	out, err := nativeWarmGit(ctx, checkout, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
 	if err != nil {
 		return "", err
 	}
 	for line := range strings.SplitSeq(out, "\n") {
-		if tip, ok := strings.CutPrefix(line, name+" "); ok {
+		ref, tip, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if ref == name {
 			return tip, nil
+		}
+		if strings.HasPrefix(ref, name+"/") || strings.HasPrefix(name, ref+"/") {
+			return "", fmt.Errorf("fixed warm checkout branch %s conflicts with local branch %s", branch, strings.TrimPrefix(ref, "refs/heads/"))
 		}
 	}
 	return "", nil
@@ -110,7 +120,7 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 	checkoutArgs := []string{"checkout", "--no-overwrite-ignore", "--no-recurse-submodules"}
 	if !atTarget {
 		if _, err := nativeWarmGit(ctx, checkout, append(checkoutArgs, "--detach", ref.Commit)...); err != nil {
-			return errors.Join(errNativeWarmCheckoutBusy, err)
+			return nativeWarmGitWriteError(ctx, err)
 		}
 	}
 	if ref.Branch != "" {
@@ -127,7 +137,7 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 				tip = strings.Repeat("0", len(ref.Commit))
 			}
 			if _, err := nativeWarmGit(ctx, checkout, "update-ref", "--create-reflog", "-m", "LoopForge warm checkout", name, ref.Commit, tip); err != nil {
-				return errors.Join(errNativeWarmCheckoutBusy, err)
+				return nativeWarmGitWriteError(ctx, err)
 			}
 		}
 		current, err := warmCheckoutRef(checkout, ref.RepositoryID)
@@ -136,7 +146,7 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 		}
 		if current.Branch != ref.Branch {
 			if _, err := nativeWarmGit(ctx, checkout, append(checkoutArgs, ref.Branch, "--")...); err != nil {
-				return errors.Join(errNativeWarmCheckoutBusy, err)
+				return nativeWarmGitWriteError(ctx, err)
 			}
 		}
 	}
@@ -147,10 +157,53 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 	if current.Commit != ref.Commit || current.Branch != ref.Branch {
 		return warmTreeChanged("fixed warm checkout changed while attaching the branch")
 	}
-	if err := lfs.hydrate(checkout, ""); err != nil {
+	if err := hydrateNativeWarmLFS(checkout, intent, lfs); err != nil {
 		return fmt.Errorf("materialize fixed checkout Git LFS files: %w", err)
 	}
 	return writeNativeWarmBaseline(checkout, intent.Baseline)
+}
+
+func nativeWarmGitWriteError(ctx context.Context, err error) error {
+	var exit *exec.ExitError
+	if ctx.Err() != nil || errors.As(err, &exit) && exit.ExitCode() < 0 {
+		return errors.Join(errNativeWarmCheckoutBusy, err)
+	}
+	return err
+}
+
+func validNativeLFSStageID(id string) bool {
+	return len(id) == 26 && strings.IndexFunc(id, func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < '2' || r > '7')
+	}) == -1
+}
+
+func nativeWarmLFSStage(meta, id string) string {
+	return filepath.Join(meta, "agentflow-warm-lfs-"+id)
+}
+
+func hydrateNativeWarmLFS(checkout string, intent nativeWarmCheckoutIntent, manifest warmLFSManifest) error {
+	if len(manifest.Files) == 0 {
+		return nil
+	}
+	meta, err := openWarmWorkspaceDir(filepath.Join(checkout, ".git"), false)
+	if err != nil {
+		return err
+	}
+	defer meta.Close()
+	stage := meta.Name()
+	if validNativeLFSStageID(intent.LFSStageID) {
+		stage = nativeWarmLFSStage(stage, intent.LFSStageID)
+		if err := os.RemoveAll(stage); err != nil {
+			return err
+		}
+		if err := os.Mkdir(stage, 0700); err != nil {
+			return err
+		}
+		defer os.RemoveAll(stage)
+	}
+	// The temporary file must be on the Windows filesystem for atomic
+	// publication. A stopped copy is invisible to later worktree proofs.
+	return manifest.hydrate(checkout, stage)
 }
 
 func writeNativeWarmBaseline(checkout, commit string) error {
@@ -204,6 +257,17 @@ func (p *warmWorkspacePool) recoverNativeCheckoutForReturn(ctx context.Context, 
 		if err != nil {
 			return a, err
 		}
+		if !atTarget && validNativeLFSStageID(intent.LFSStageID) {
+			meta, err := openWarmWorkspaceDir(filepath.Join(target, ".git"), false)
+			if err != nil {
+				return a, err
+			}
+			err = os.RemoveAll(nativeWarmLFSStage(meta.Name(), intent.LFSStageID))
+			meta.Close()
+			if err != nil {
+				return a, err
+			}
+		}
 		if atTarget {
 			prepared, err := prepareNativeWarmCheckout(ctx, target, cache, slot, repo, nil, intent, nil)
 			if err != nil {
@@ -222,4 +286,26 @@ func (p *warmWorkspacePool) recoverNativeCheckoutForReturn(ctx context.Context, 
 		return a, err
 	}
 	return a, errors.New("missing repository for interrupted native checkout")
+}
+
+func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a warmWorkspaceAllocation, root string, inv *domain.RunnerInvocation) error {
+	if err := p.checkNativeWarmEditors(a); err != nil {
+		return errors.Join(errNativeWarmCheckoutBusy, err)
+	}
+	archived := make(map[string]string, len(inv.ArchivedFiles))
+	for _, file := range inv.ArchivedFiles {
+		archived[file.Path] = file.SHA256
+	}
+	for _, repo := range inv.Repositories {
+		id := a.Lease.Slots[repo.RepositoryID]
+		ref, ok := a.PreparedRefs[id]
+		if !ok {
+			return errors.New("missing prepared native warm workspace reference")
+		}
+		proof := warmReturnTree{root: root, checkout: a.Targets[id], native: true, archived: archived, collected: make(map[string]string)}
+		if err := proof.verifyLocal(ctx, p.slots[id], p.gitCache(id), repo, ref, warmProofLFSCache); err != nil {
+			return fmt.Errorf("%s: verify prepared native checkout: %w", repo.Dir, err)
+		}
+	}
+	return nil
 }

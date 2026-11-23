@@ -149,6 +149,11 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 		}
 	}
 	root := filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace")
+	if p.native {
+		if err := p.checkNativeLeaseBeforeReady(ctx, a, root, inv); err != nil {
+			return err
+		}
+	}
 	if _, err := runtime.RestoreMissingWorkspaceArtifacts(root, inv.ArchivedFiles); err != nil {
 		return err
 	}
@@ -175,6 +180,11 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 	}
 	if _, err = p.inspectLease(a); err != nil {
 		return err
+	}
+	if p.native {
+		if err := p.checkNativeWarmEditors(a); err != nil {
+			return errors.Join(errNativeWarmCheckoutBusy, err)
+		}
 	}
 	a.GitReady = true
 	return p.saveAllocation(a)

@@ -21,6 +21,16 @@ func (e *Engine) warmWorkspaceControlRequest(run domain.Run, input domain.Runner
 	if err := e.repo.AuthorizeWarmWorkspaceControl(runnerID, run, &req); err != nil {
 		return req, err
 	}
+	if snapshot := run.WorkflowSnapshot.SandboxSnapshot; req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCommit &&
+		snapshot != nil && snapshot.Profile.Driver == domain.SandboxDriverNative {
+		// A stale partial return can remount its slots and recover archived
+		// files already removed. Build this payload from the durable refs.
+		files, err := warmRestoreFiles(run, req.WarmWorkspaceRefs)
+		if err != nil {
+			return req, err
+		}
+		req.ArtifactFiles = files
+	}
 	if req.Operation == domain.RunnerWorkspaceOperationWarmCheckout || req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck || req.Operation == domain.RunnerWorkspaceOperationWarmVerifyAccess {
 		req.Sandbox = run.WorkflowSnapshot.SandboxSnapshot
 		if req.Sandbox == nil || !domain.WarmWorkspaceSandboxDriver(req.Sandbox.Profile.Driver) {
