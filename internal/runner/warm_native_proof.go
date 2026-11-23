@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"agentflow/internal/domain"
@@ -180,16 +182,49 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 		}
 	}
 	var ignoredDirs map[string]bool
+	var windows warmWindowsTree
+	var pendingWindows map[string][]string
 	if w.native {
-		ignoredDirs, err = warmIgnoredDirectories(local, stage, w.checkout)
-		if err != nil {
-			return err
+		if len(tracked) >= warmWindowsMinTracked {
+			var ok bool
+			if windows, ok = openWarmWindowsTree(local, w.checkout, slot.Path); ok {
+				entries, err := windows.git(local, stage, false, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+				if err == nil {
+					ignoredDirs = warmIgnoredDirectoryEntries(entries)
+				}
+				if !deferTrackedContents && !rules.fileMode {
+					pendingWindows = make(map[string][]string, len(tracked))
+				}
+			}
+		}
+		if ignoredDirs == nil {
+			ignoredDirs, err = warmIgnoredDirectories(local, stage, w.checkout)
+			if err != nil {
+				return err
+			}
 		}
 		for path := range tracked {
 			for parent := path; parent != "."; parent = filepath.Dir(parent) {
 				delete(ignoredDirs, parent)
 			}
 		}
+	}
+	verifyTracked := func(path, rel string, fields []string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		matches, err := warmBlobMatchesWithRules(local, stage, head, lfs, path, rel, fields[2], fields[0], rules)
+		if err != nil {
+			var fileErr *os.PathError
+			if w.native && errors.As(err, &fileErr) && fileErr.Path == path && (errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist)) {
+				return warmTreeChanged("cannot read tracked file %s: %v", rel, fileErr.Err)
+			}
+			return err
+		}
+		if !matches {
+			return warmTreeChanged("commit or restore changes in %s", rel)
+		}
+		return nil
 	}
 	untracked := make(map[string]fs.DirEntry)
 	var untrackedPaths []string
@@ -232,18 +267,11 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 			if deferTrackedContents {
 				return nil
 			}
-			matches, err := warmBlobMatchesWithRules(local, stage, head, lfs, path, rel, fields[2], fields[0], rules)
-			if err != nil {
-				var fileErr *os.PathError
-				if w.native && errors.As(err, &fileErr) && fileErr.Path == path && (errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist)) {
-					return warmTreeChanged("cannot read tracked file %s: %v", rel, fileErr.Err)
-				}
-				return err
+			if pendingWindows != nil && d.Type().IsRegular() && (fields[0] == "100644" || fields[0] == "100755") && warmWindowsProofPath(rel) {
+				pendingWindows[rel] = fields
+				return nil
 			}
-			if !matches {
-				return warmTreeChanged("commit or restore changes in %s", rel)
-			}
-			return nil
+			return verifyTracked(path, rel, fields)
 		}
 		if d.IsDir() {
 			return nil
@@ -273,6 +301,16 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 	}
 	if deferTrackedContents {
 		*w.lfsReceipt = lfs
+	}
+	// Read contents after checking directory structure and archives. The
+	// Windows results prove bytes from this scan, never an earlier traversal.
+	checkedOnWindows := windows.verifiedFiles(local, pendingWindows, lfs)
+	for _, rel := range slices.Sorted(maps.Keys(pendingWindows)) {
+		if !checkedOnWindows[rel] {
+			if err := verifyTracked(filepath.Join(w.checkout, rel), rel, pendingWindows[rel]); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

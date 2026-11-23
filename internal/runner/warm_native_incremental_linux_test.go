@@ -2,6 +2,7 @@ package runner
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,7 +53,7 @@ func TestWarmNativeCheckoutOnlyFetchesChangedLFS(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(f.checkout, "changed.bin")); err != nil || string(data) != "new asset" {
 		t.Fatalf("changed LFS asset = %q, %v", data, err)
 	}
-	if err := checkNativeWarmClean(t.Context(), f.checkout, filepath.Dir(f.cache)); err != nil {
+	if err := checkNativeWarmClean(t.Context(), f.checkout, filepath.Dir(f.cache), ""); err != nil {
 		t.Fatalf("materialized LFS asset should leave a clean checkout: %v", err)
 	}
 }
@@ -67,6 +68,50 @@ func TestWarmNativeUnchangedCheckoutSkipsLFSAndCheckout(t *testing.T) {
 done`)
 	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWarmNativeSameCommitBranchChangeSkipsWorktreeCheckout(t *testing.T) {
+	f := newWarmGitFixture(t)
+	commit := runGitT(t, f.checkout, "rev-parse", "HEAD")
+	f.repo.WorkBranch = "run/checkout-test"
+	testNativeGitWrapper(t, `for arg do
+	if [ "$arg" = checkout ]; then
+		echo "unexpected worktree checkout for a same-commit branch change" >&2
+		exit 42
+	fi
+done`)
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, f.checkout, "symbolic-ref", "--short", "HEAD"); got != f.repo.WorkBranch {
+		t.Fatalf("branch = %q, want %q", got, f.repo.WorkBranch)
+	}
+	if got := runGitT(t, f.checkout, "rev-parse", "HEAD"); got != commit {
+		t.Fatalf("commit = %s, want %s", got, commit)
+	}
+}
+
+func TestWarmNativeSameCommitBranchChangeRecoversAfterUpdatingRef(t *testing.T) {
+	f := newWarmGitFixture(t)
+	f.repo.WorkBranch = "run/recovery-test"
+	slot := warmWorkspaceSlot{UnityProjectPath: "."}
+	interrupted := errors.New("interrupted after updating the target branch")
+	var pending nativeWarmCheckoutIntent
+	_, err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, nil, func(intent nativeWarmCheckoutIntent) error {
+		pending = intent
+		runGitT(t, f.checkout, "update-ref", "refs/heads/"+intent.Target.Branch, intent.Target.Commit)
+		return interrupted
+	})
+	if !errors.Is(err, interrupted) {
+		t.Fatal(err)
+	}
+	ref, err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, &pending, nil)
+	if err != nil {
+		t.Fatalf("resume same-commit branch attachment: %v", err)
+	}
+	if ref.Branch != f.repo.WorkBranch || runGitT(t, f.checkout, "symbolic-ref", "--short", "HEAD") != f.repo.WorkBranch {
+		t.Fatalf("branch was not attached after resuming: %+v", ref)
 	}
 }
 

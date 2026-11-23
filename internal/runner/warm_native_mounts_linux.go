@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -65,4 +67,36 @@ func bindNativeWarmDir(source, target string) error {
 
 func unmountNativeWarmDir(target string) error {
 	return unix.Unmount(target, 0)
+}
+
+// On a DrvFS metadata mount Linux permissions can deny an otherwise readable
+// Windows file. Keep those worktrees on the Linux verification path.
+func warmWindowsDriveWithoutMetadata(path string) bool {
+	var info unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &info); err != nil || info.Mask&unix.STATX_MNT_ID == 0 {
+		return false
+	}
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	return warmWindowsMountWithoutMetadata(string(raw), strconv.FormatUint(info.Mnt_id, 10))
+}
+
+func warmWindowsMountWithoutMetadata(mounts, id string) bool {
+	for line := range strings.SplitSeq(mounts, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 || fields[0] != id {
+			continue
+		}
+		separator := slices.Index(fields[6:], "-") + 6
+		if separator < 6 || separator+3 >= len(fields) || fields[separator+1] != "9p" {
+			return false
+		}
+		options := strings.FieldsFunc(fields[5]+","+fields[separator+3], func(c rune) bool {
+			return c == ',' || c == ';'
+		})
+		return slices.Contains(options, "aname=drvfs") && !slices.Contains(options, "metadata")
+	}
+	return false
 }

@@ -96,7 +96,10 @@ func inspectNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		return false, err
 	}
 	proof := warmReturnTree{root: checkout, checkout: checkout, native: true}
-	if current.Commit == intent.Before.Commit && current.Branch == intent.Before.Branch && tip == intent.BranchBefore {
+	// A same-commit branch change can update the target ref without moving HEAD
+	// or writing the worktree. Resume that intermediate state as the old tree.
+	updatedSameCommitRef := intent.Target.Branch != "" && intent.Before.Commit == intent.Target.Commit && tip == intent.Target.Commit
+	if current.Commit == intent.Before.Commit && current.Branch == intent.Before.Branch && (tip == intent.BranchBefore || updatedSameCommitRef) {
 		return false, proof.verifyLocal(ctx, slot, cache, repo, intent.Before, warmProofLFSContent)
 	}
 	if current.Commit == intent.Target.Commit &&
@@ -117,9 +120,12 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 		}
 	}
 	ref := intent.Target
-	checkoutArgs := []string{"checkout", "--no-overwrite-ignore", "--no-recurse-submodules"}
-	if !atTarget {
-		if _, err := nativeWarmGit(ctx, checkout, append(checkoutArgs, "--detach", ref.Commit)...); err != nil {
+	current, err := warmCheckoutRef(checkout, ref.RepositoryID)
+	if err != nil {
+		return err
+	}
+	if !atTarget && (current.Commit != ref.Commit || ref.Branch == "") {
+		if _, err := nativeWarmGit(ctx, checkout, "checkout", "--no-overwrite-ignore", "--no-recurse-submodules", "--detach", ref.Commit); err != nil {
 			return nativeWarmGitWriteError(ctx, err)
 		}
 	}
@@ -145,12 +151,19 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 			return err
 		}
 		if current.Branch != ref.Branch {
-			if _, err := nativeWarmGit(ctx, checkout, append(checkoutArgs, ref.Branch, "--")...); err != nil {
+			if current.Commit != ref.Commit {
+				return warmTreeChanged("fixed warm checkout changed before attaching the branch")
+			}
+			from := current.Branch
+			if from == "" {
+				from = current.Commit
+			}
+			if _, err := nativeWarmGit(ctx, checkout, "symbolic-ref", "-m", "checkout: moving from "+from+" to "+ref.Branch, "HEAD", name); err != nil {
 				return nativeWarmGitWriteError(ctx, err)
 			}
 		}
 	}
-	current, err := warmCheckoutRef(checkout, ref.RepositoryID)
+	current, err = warmCheckoutRef(checkout, ref.RepositoryID)
 	if err != nil {
 		return err
 	}
@@ -312,7 +325,7 @@ func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a w
 			if current.RepositoryID != ref.RepositoryID || current.Branch != ref.Branch || current.Commit != ref.Commit {
 				return warmTreeChanged("prepared native checkout %s changed", repo.Dir)
 			}
-			if err := checkNativeWarmClean(ctx, checkout, filepath.Dir(cache)); err != nil {
+			if err := checkNativeWarmClean(ctx, checkout, filepath.Dir(cache), p.slots[id].Path); err != nil {
 				return fmt.Errorf("%s: verify prepared native checkout: %w", repo.Dir, err)
 			}
 			continue

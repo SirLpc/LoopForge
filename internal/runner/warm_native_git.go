@@ -85,7 +85,7 @@ func nativeWarmConfigEntry(key, value string) bool {
 	return strings.HasPrefix(key, "lfs.") && strings.HasSuffix(key, ".access")
 }
 
-func checkNativeWarmClean(ctx context.Context, checkout, scratch string) error {
+func checkNativeWarmClean(ctx context.Context, checkout, scratch, original string) error {
 	if err := verifyNativeWarmConfig(ctx, checkout, scratch); err != nil {
 		return err
 	}
@@ -110,6 +110,7 @@ func checkNativeWarmClean(ctx context.Context, checkout, scratch string) error {
 	if err != nil {
 		return err
 	}
+	windowsCompatible := strings.Count(entries, "\x00") >= warmWindowsMinTracked
 	for entry := range strings.SplitSeq(strings.TrimSuffix(entries, "\x00"), "\x00") {
 		if entry == "" {
 			continue
@@ -117,6 +118,9 @@ func checkNativeWarmClean(ctx context.Context, checkout, scratch string) error {
 		flags, path, ok := strings.Cut(entry, "\t")
 		if !ok || !strings.HasPrefix(flags, "H ") {
 			return fmt.Errorf("fixed warm checkout has hidden or unmerged index entries: %q", path)
+		}
+		if !strings.HasPrefix(flags, "H 100644 ") && !strings.HasPrefix(flags, "H 100755 ") {
+			windowsCompatible = false
 		}
 		if strings.HasPrefix(flags, "H 160000 ") {
 			if !validWarmWorkspaceRelativePath(path) {
@@ -131,8 +135,23 @@ func checkNativeWarmClean(ctx context.Context, checkout, scratch string) error {
 			}
 		}
 	}
+	if windowsCompatible {
+		if w, ok := openWarmWindowsTree(ctx, checkout, original); ok {
+			if err := w.clean(ctx, checkout, scratch); err == nil || errors.Is(err, errNativeWarmDirty) || ctx.Err() != nil {
+				return err
+			}
+		}
+	}
+	return nativeWarmStatus(func(args ...string) (string, error) {
+		return gitwork.CStdoutRaw(ctx, checkout, nil, nativeWarmGitArgs(args...)...)
+	})
+}
+
+var errNativeWarmDirty = errors.New("fixed warm checkout is not clean")
+
+func nativeWarmStatus(git func(...string) (string, error)) error {
 	// Let Git refresh index stat information after LFS files are materialized.
-	status, err := gitwork.CStdoutRaw(ctx, checkout, nil, nativeWarmGitArgs("status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=none")...)
+	status, err := git("status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=none")
 	if err != nil || status == "" {
 		return err
 	}
@@ -141,12 +160,16 @@ func checkNativeWarmClean(ctx context.Context, checkout, scratch string) error {
 	changes := strings.TrimSuffix(status, "\x00")
 	for change := range strings.SplitSeq(changes, "\x00") {
 		if !strings.HasPrefix(change, " M ") {
-			return fmt.Errorf("fixed warm checkout is not clean: %s", strings.ReplaceAll(changes, "\x00", "\n"))
+			return fmt.Errorf("%w: %s", errNativeWarmDirty, strings.ReplaceAll(changes, "\x00", "\n"))
 		}
 	}
-	_, err = nativeWarmGit(ctx, checkout, "diff", "--quiet", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--")
+	_, err = git("diff", "--quiet", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--")
 	if err != nil {
-		return fmt.Errorf("fixed warm checkout is not clean: %s: %w", strings.ReplaceAll(changes, "\x00", "\n"), err)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return fmt.Errorf("%w: %s: %w", errNativeWarmDirty, strings.ReplaceAll(changes, "\x00", "\n"), err)
+		}
+		return err
 	}
 	return nil
 }
@@ -289,7 +312,7 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		if current.Commit != intent.Before.Commit || current.Branch != intent.Before.Branch {
 			return ref, warmTreeChanged("fixed warm checkout changed while fetching")
 		}
-		if err := checkNativeWarmClean(local, checkout, scratch); err != nil {
+		if err := checkNativeWarmClean(local, checkout, scratch, slot.Path); err != nil {
 			return ref, err
 		}
 		atTarget = current.Commit == intent.Target.Commit && current.Branch == intent.Target.Branch

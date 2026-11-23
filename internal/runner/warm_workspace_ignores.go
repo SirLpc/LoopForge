@@ -82,13 +82,17 @@ func warmIgnoredDirectories(ctx context.Context, stage, checkout string) (map[st
 	if err != nil {
 		return nil, err
 	}
+	return warmIgnoredDirectoryEntries(entries), nil
+}
+
+func warmIgnoredDirectoryEntries(entries string) map[string]bool {
 	ignored := make(map[string]bool)
 	for entry := range strings.SplitSeq(entries, "\x00") {
 		if path, ok := strings.CutSuffix(entry, "/"); ok {
 			ignored[path] = true
 		}
 	}
-	return ignored, nil
+	return ignored
 }
 
 func checkWarmIgnoredCollisions(ctx context.Context, stage, checkout, cache, head, target string) error {
