@@ -1,11 +1,15 @@
 package runner
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"agentflow/internal/domain"
@@ -49,6 +53,104 @@ func restartNativeLeaseTestPool(t *testing.T, p *warmWorkspacePool) *warmWorkspa
 	}
 	t.Cleanup(func() { _ = restarted.close() })
 	return restarted
+}
+
+func TestWarmNativeReturnChecksTrackedContentsAtConfirmation(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	l := placeNativeLeaseTest(t, p, "first", 1)
+	if err := prepareNativeLeaseTest(t, p, g, l, nil); err != nil {
+		t.Fatal(err)
+	}
+	d := nativeReturnTestDaemon(p, l)
+	warmGitWrite(t, g.checkout, "README.md", "external edit")
+	commit := nativeReturnTestProof(t, d, testNativeReturnRequest(l, g.repo))
+	if got := d.warmWorkspaceControl(t.Context(), commit); got.Code != domain.WorkspaceErrorWarmReturnStale {
+		t.Fatalf("modified checkout must retain the lease: %+v", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(g.checkout, "README.md")); err != nil || string(got) != "external edit" {
+		t.Fatalf("local change was lost: %q, %v", got, err)
+	}
+}
+
+func TestWarmNativeReturnRetainsUnreadableTrackedFile(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	l := placeNativeLeaseTest(t, p, "first", 1)
+	if err := prepareNativeLeaseTest(t, p, g, l, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(g.checkout, "README.md")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0644) })
+	if f, err := os.Open(path); err == nil {
+		f.Close()
+		t.Skip("the current user can still read mode-000 files")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatal(err)
+	}
+	d := nativeReturnTestDaemon(p, l)
+	commit := nativeReturnTestProof(t, d, testNativeReturnRequest(l, g.repo))
+	if got := d.warmWorkspaceControl(t.Context(), commit); got.Code != domain.WorkspaceErrorWarmReturnStale {
+		t.Fatalf("unreadable tracked file must invalidate the receipt: %+v", got)
+	}
+	if a := p.state.Leases[l.OwnerRunID]; a.ReturnProven || a.Phase != warmWorkspacePlaced {
+		t.Fatalf("unreadable file kept the lease frozen: %+v", a)
+	}
+}
+
+func TestWarmNativeReturnReusesVerifiedLFS(t *testing.T) {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("git-lfs unavailable")
+	}
+	for _, mode := range []string{"unchanged", "cache changed", "runner restart"} {
+		t.Run(mode, func(t *testing.T) {
+			p, g := openNativeLeaseTestPool(t)
+			runGitT(t, g.source, "lfs", "install", "--local")
+			runGitT(t, g.source, "lfs", "track", "*.bin")
+			const asset = "published LFS content"
+			warmGitWrite(t, g.source, "asset.bin", asset)
+			g.publish(t)
+			l := placeNativeLeaseTest(t, p, "first", 1)
+			if err := prepareNativeLeaseTest(t, p, g, l, nil); err != nil {
+				t.Fatal(err)
+			}
+			d := nativeReturnTestDaemon(p, l)
+			commit := nativeReturnTestProof(t, d, testNativeReturnRequest(l, g.repo))
+			if mode == "runner restart" {
+				p = restartNativeLeaseTestPool(t, p)
+				d = nativeReturnTestDaemon(p, l)
+			} else {
+				testNativeGitWrapper(t, `previous=; for arg do
+	if [ "$previous" = lfs ] && [ "$arg" = ls-files ]; then echo 'redundant LFS scan' >&2; exit 42; fi
+	previous=$arg
+done`)
+			}
+			if mode == "cache changed" {
+				slot := p.slots[l.Slots[g.repo.RepositoryID]]
+				storage := filepath.Join(warmLFSCache(p.gitCache(slot.ID), slot.ProjectID, g.repo), ".git", "lfs")
+				path := warmLFSObject(storage, fmt.Sprintf("%x", sha256.Sum256([]byte(asset))))
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(strings.Repeat("X", len(asset))), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := d.warmWorkspaceControl(t.Context(), commit)
+			if mode == "cache changed" {
+				if !strings.Contains(got.Error, "verified Git LFS cache object unavailable") || p.state.Leases[l.OwnerRunID].Phase != warmWorkspacePlaced {
+					t.Fatalf("invalid protected cache must block return: %+v", got)
+				}
+			} else if got.Error != "" || p.state.Leases[l.OwnerRunID].Phase != warmWorkspaceReleased {
+				t.Fatalf("could not return workspace: %+v", got)
+			}
+		})
+	}
 }
 
 func TestWarmNativeReturnRejectsChangeAfterProof(t *testing.T) {

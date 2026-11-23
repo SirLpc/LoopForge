@@ -486,6 +486,11 @@ func (p *warmWorkspacePool) finishMove(allocation warmWorkspaceAllocation) error
 	if returning {
 		allocation.Phase = warmWorkspaceReleased
 		allocation.Targets = nil
+		if allocation.NativeReturn != nil && len(allocation.NativeReturn.lfs) != 0 {
+			receipt := *allocation.NativeReturn
+			receipt.lfs = nil
+			allocation.NativeReturn = &receipt
+		}
 		next := p.state.clone()
 		for id, ref := range allocation.PreparedRefs {
 			record := next.Slots[id]

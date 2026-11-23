@@ -19,15 +19,16 @@ import (
 var errWarmReturnStale = errors.New("fixed warm checkout changed after return verification")
 
 type nativeWarmReturnState struct {
-	ID             string `json:"id,omitempty"`
-	CleanupStarted bool   `json:"cleanupStarted,omitempty"`
-	Invalidated    bool   `json:"invalidated,omitempty"`
+	ID             string                     `json:"id,omitempty"`
+	CleanupStarted bool                       `json:"cleanupStarted,omitempty"`
+	Invalidated    bool                       `json:"invalidated,omitempty"`
+	lfs            map[string]warmLFSManifest // An optimization for active receipts. A restarted Runner rebuilds the proof.
 }
 
-func (p *warmWorkspacePool) saveWarmReturnProof(a warmWorkspaceAllocation, refs []domain.WarmWorkspaceRef, remove []string) error {
+func (p *warmWorkspacePool) saveWarmReturnProof(a warmWorkspaceAllocation, refs []domain.WarmWorkspaceRef, remove []string, lfs map[string]warmLFSManifest) error {
 	a.ReturnProven, a.ReturnRefs, a.ReturnRemove = true, refs, remove
 	if p.native {
-		a.NativeReturn = &nativeWarmReturnState{ID: rand.Text()}
+		a.NativeReturn = &nativeWarmReturnState{ID: rand.Text(), lfs: lfs}
 	}
 	return p.saveAllocation(a)
 }
@@ -47,6 +48,10 @@ func (p *warmWorkspacePool) verifyNativeReturn(ctx context.Context, a warmWorksp
 		maps.Copy(archived, ref.Artifacts)
 	}
 	proof := warmReturnTree{root: root, native: true, archived: archived, collected: map[string]string{}}
+	var lfsProofs map[string]warmLFSManifest
+	if a.NativeReturn != nil {
+		lfsProofs = a.NativeReturn.lfs
+	}
 	expected := a.PreparedRefs
 	if a.GitReady {
 		expected = make(map[string]domain.WarmWorkspaceRef, len(a.ReturnRefs))
@@ -80,6 +85,10 @@ func (p *warmWorkspacePool) verifyNativeReturn(ctx context.Context, a warmWorksp
 		}
 		r := domain.RunnerRepository{RepositoryID: cacheID, CloneURL: origin}
 		proof.checkout, proof.artifactPrefix = slot.Path, prefix
+		proof.lfsReceipt = nil
+		if lfs, ok := lfsProofs[id]; ok {
+			proof.lfsReceipt = &lfs
+		}
 		if err := proof.verifyLocal(ctx, slot, cache, r, ref, warmProofLFSCache); err != nil {
 			return fmt.Errorf("%s: %w", prefix, err)
 		}
@@ -159,7 +168,11 @@ func (p *warmWorkspacePool) commitNativeReturn(ctx context.Context, l domain.War
 	p.mu.Lock()
 	err = p.checkNativeWarmEditors(a)
 	if err == nil && len(a.ReturnRemove) != 0 && (a.NativeReturn == nil || !a.NativeReturn.CleanupStarted) {
-		a.NativeReturn = &nativeWarmReturnState{ID: id, CleanupStarted: true}
+		state := nativeWarmReturnState{ID: id, CleanupStarted: true}
+		if a.NativeReturn != nil {
+			state.lfs = a.NativeReturn.lfs
+		}
+		a.NativeReturn = &state
 		err = p.saveAllocation(a)
 	}
 	p.mu.Unlock()

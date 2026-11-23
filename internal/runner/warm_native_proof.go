@@ -85,6 +85,9 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 	if _, err := gitwork.C(local, private, "init", "--template=", warmObjectFormat(head), stage); err != nil {
 		return err
 	}
+	// A new native receipt validates the index and archived files here. Only
+	// confirmation reads all tracked bytes, immediately before returning slots.
+	deferTrackedContents := w.native && w.lfsReceipt != nil && lfsMode == warmProofLFSFetch
 	rules := warmCheckoutFileRules{fileMode: true, symlinks: true}
 	if w.native {
 		rules, err = nativeWarmProofConfig(local, w.checkout, stage)
@@ -105,10 +108,6 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 	if alternateErr != nil {
 		return alternateErr
 	}
-	lfs, err := prepareWarmLFSForProof(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, r), head, r, (*os.File).Sync, lfsMode)
-	if err != nil {
-		return err
-	}
 	if err := warmRegular(filepath.Join(meta, "index")); err != nil {
 		return err
 	}
@@ -124,6 +123,16 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 		if errors.As(err, &exit) && exit.ExitCode() == 1 {
 			return warmTreeChanged("commit or unstage pending index changes")
 		}
+		return err
+	}
+	scope := warmLFSCache(cache, slot.ProjectID, r)
+	var lfs warmLFSManifest
+	if w.native && w.lfsReceipt != nil && lfsMode == warmProofLFSCache {
+		lfs, err = verifyWarmLFSCache(local, *w.lfsReceipt, scope, (*os.File).Sync, lfsMode, nil)
+	} else {
+		lfs, err = prepareWarmLFSForProof(local, auth, stage, cache, scope, head, r, (*os.File).Sync, lfsMode)
+	}
+	if err != nil {
 		return err
 	}
 	library := filepath.Join(slot.UnityProjectPath, "Library")
@@ -165,7 +174,7 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 			attributes = append(attributes, path)
 		}
 	}
-	if len(attributes) > 0 {
+	if !deferTrackedContents && len(attributes) > 0 {
 		if err := restoreWarmProofFiles(local, stage, head, attributes...); err != nil {
 			return err
 		}
@@ -220,8 +229,15 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 				}
 				return filepath.SkipDir
 			}
+			if deferTrackedContents {
+				return nil
+			}
 			matches, err := warmBlobMatchesWithRules(local, stage, head, lfs, path, rel, fields[2], fields[0], rules)
 			if err != nil {
+				var fileErr *os.PathError
+				if w.native && errors.As(err, &fileErr) && fileErr.Path == path && (errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist)) {
+					return warmTreeChanged("cannot read tracked file %s: %v", rel, fileErr.Err)
+				}
 				return err
 			}
 			if !matches {
@@ -254,6 +270,9 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 				return err
 			}
 		}
+	}
+	if deferTrackedContents {
+		*w.lfsReceipt = lfs
 	}
 	return nil
 }

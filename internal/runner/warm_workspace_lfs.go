@@ -28,11 +28,12 @@ type warmLFSFile struct {
 	Type string `json:"oid_type"`
 }
 type warmLFSManifest struct {
-	Files       []warmLFSFile `json:"files"`
-	storage     string
-	verified    map[string]int64
-	byPath      map[string]warmLFSFile
-	contentOnly bool
+	Files           []warmLFSFile `json:"files"`
+	storage         string
+	verified        map[string]int64
+	verifiedObjects map[string]warmLFSObjectStamp
+	byPath          map[string]warmLFSFile
+	contentOnly     bool
 }
 
 func warmLFSCache(cache, project string, repo domain.RunnerRepository) string {
@@ -96,6 +97,13 @@ func prepareWarmLFSManifest(local context.Context, stage, scope, tree string, sy
 	if manifest.contentOnly {
 		return manifest, nil
 	}
+	return verifyWarmLFSCache(local, manifest, scope, syncDir, mode, fetch)
+}
+
+func verifyWarmLFSCache(local context.Context, manifest warmLFSManifest, scope string, syncDir func(*os.File) error, mode warmProofLFSMode, fetch func() error) (warmLFSManifest, error) {
+	if len(manifest.Files) == 0 {
+		return manifest, nil
+	}
 	dir, err := openWarmWorkspaceDir(scope, mode == warmProofLFSFetch)
 	if err != nil {
 		return manifest, err
@@ -123,9 +131,14 @@ func prepareWarmLFSManifest(local context.Context, stage, scope, tree string, sy
 		}
 	}
 	manifest.storage = filepath.Join(scope, ".git", "lfs")
+	previous := manifest.verifiedObjects
+	manifest.verifiedObjects = make(map[string]warmLFSObjectStamp)
 	manifest.verified = map[string]int64{}
 	missing := map[string]int64{}
 	for _, item := range manifest.Files {
+		if err := local.Err(); err != nil {
+			return manifest, err
+		}
 		expected, verified := manifest.verified[item.OID]
 		if !verified {
 			expected, verified = missing[item.OID]
@@ -137,12 +150,13 @@ func prepareWarmLFSManifest(local context.Context, stage, scope, tree string, sy
 			continue
 		}
 		path := warmLFSObject(manifest.storage, item.OID)
-		ok, err := warmLFSMatches(path, item)
+		stamp, ok, err := warmLFSMatches(path, item, previous[item.OID])
 		if err != nil && !os.IsNotExist(err) {
 			return manifest, err
 		}
 		if ok {
 			manifest.verified[item.OID] = item.Size
+			manifest.verifiedObjects[item.OID] = stamp
 			continue
 		}
 		if mode == warmProofLFSCache {
@@ -162,7 +176,7 @@ func prepareWarmLFSManifest(local context.Context, stage, scope, tree string, sy
 	}
 	for oid, size := range missing {
 		path := warmLFSObject(manifest.storage, oid)
-		ok, err := warmLFSMatches(path, warmLFSFile{OID: oid, Size: size})
+		stamp, ok, err := warmLFSMatches(path, warmLFSFile{OID: oid, Size: size}, warmLFSObjectStamp{})
 		if err != nil {
 			return manifest, err
 		}
@@ -170,11 +184,15 @@ func prepareWarmLFSManifest(local context.Context, stage, scope, tree string, sy
 			return manifest, errors.New("downloaded Git LFS object failed integrity check")
 		}
 		manifest.verified[oid] = size
+		manifest.verifiedObjects[oid] = stamp
 	}
 	// A failed fetch or an interrupted return may leave valid file bytes
 	// with unconfirmed directory entries. Publish hits and downloads alike.
 	parents := map[string]bool{}
-	for oid := range manifest.verified {
+	for oid, stamp := range manifest.verifiedObjects {
+		if stamp == previous[oid] {
+			continue // This cache entry was already verified and synced for the receipt.
+		}
 		path := warmLFSObject(manifest.storage, oid)
 		for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
 			if parents[parent] {
@@ -282,28 +300,53 @@ func checkWarmWithoutLFS(ctx context.Context, stage, head string) error {
 	}
 	return nil
 }
-func warmLFSMatches(path string, item warmLFSFile) (bool, error) {
-	info, err := os.Lstat(path)
+
+type warmLFSObjectStamp struct {
+	device, inode uint64
+	size          int64
+	mtime, ctime  unix.Timespec
+}
+
+func protectedWarmLFSStamp(path string) (warmLFSObjectStamp, error) {
+	var stat unix.Stat_t
+	if err := unix.Lstat(path, &stat); err != nil {
+		return warmLFSObjectStamp{}, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return warmLFSObjectStamp{}, errors.New("invalid protected Git LFS object")
+	}
+	return warmLFSObjectStamp{device: uint64(stat.Dev), inode: stat.Ino, size: stat.Size, mtime: stat.Mtim, ctime: stat.Ctim}, nil
+}
+
+func warmLFSMatches(path string, item warmLFSFile, previous warmLFSObjectStamp) (warmLFSObjectStamp, bool, error) {
+	stamp, err := protectedWarmLFSStamp(path)
+	if err != nil || stamp.size != item.Size {
+		return stamp, false, err
+	}
+	if previous.inode != 0 && stamp == previous {
+		return stamp, true, nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return false, err
-	}
-	if !info.Mode().IsRegular() {
-		return false, errors.New("invalid protected Git LFS object")
-	}
-	if info.Size() != item.Size {
-		return false, nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false, err
+		return stamp, false, err
 	}
 	defer f.Close()
 	sum := sha256.New()
 	n, err := io.Copy(sum, f)
 	if err != nil || n != item.Size || hex.EncodeToString(sum.Sum(nil)) != item.OID {
-		return false, err
+		return stamp, false, err
 	}
-	return true, f.Sync()
+	if err := f.Sync(); err != nil {
+		return stamp, false, err
+	}
+	after, err := protectedWarmLFSStamp(path)
+	if err != nil {
+		return stamp, false, err
+	}
+	if after != stamp {
+		return stamp, false, errors.New("protected Git LFS object changed during verification")
+	}
+	return stamp, true, nil
 }
 
 // Materialize only pointer files. Never hardlink a user-writable asset into the

@@ -67,7 +67,7 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return nil, p.saveWarmReturnProof(a, nil, nil)
+		return nil, p.saveWarmReturnProof(a, nil, nil, nil)
 	}
 	if a.Phase != warmWorkspacePlaced || !a.GitReady {
 		return nil, errors.New("warm checkout is not prepared for return")
@@ -99,13 +99,23 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 	var refs []domain.WarmWorkspaceRef
 	var remove []string
 	skip := map[string]bool{}
+	var lfsProofs map[string]warmLFSManifest
+	if p.native {
+		lfsProofs = make(map[string]warmLFSManifest, len(repos))
+	}
 	for _, r := range repos {
 		slot := p.slots[lease.Slots[r.RepositoryID]]
 		target := targets[slot.ID]
 		proof := warmReturnTree{root: root, checkout: target, archived: archived, collected: map[string]string{}, native: p.native}
+		if p.native {
+			proof.lfsReceipt = new(warmLFSManifest)
+		}
 		ref, err := proof.verify(ctx, slot, p.gitCache(slot.ID), r)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", r.Dir, err)
+		}
+		if p.native {
+			lfsProofs[slot.ID] = *proof.lfsReceipt
 		}
 		ref.Artifacts = proof.collected
 		refs = append(refs, ref)
@@ -126,13 +136,14 @@ func (p *warmWorkspacePool) proveReturnWithArtifacts(ctx context.Context, lease 
 	if err != nil {
 		return nil, err
 	}
-	return refs, p.saveWarmReturnProof(a, refs, remove)
+	return refs, p.saveWarmReturnProof(a, refs, remove, lfsProofs)
 }
 
 type warmReturnTree struct {
 	root, checkout      string
 	artifactPrefix      string
 	native              bool
+	lfsReceipt          *warmLFSManifest // First-phase output or confirmation input on the same Runner.
 	archived, collected map[string]string
 	remove              []string
 }
