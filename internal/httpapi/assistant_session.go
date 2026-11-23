@@ -83,6 +83,7 @@ func (h *assistantHandlers) listSessions(c *gin.Context) {
 	}
 	statuses := h.repo.AssistantGenerationStatuses(current.ID, ids)
 	for i := range out {
+		out[i] = assistantSessionEndView(out[i])
 		out[i].GenerationStatus = "idle"
 		out[i].GenerationID = ""
 		out[i].Unread = false
@@ -264,7 +265,7 @@ func (h *assistantHandlers) session(c *gin.Context) {
 		}
 		if readOnly {
 			project, _ := h.repo.Project(item.ProjectID)
-			c.JSON(200, readOnlyConversation{AssistantSession: item, ReadOnly: true, ProjectName: project.Name})
+			c.JSON(200, readOnlyConversation{AssistantSession: assistantSessionEndView(item), ReadOnly: true, ProjectName: project.Name})
 			return
 		}
 		if !item.Shared && !readOnly {
@@ -283,7 +284,7 @@ func (h *assistantHandlers) session(c *gin.Context) {
 				item.IssueID = run.ExecutionContext.IssueID
 			}
 		}
-		c.JSON(200, decorateRunSessionView(h.repo, item))
+		c.JSON(200, decorateRunSessionView(h.repo, assistantSessionEndView(item)))
 	case "PUT":
 		if job, ok := h.readGeneration(ownerID, id); ok && job.Status == "running" {
 			c.JSON(409, gin.H{"error": "生成期间不能改写会话"})
@@ -450,7 +451,7 @@ func (h *assistantHandlers) session(c *gin.Context) {
 			return
 		}
 		if err := h.deleteConversation(ownerID, id); err != nil {
-			if errors.Is(err, errWarmConversationRetained) {
+			if errors.Is(err, errWarmConversationRetained) || errors.Is(err, repo.ErrAssistantSessionEnding) {
 				c.JSON(409, gin.H{"error": err.Error()})
 				return
 			}

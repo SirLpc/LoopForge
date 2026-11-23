@@ -3,6 +3,7 @@ package repo
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"time"
 
 	"agentflow/internal/domain"
@@ -80,7 +81,11 @@ func (r *AssistantRepo) BeginAssistantSessionEnd(userID int64, id, attemptID str
 			if !ok {
 				return errors.New("无法读取会话操作时间")
 			}
-			deadline := now.Add(assistantSessionEndStopBudget + time.Duration(len(session.OwnWorkspaceRunIDs)+1)*assistantSessionEndReturnBudget)
+			count := len(session.OwnWorkspaceRunIDs)
+			if session.WorkspaceRunID != "" && !slices.Contains(session.OwnWorkspaceRunIDs, session.WorkspaceRunID) {
+				count++
+			}
+			deadline := now.Add(assistantSessionEndStopBudget + time.Duration(count)*assistantSessionEndReturnBudget)
 			session.End = &domain.AssistantSessionEnd{State: domain.AssistantSessionEnding, AttemptID: attemptID, Deadline: &deadline}
 			var generation assistantGenerationRow
 			err = lockAssistantSessionGeneration(tx, session, &generation)
@@ -107,4 +112,80 @@ func (r *AssistantRepo) BeginAssistantSessionEnd(userID int64, id, attemptID str
 
 func lockAssistantSessionGeneration(tx *gorm.DB, session domain.AssistantSession, generation *assistantGenerationRow) error {
 	return tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(generation, "session_id = ? AND user_id = ?", session.ID, session.UserID).Error
+}
+
+var ErrAssistantSessionEndChanged = errors.New("会话结束操作已更新，请刷新后重试")
+
+func (r *AssistantRepo) AssistantSessionEndReady(userID int64, id, attemptID string) (domain.AssistantSession, bool, error) {
+	session, err := r.AssistantSessionForDeletion(userID, id)
+	if err != nil {
+		return session, false, err
+	}
+	if !r.currentAssistantSessionEnd(r.DB, session, attemptID) {
+		return session, false, ErrAssistantSessionEndChanged
+	}
+	var active int64
+	err = r.DB.Model(&assistantGenerationRow{}).Where("session_id = ? AND user_id = ? AND status = ?", session.ID, session.UserID, "running").Count(&active).Error
+	return session, active == 0 && err == nil, err
+}
+
+func (r *AssistantRepo) currentAssistantSessionEnd(tx *gorm.DB, session domain.AssistantSession, attemptID string) bool {
+	return attemptID != "" && session.End != nil && session.End.AttemptID == attemptID &&
+		errors.Is(r.assistantSessionWriteError(tx, session), ErrAssistantSessionEnding)
+}
+
+func (r *AssistantRepo) FinishAssistantSessionEnd(expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease, endError string) error {
+	if expected.End == nil {
+		return ErrAssistantSessionEndChanged
+	}
+	return r.retryAssistantDeadlock(func() error {
+		return r.DB.Transaction(func(tx *gorm.DB) error {
+			var row assistantSessionRow
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "id = ? AND user_id = ?", expected.ID, expected.UserID).Error; err != nil {
+				return err
+			}
+			current, err := checkedSessionForDeletion(row)
+			if err != nil {
+				return err
+			}
+			if !r.currentAssistantSessionEnd(tx, current, expected.End.AttemptID) {
+				return ErrAssistantSessionEndChanged
+			}
+			if endError != "" {
+				current.End = &domain.AssistantSessionEnd{State: domain.AssistantSessionEndFailed, Error: endError}
+				return tx.Model(&row).UpdateColumn("payload", mustJSON(current)).Error
+			}
+			now, ok := r.heartbeatNow(tx)
+			if !ok {
+				return errors.New("无法读取会话操作时间")
+			}
+			var generation assistantGenerationRow
+			err = lockAssistantSessionGeneration(tx, current, &generation)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if generation.Status == "running" {
+				return ErrAssistantSessionEnding
+			}
+			if err := r.lockReturnedAssistantWorkspaces(tx, current, expected, leases); err != nil {
+				return err
+			}
+			// Older sessions only had the active binding. Retain the history
+			// of a workspace the conversation opened before clearing it.
+			if current.WorkspaceRunID != "" && !slices.Contains(current.OwnWorkspaceRunIDs, current.WorkspaceRunID) {
+				var workspace runRow
+				err := tx.Select("id", "kind", "workflow_id", "execution_context").Take(&workspace, "id = ?", current.WorkspaceRunID).Error
+				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+				if err == nil && runFromRow(workspace).IsWorkspace() {
+					current.OwnWorkspaceRunIDs = append(current.OwnWorkspaceRunIDs, current.WorkspaceRunID)
+				}
+			}
+			current.WorkspaceRunID = ""
+			current.RuntimeMode = domain.AssistantModePlatform
+			current.End = &domain.AssistantSessionEnd{State: domain.AssistantSessionEnded, EndedAt: &now}
+			return tx.Model(&row).UpdateColumn("payload", mustJSON(current)).Error
+		})
+	})
 }

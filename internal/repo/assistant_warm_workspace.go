@@ -11,7 +11,7 @@ import (
 	"sort"
 )
 
-var ErrConversationWorkspaceChanged = errors.New("conversation workspace binding changed; retry deletion")
+var ErrConversationWorkspaceChanged = errors.New("对话工作区绑定已变更，请重试")
 
 func (r *AssistantRepo) AssistantSessionForDeletion(userID int64, id string) (domain.AssistantSession, error) {
 	var row assistantSessionRow
@@ -37,15 +37,7 @@ func checkedSessionForDeletion(row assistantSessionRow) (domain.AssistantSession
 func (r *AssistantRepo) DeleteAssistantSessionAfterReturn(expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease) error {
 	return r.deleteAssistantSession(expected.UserID, expected.ID, &expected, leases)
 }
-func (r *AssistantRepo) lockSessionReturn(tx *gorm.DB, expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease) error {
-	var row assistantSessionRow
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "user_id = ? AND id = ?", expected.UserID, expected.ID).Error; err != nil {
-		return err
-	}
-	current, err := checkedSessionForDeletion(row)
-	if err != nil {
-		return err
-	}
+func (r *AssistantRepo) lockReturnedAssistantWorkspaces(tx *gorm.DB, current, expected domain.AssistantSession, leases map[string]*domain.WarmWorkspaceLease) error {
 	if current.WorkspaceRunID != expected.WorkspaceRunID || current.RunID != expected.RunID || current.IssueID != expected.IssueID || current.ProjectID != expected.ProjectID || !slices.Equal(current.OwnWorkspaceRunIDs, expected.OwnWorkspaceRunIDs) {
 		return ErrConversationWorkspaceChanged
 	}

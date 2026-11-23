@@ -511,8 +511,19 @@ func (r *AssistantRepo) deleteAssistantSession(userID int64, id string, expected
 		return fmt.Errorf("assistant session not found")
 	}
 	return r.DB.Transaction(func(tx *gorm.DB) error {
+		var row assistantSessionRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "id = ? AND user_id = ?", id, userID).Error; err != nil {
+			return err
+		}
+		current, err := checkedSessionForDeletion(row)
+		if err != nil {
+			return err
+		}
+		if errors.Is(r.assistantSessionWriteError(tx, current), ErrAssistantSessionEnding) {
+			return ErrAssistantSessionEnding
+		}
 		var job assistantGenerationRow
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("session_id = ? AND user_id = ?", id, userID).Take(&job).Error
+		err = lockAssistantSessionGeneration(tx, current, &job)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -520,7 +531,7 @@ func (r *AssistantRepo) deleteAssistantSession(userID int64, id string, expected
 			return fmt.Errorf("请先停止生成再删除会话")
 		}
 		if expected != nil {
-			if err := r.lockSessionReturn(tx, *expected, leases); err != nil {
+			if err := r.lockReturnedAssistantWorkspaces(tx, current, *expected, leases); err != nil {
 				return err
 			}
 		}

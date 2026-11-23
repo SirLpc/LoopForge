@@ -89,3 +89,55 @@ func TestAssistantSessionEndCancel(t *testing.T) {
 		t.Fatalf("lost partial transcript or end state: %+v", saved)
 	}
 }
+
+func TestAssistantSessionEndRejectsStaleAttempt(t *testing.T) {
+	st, session := endSessionFixture(t)
+	run := domain.Run{ID: "queued-workspace", Kind: domain.RunKindWorkspace, Status: "waiting",
+		ExecutionContext: domain.TelemetryContext{WorkspaceMode: domain.WorkspaceModeWarmPool}}
+	if err := st.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAssistantSessionWorkspaceRun(session.UserID, session.ID, session.ProjectID, run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueueWarmWorkspace(domain.WarmWorkspaceDemand{
+		OwnerRunID: run.ID, ProjectID: "p", RunnerID: "runner", RepositoryIDs: []string{"repo"},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	lease, _, found, err := st.WarmWorkspaceAllocation(run.ID)
+	if err != nil || !found {
+		t.Fatalf("no queued demand: %v", err)
+	}
+	if err := st.CancelWarmWorkspaceEpoch(run.ID, lease.Epoch, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	old, _, err := st.BeginAssistantSessionEnd(session.UserID, session.ID, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-time.Minute)
+	old.End.Deadline = &expired
+	if err = st.DB.Model(&assistantSessionRow{}).Where("id = ?", old.ID).UpdateColumn("payload", mustJSON(old)).Error; err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := st.BeginAssistantSessionEnd(session.UserID, session.ID, "new")
+	if err != nil || current.End.AttemptID != "new" {
+		t.Fatalf("expired attempt could not be retried: %+v %v", current.End, err)
+	}
+	if err := st.FinishAssistantSessionEnd(old, nil, ""); err == nil {
+		t.Fatal("an old worker ended a newer attempt")
+	}
+	staleLease := lease
+	staleLease.Epoch++
+	if err := st.FinishAssistantSessionEnd(current, map[string]*domain.WarmWorkspaceLease{run.ID: &staleLease}, ""); !errors.Is(err, ErrConversationWorkspaceChanged) {
+		t.Fatalf("changed epoch was not rejected: %v", err)
+	}
+	if err := st.FinishAssistantSessionEnd(current, map[string]*domain.WarmWorkspaceLease{run.ID: &lease}, ""); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := st.AssistantSession(session.UserID, session.ID)
+	if stored.End.State != "ended" || len(stored.Messages) != 1 {
+		t.Fatalf("retry lost session: %+v", stored)
+	}
+}

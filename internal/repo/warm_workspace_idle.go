@@ -92,7 +92,18 @@ func (r *RunnersRepo) lockReturnedWorkspace(tx *gorm.DB, id string, expected *do
 	if err != nil {
 		return err
 	}
-	if expected == nil || !matchesWarmLease(row, *expected) || row.State != domain.WarmWorkspaceReleased && row.State != domain.WarmWorkspaceCanceled {
+	if expected == nil || row.State != domain.WarmWorkspaceReleased && row.State != domain.WarmWorkspaceCanceled {
+		return ErrConversationWorkspaceChanged
+	}
+	same := matchesWarmLease(row, *expected)
+	if row.State == domain.WarmWorkspaceCanceled && row.Generation == 0 {
+		// A demand cancelled before assignment has an epoch but no slot
+		// generation. Verify the exact demand without permitting runner I/O.
+		same = expected.Generation == 0 && row.OwnerRunID == expected.OwnerRunID &&
+			row.RunnerID == expected.RunnerID && row.Epoch == expected.Epoch &&
+			len(row.Slots) == 0 && len(expected.Slots) == 0
+	}
+	if !same {
 		return ErrConversationWorkspaceChanged
 	}
 	if row.State == domain.WarmWorkspaceReleased {

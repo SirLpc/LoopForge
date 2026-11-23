@@ -233,11 +233,7 @@ func (h *assistantHandlers) generation(c *gin.Context) {
 			c.JSON(409, gin.H{"error": err.Error()})
 			return
 		}
-		if value, ok := assistantLiveGenerations.Load(g.ID); ok {
-			if stop := value.(*assistantLiveGeneration).cancel; stop != nil {
-				stop()
-			}
-		}
+		cancelLiveAssistantGeneration(g.ID)
 		c.JSON(200, gin.H{"ok": true})
 		return
 	}
@@ -260,6 +256,14 @@ func (h *assistantHandlers) generation(c *gin.Context) {
 	g.Events = events
 	c.Header("Cache-Control", "no-store")
 	c.JSON(200, g)
+}
+
+func cancelLiveAssistantGeneration(id string) {
+	if value, ok := assistantLiveGenerations.Load(id); ok {
+		if stop := value.(*assistantLiveGeneration).cancel; stop != nil {
+			stop()
+		}
+	}
 }
 
 type generationHTTPWriter struct {
