@@ -123,6 +123,9 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 		}
 		defer gate.Unlock()
 		if err := p.prepareLeaseCheckout(ctx, *l, req.PreparationInvocation); err != nil {
+			if errors.Is(err, errNativeWarmCheckoutBusy) {
+				return workspaceBusyResponse(err.Error())
+			}
 			resp := runnerWorkspaceError(err)
 			if errors.Is(err, errWarmCheckoutRetryable) {
 				resp.Code = domain.WorkspaceErrorWarmCheckoutRetryable
@@ -144,6 +147,9 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 			return runnerWorkspaceError(err)
 		}
 		if err := p.reserve(*l); err != nil {
+			if errors.Is(err, errNativeWarmCheckoutBusy) {
+				return workspaceBusyResponse(err.Error())
+			}
 			return runnerWorkspaceError(err)
 		}
 		if err := p.place(ctx, *l, dirs); err != nil {

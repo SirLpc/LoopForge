@@ -59,10 +59,23 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 		}
 	}
 	if !a.CheckoutComplete {
-		if a.PreparingGit {
+		if a.PreparingGit && (!p.native || a.NativeCheckout == nil) {
 			return errors.New("interrupted warm checkout write requires inspection")
 		}
-		for _, repo := range inv.Repositories {
+		repositories := inv.Repositories
+		if a.NativeCheckout != nil {
+			first := slices.IndexFunc(repositories, func(r domain.RunnerRepository) bool {
+				return l.Slots[r.RepositoryID] == a.NativeCheckout.SlotID
+			})
+			if first < 0 {
+				return errors.New("missing repository for interrupted native checkout")
+			}
+			if first != 0 {
+				repositories = slices.Clone(repositories)
+				repositories[0], repositories[first] = repositories[first], repositories[0]
+			}
+		}
+		for _, repo := range repositories {
 			slotID := l.Slots[repo.RepositoryID]
 			if _, done := a.PreparedRefs[slotID]; done {
 				continue
@@ -90,15 +103,26 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 			}
 			var preparationErr error
 			if p.native {
-				preparationErr = prepareNativeWarmCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID], repo, restore, beforeWrite)
+				var pending *nativeWarmCheckoutIntent
+				if a.NativeCheckout != nil && a.NativeCheckout.SlotID == slotID {
+					pending = a.NativeCheckout
+				}
+				prepared, preparationErr = prepareNativeWarmCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID], repo, restore, pending, func(intent nativeWarmCheckoutIntent) error {
+					p.mu.Lock()
+					defer p.mu.Unlock()
+					a.NativeCheckout, a.PreparingGit = &intent, true
+					return p.saveAllocation(a)
+				})
 			} else {
 				preparationErr = prepareWarmCheckoutWithProof(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore, previous, beforeWrite)
 			}
 			if preparationErr != nil {
 				return preparationErr
 			}
-			if err := gitwork.RecordBaseline(targets[slotID], repo.Ref); err != nil {
-				return err
+			if !p.native {
+				if err := gitwork.RecordBaseline(targets[slotID], repo.Ref); err != nil {
+					return err
+				}
 			}
 			if err := configureRepositoryGitIdentity(ctx, targets[slotID], inv.GitUserName, inv.GitUserEmail); err != nil {
 				return err
@@ -109,7 +133,7 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 				a.PreparedRefs = map[string]domain.WarmWorkspaceRef{}
 			}
 			a.PreparedRefs[slotID] = prepared
-			a.PreparingGit = false
+			a.PreparingGit, a.NativeCheckout = false, nil
 			err = p.saveAllocation(a)
 			p.mu.Unlock()
 			if err != nil {

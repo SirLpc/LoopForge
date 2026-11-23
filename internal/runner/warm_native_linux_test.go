@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/gitwork"
 	"agentflow/internal/runtime"
 )
 
@@ -152,7 +154,7 @@ func TestWarmNativeCheckoutKeepsGitAndLibrary(t *testing.T) {
 	want := f.publish(t)
 	repo := f.repo
 	repo.WorkBranch, repo.CreateNewWorkBranch = "task", true
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := runGitT(t, f.checkout, "rev-parse", "HEAD"); got != want {
@@ -162,7 +164,7 @@ func TestWarmNativeCheckoutKeepsGitAndLibrary(t *testing.T) {
 	warmPoolRequireSame(t, library, filepath.Join(f.checkout, "Library/sentinel"))
 	runGitT(t, f.checkout, "rev-parse", "personal")
 	warmGitWrite(t, f.checkout, "new-code", "local edit")
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err == nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err == nil {
 		t.Fatal("accepted a modified source file")
 	}
 }
@@ -192,7 +194,7 @@ exec ` + strconv.Quote(git) + ` "$@"
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	prepare := func() error {
-		return prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil })
+		return prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil })
 	}
 	if err := prepare(); err != nil {
 		t.Fatalf("clean checkout with a Git warning: %v", err)
@@ -232,7 +234,7 @@ func TestWarmNativeReturnAcceptsUnchangedDrvFSModeAndPreservesPrivateRefs(t *tes
 		t.Fatal(err)
 	}
 	slot := warmWorkspaceSlot{UnityProjectPath: "."}
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	proof := warmReturnTree{root: filepath.Dir(f.checkout), checkout: f.checkout, native: true}
@@ -255,7 +257,7 @@ func TestWarmNativeLFSUsesOriginalCheckout(t *testing.T) {
 	warmGitWrite(t, f.source, "asset.bin", "original asset")
 	f.publish(t)
 	slot := warmWorkspaceSlot{UnityProjectPath: "."}
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(filepath.Join(f.checkout, "asset.bin")); err != nil || string(data) != "original asset" {
@@ -301,7 +303,7 @@ func TestWarmNativeCheckoutKeepsIgnoredPersonalFile(t *testing.T) {
 	runGitT(t, f.source, "add", "-f", "personal.txt")
 	f.publish(t)
 	wrote := false
-	err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error {
+	err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, warmWorkspaceSlot{UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error {
 		wrote = true
 		return nil
 	})
@@ -320,7 +322,7 @@ func TestWarmNativeCheckoutAndReturnWithNestedIgnore(t *testing.T) {
 	warmGitWrite(t, f.checkout, ".superpowers/sdd/progress.md", "draft")
 	warmGitWrite(t, f.source, ".superpowers/README.md", "tracked sibling")
 	commit := f.publish(t)
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	proof := warmReturnTree{root: filepath.Dir(f.checkout), checkout: f.checkout, native: true}
@@ -343,7 +345,7 @@ func TestWarmNativeReturnReadsWindowsCheckoutTextAndSymlinks(t *testing.T) {
 	runGitT(t, f.checkout, "config", "core.autocrlf", "true")
 	runGitT(t, f.checkout, "config", "core.symlinks", "false")
 	slot := warmWorkspaceSlot{UnityProjectPath: "."}
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(f.checkout, "lines.txt")); err != nil || string(got) != "first\r\nsecond\r\n" {
@@ -428,5 +430,276 @@ func TestWarmNativeLeasePreparesAndReturnsOriginalRepository(t *testing.T) {
 	control(domain.RunnerWorkspaceOperationWarmReleaseCommit)
 	if path := filepath.Join(f.homeA, "dev.txt"); warmGitStat(t, path).Size() != 7 {
 		t.Fatalf("local edit disappeared on return: %s", path)
+	}
+}
+
+func openNativeLeaseTestPool(t *testing.T) (*warmWorkspacePool, warmGitFixture) {
+	t.Helper()
+	if os.Getenv("LOOPFORGE_TEST_NATIVE_MOUNTS") != "1" {
+		t.Skip("run inside a private user and mount namespace")
+	}
+	f := newWarmPoolFixture(t)
+	g := nativeWarmTestClone(t, newWarmGitFixture(t))
+	f.writeSlots(t, g.checkout)
+	p, err := openWarmWorkspacePoolWithinMode(f.config, f.workspace, f.journal, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.close() })
+	g.repo.RepositoryID, g.repo.Dir = "a", "checkout"
+	return p, g
+}
+
+func placeNativeLeaseTest(t *testing.T, p *warmWorkspacePool, owner string, generation uint64) domain.WarmWorkspaceLease {
+	t.Helper()
+	l := domain.WarmWorkspaceLease{OwnerRunID: owner, RunnerID: "runner", Epoch: generation, Generation: generation, Slots: map[string]string{"a": "a"}}
+	if err := p.reserve(l); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.place(t.Context(), l, map[string]string{"a": "checkout"}); err != nil {
+		t.Fatal(err)
+	}
+	target := p.state.Leases[owner].Targets["a"]
+	t.Cleanup(func() { _ = unmountNativeWarmDir(target) })
+	return l
+}
+
+func prepareNativeLeaseTest(t *testing.T, p *warmWorkspacePool, g warmGitFixture, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
+	t.Helper()
+	return p.prepareLeaseCheckout(t.Context(), l, &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}, WarmWorkspaceRefs: refs})
+}
+
+func returnNativeLeaseTest(t *testing.T, p *warmWorkspacePool, g warmGitFixture, l domain.WarmWorkspaceLease) []domain.WarmWorkspaceRef {
+	t.Helper()
+	refs, err := p.proveReturn(t.Context(), l, []domain.RunnerRepository{g.repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.commitReturn(t.Context(), l, refs); err != nil {
+		t.Fatal(err)
+	}
+	return refs
+}
+
+func TestWarmNativeLeaseRestoresPublishedHistoricalBranch(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	first := placeNativeLeaseTest(t, p, "first", 1)
+	if err := prepareNativeLeaseTest(t, p, g, first, nil); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := warmGitStat(t, filepath.Join(g.checkout, "Library/sentinel"))
+	refs := returnNativeLeaseTest(t, p, g, first)
+	warmGitWrite(t, g.source, "advanced", "published")
+	latest := g.publish(t)
+	second := placeNativeLeaseTest(t, p, "second", 2)
+	if err := prepareNativeLeaseTest(t, p, g, second, nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = returnNativeLeaseTest(t, p, g, second)
+	reopened := placeNativeLeaseTest(t, p, "first", 3)
+	if err := prepareNativeLeaseTest(t, p, g, reopened, refs); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, g.checkout, "rev-parse", "HEAD"); got != refs[0].Commit {
+		t.Fatalf("no exact restore: %s", got)
+	}
+	if got := runGitT(t, g.checkout, "branch", "--show-current"); got != refs[0].Branch {
+		t.Fatalf("restore left the wrong branch checked out: %s", got)
+	}
+	if got := runGitT(t, g.source, "ls-remote", "origin", "refs/heads/master"); !strings.HasPrefix(got, latest+"\t") {
+		t.Fatalf("remote branch changed: %s", got)
+	}
+	warmPoolRequireSame(t, sentinel, filepath.Join(g.checkout, "Library/sentinel"))
+}
+
+func TestWarmNativeLeaseRefreshesBaseline(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	first := placeNativeLeaseTest(t, p, "first", 1)
+	if err := prepareNativeLeaseTest(t, p, g, first, nil); err != nil {
+		t.Fatal(err)
+	}
+	refs := returnNativeLeaseTest(t, p, g, first)
+	warmGitWrite(t, g.source, "advanced", "published")
+	latest := g.publish(t)
+	second := placeNativeLeaseTest(t, p, "second", 2)
+	if err := prepareNativeLeaseTest(t, p, g, second, nil); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want string) {
+		t.Helper()
+		content, err := os.ReadFile(gitwork.BaselinePath(g.checkout))
+		if err != nil || strings.TrimSpace(string(content)) != want {
+			t.Fatalf("baseline = %q, want %s, err = %v", content, want, err)
+		}
+	}
+	check(latest)
+	warmGitWrite(t, g.source, "later", "third revision")
+	g.publish(t)
+	if err := prepareNativeLeaseTest(t, p, g, second, nil); err != nil {
+		t.Fatal(err)
+	}
+	check(latest)
+	_ = returnNativeLeaseTest(t, p, g, second)
+	reopened := placeNativeLeaseTest(t, p, "first", 3)
+	if err := prepareNativeLeaseTest(t, p, g, reopened, refs); err != nil {
+		t.Fatal(err)
+	}
+	check(refs[0].Commit)
+}
+
+func TestWarmNativeCheckoutResumesIntent(t *testing.T) {
+	for _, mode := range []string{"before", "after", "lfs", "lfs changed"} {
+		t.Run(mode, func(t *testing.T) {
+			p, g := openNativeLeaseTestPool(t)
+			lease := placeNativeLeaseTest(t, p, "first", 1)
+			before := runGitT(t, g.checkout, "rev-parse", "HEAD")
+			if strings.HasPrefix(mode, "lfs") {
+				if _, err := exec.LookPath("git-lfs"); err != nil {
+					t.Skip("Git LFS is required")
+				}
+				runGitT(t, g.source, "lfs", "install", "--local")
+				runGitT(t, g.source, "lfs", "track", "*.bin")
+				warmGitWrite(t, g.source, "asset.bin", strings.Repeat("abcd", 400))
+			}
+			warmGitWrite(t, g.source, "advanced", "published")
+			want := g.publish(t)
+			if mode == "lfs changed" {
+				// Simulate a post-checkout, same-size edit during materialization.
+				t.Setenv("LOOPFORGE_TEST_CHECKOUT_MODE", "lfs")
+			} else {
+				t.Setenv("LOOPFORGE_TEST_CHECKOUT_MODE", mode)
+			}
+			testNativeGitWrapper(t, `for arg do
+	if [ "$arg" = checkout ] && [ -n "$LOOPFORGE_TEST_CHECKOUT_MODE" ]; then
+		if [ "$LOOPFORGE_TEST_CHECKOUT_MODE" != before ]; then
+			"$git" "$@" || exit $?
+		fi
+		echo "injected checkout failure" >&2
+		exit 42
+	fi
+done`)
+			err := prepareNativeLeaseTest(t, p, g, lease, nil)
+			if err == nil || !strings.Contains(err.Error(), "injected checkout failure") {
+				t.Fatalf("wanted injected preparation error, got %v", err)
+			}
+			t.Setenv("LOOPFORGE_TEST_CHECKOUT_MODE", "")
+			if mode == "lfs changed" {
+				warmGitWrite(t, g.checkout, "asset.bin", strings.Repeat("wxyz", 400))
+			}
+			target := p.state.Leases[lease.OwnerRunID].Targets["a"]
+			journal := filepath.Join(p.journalDir.Name(), p.journalName)
+			config := filepath.Join(filepath.Dir(filepath.Dir(journal)), "pool.json")
+			if err := unmountNativeWarmDir(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.close(); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := openWarmWorkspacePoolWithinMode(config, p.workspaceRoot, journal, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restarted.close()
+			intent := restarted.state.Leases[lease.OwnerRunID].NativeCheckout
+			if intent == nil || intent.SlotID != "a" || intent.Before.Commit != before || intent.Target.Commit != want || intent.Baseline != want {
+				t.Fatalf("restart lost checkout intent: %+v", intent)
+			}
+			warmGitWrite(t, g.source, "still-later", "new remote head")
+			g.publish(t)
+			err = prepareNativeLeaseTest(t, restarted, g, lease, nil)
+			if mode == "lfs changed" {
+				if err == nil {
+					t.Fatal("accepted a modified LFS file")
+				}
+				if got, _ := os.ReadFile(filepath.Join(g.checkout, "asset.bin")); string(got) != strings.Repeat("wxyz", 400) {
+					t.Fatal("modified LFS file was replaced")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("retry after checkout interruption: %v", err)
+			}
+			if got := runGitT(t, g.checkout, "rev-parse", "HEAD"); got != want || got == before {
+				t.Fatalf("recovered the wrong commit: %s", got)
+			}
+			if mode == "lfs" {
+				if got, _ := os.ReadFile(filepath.Join(g.checkout, "asset.bin")); string(got) != strings.Repeat("abcd", 400) {
+					t.Fatal("recovery did not materialize the original LFS asset")
+				}
+			}
+		})
+	}
+}
+
+func testNativeGitWrapper(t *testing.T, script string) {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	wrapper := "#!/bin/sh\ngit=" + strconv.Quote(git) + "\n" + script + "\nexec \"$git\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestWarmNativeCheckoutLegacyIntentNeedsInspection(t *testing.T) {
+	p, g := openNativeLeaseTestPool(t)
+	lease := placeNativeLeaseTest(t, p, "first", 1)
+	a := p.state.Leases[lease.OwnerRunID]
+	a.PreparingGit = true
+	if err := p.saveAllocation(a); err != nil {
+		t.Fatal(err)
+	}
+	before := runGitT(t, g.checkout, "rev-parse", "HEAD")
+	if err := prepareNativeLeaseTest(t, p, g, lease, nil); err == nil || !strings.Contains(err.Error(), "requires inspection") {
+		t.Fatalf("legacy intent was not retained: %v", err)
+	}
+	if got := runGitT(t, g.checkout, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("legacy intent changed checkout: %s", got)
+	}
+}
+
+func prepareNativeWarmCheckoutForTest(ctx context.Context, checkout, cache string, slot warmWorkspaceSlot, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef, beforeWrite func(domain.WarmWorkspaceRef) error) error {
+	_, err := prepareNativeWarmCheckout(ctx, checkout, cache, slot, repo, restore, nil, func(intent nativeWarmCheckoutIntent) error {
+		return beforeWrite(intent.Target)
+	})
+	return err
+}
+
+func TestWarmNativeHistoricalBranchGuards(t *testing.T) {
+	for _, mode := range []string{"unpublished branch tip", "concurrent branch update"} {
+		t.Run(mode, func(t *testing.T) {
+			g := nativeWarmTestClone(t, newWarmGitFixture(t))
+			slot := warmWorkspaceSlot{UnityProjectPath: "."}
+			old := runGitT(t, g.checkout, "rev-parse", "HEAD")
+			warmGitWrite(t, g.source, "advanced", "published")
+			tip := g.publish(t)
+			noOp := func(domain.WarmWorkspaceRef) error { return nil }
+			if err := prepareNativeWarmCheckoutForTest(t.Context(), g.checkout, g.cache, slot, g.repo, nil, noOp); err != nil {
+				t.Fatal(err)
+			}
+			changed := runGitT(t, g.checkout, "-c", "user.email=git@example.test", "-c", "user.name=Test", "commit-tree", "HEAD^{tree}", "-p", tip, "-m", "private commit")
+			if mode == "unpublished branch tip" {
+				runGitT(t, g.checkout, "update-ref", "refs/heads/master", changed, tip)
+			} else {
+				t.Setenv("LOOPFORGE_TEST_NATIVE_BRANCH_TIP", changed)
+				testNativeGitWrapper(t, `for arg do
+	if [ "$arg" = --detach ]; then
+		"$git" -C "$PWD" update-ref refs/heads/master "$LOOPFORGE_TEST_NATIVE_BRANCH_TIP" || exit $?
+	fi
+done`)
+			}
+			restore := &domain.WarmWorkspaceRef{RepositoryID: g.repo.RepositoryID, Branch: "master", Commit: old}
+			err := prepareNativeWarmCheckoutForTest(t.Context(), g.checkout, g.cache, slot, g.repo, restore, noOp)
+			if err == nil {
+				t.Fatal("restore accepted a private or concurrent branch update")
+			}
+			if got := runGitT(t, g.checkout, "rev-parse", "refs/heads/master"); got != changed {
+				t.Fatalf("lost local branch tip %s", got)
+			}
+		})
 	}
 }

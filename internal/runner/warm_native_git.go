@@ -79,9 +79,10 @@ func nativeWarmConfigEntry(key, value string) bool {
 	return strings.HasPrefix(key, "lfs.") && strings.HasSuffix(key, ".access")
 }
 
-func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot warmWorkspaceSlot, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef, beforeWrite func(domain.WarmWorkspaceRef) error) error {
+func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot warmWorkspaceSlot, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef, pending *nativeWarmCheckoutIntent, beforeWrite func(nativeWarmCheckoutIntent) error) (domain.WarmWorkspaceRef, error) {
+	var ref domain.WarmWorkspaceRef
 	if slot.Path != "" && nativeWarmEditorBusy(slot) {
-		return errors.Join(errWarmCheckoutRetryable, errors.New("close Unity before changing the leased checkout"))
+		return ref, errors.Join(errNativeWarmCheckoutBusy, errors.New("close Unity before changing the leased checkout"))
 	}
 	local, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -89,101 +90,130 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	defer stop()
 	parent, err := openWarmWorkspaceDir(filepath.Dir(cache), true)
 	if err != nil {
-		return err
+		return ref, err
 	}
 	parent.Close()
 	scratch, err := os.MkdirTemp(parent.Name(), ".native-warm-git-")
 	if err != nil {
-		return err
+		return ref, err
 	}
 	defer os.RemoveAll(scratch)
 	if err := verifyNativeWarmConfig(local, checkout, scratch); err != nil {
-		return err
+		return ref, err
 	}
 	origin, err := nativeWarmGit(local, checkout, "config", "--local", "--get-all", "remote.origin.url")
 	if err != nil || domain.URLHasCredentials(origin) || gitwork.CanonicalRemote(origin) != gitwork.CanonicalRemote(repo.CloneURL) {
-		return errors.New("fixed warm checkout origin does not match the frozen remote")
+		return ref, errors.New("fixed warm checkout origin does not match the frozen remote")
 	}
 	if err := gitwork.ValidateRemoteURL(repo.CloneURL, true); err != nil {
-		return err
+		return ref, err
 	}
-	if status, err := nativeWarmGit(local, checkout, "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"); err != nil || status != "" {
-		return fmt.Errorf("fixed warm checkout must be clean before switching branches: %w", errors.Join(err, errors.New(status)))
+	if pending == nil {
+		status, err := nativeWarmGit(local, checkout, "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none")
+		if err != nil || status != "" {
+			return ref, fmt.Errorf("fixed warm checkout must be clean before switching branches: %w", errors.Join(err, errors.New(status)))
+		}
 	}
-	head, err := warmCurrentHead(filepath.Join(checkout, ".git"))
+	current, err := warmCheckoutRef(checkout, repo.RepositoryID)
 	if err != nil {
-		return err
+		return ref, err
 	}
+	head := current.Commit
 	auth := repositoryGitContext(ctx, repo)
 	if err := fetchNativeWarmCache(local, auth, cache, scratch, slot, checkout, head, repo); err != nil {
-		return err
+		return ref, err
 	}
-	if restore != nil {
-		if restore.RepositoryID != repo.RepositoryID || !warmCommitID.MatchString(restore.Commit) {
-			return errors.New("invalid fixed warm restore reference")
+	var intent nativeWarmCheckoutIntent
+	if pending != nil {
+		intent = *pending
+		if err := authorizeWarmRestore(local, auth, scratch, cache, repo, intent.Target.Commit); err != nil {
+			return ref, errors.Join(errWarmCheckoutRetryable, err)
 		}
-		if err := authorizeWarmRestore(local, auth, scratch, cache, repo, restore.Commit); err != nil {
-			return errors.Join(errWarmCheckoutRetryable, err)
+	} else {
+		if restore != nil {
+			if restore.RepositoryID != repo.RepositoryID || !warmCommitID.MatchString(restore.Commit) {
+				return ref, errors.New("invalid fixed warm restore reference")
+			}
+			if err := authorizeWarmRestore(local, auth, scratch, cache, repo, restore.Commit); err != nil {
+				return ref, errors.Join(errWarmCheckoutRetryable, err)
+			}
+		}
+		target, branch, err := warmCheckoutTarget(local, cache, repo, restore)
+		if err != nil {
+			return ref, err
+		}
+		tip, err := nativeWarmBranchTip(local, checkout, branch)
+		if err != nil {
+			return ref, err
+		}
+		intent = nativeWarmCheckoutIntent{
+			SlotID: slot.ID, Before: current, BranchBefore: tip, Baseline: nativeWarmBaseline(local, cache, repo, restore, target),
+			Target: domain.WarmWorkspaceRef{RepositoryID: repo.RepositoryID, Branch: branch, Commit: target},
+		}
+		if tip != "" && tip != target {
+			if _, err := gitwork.C(local, cache, "merge-base", "--is-ancestor", tip, target); err != nil {
+				if restore == nil {
+					return ref, fmt.Errorf("fixed warm checkout has local commits on %s", branch)
+				}
+				intent.Rewind = true
+			}
 		}
 	}
-	target, branch, err := warmCheckoutTarget(local, cache, repo, restore)
-	if err != nil {
-		return err
+	if intent.Rewind {
+		if err := checkNativeWarmRewind(local, cache, intent); err != nil {
+			return ref, err
+		}
 	}
+	target := intent.Target.Commit
 	library := filepath.Join(slot.UnityProjectPath, "Library")
 	if err := warmTreeProtectsLibrary(local, cache, target, library); err != nil {
-		return err
+		return ref, err
 	}
 	if err := validateWarmLFSConfig(local, cache, target, repo.CloneURL); err != nil {
-		return err
+		return ref, err
 	}
 	stage := filepath.Join(scratch, "check")
 	if _, err := gitwork.C(local, scratch, "init", "--template=", warmObjectFormat(head), stage); err != nil {
-		return err
+		return ref, err
 	}
 	if err := nativeWarmProofAlternates(filepath.Join(stage, ".git"), cache, checkout); err != nil {
-		return err
+		return ref, err
 	}
 	if err := warmTargetIgnoresLibrary(local, stage, target, library); err != nil {
-		return err
+		return ref, err
 	}
 	lfs, err := prepareWarmLFS(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, repo), target, repo, (*os.File).Sync)
 	if err != nil {
-		return err
+		return ref, err
 	}
 	// Import only missing Git objects from the authenticated local cache.
 	// The checkout stays self-contained and can still be read by Windows Git.
-	if _, err := nativeWarmGit(local, checkout, "-c", "protocol.file.allow=always", "fetch", "--no-auto-gc", "--no-tags", "--no-write-fetch-head", cache, target); err != nil {
-		return err
+	objects := []string{target}
+	if intent.Baseline != target {
+		objects = append(objects, intent.Baseline)
 	}
-	switchArgs := []string{"checkout", "--no-overwrite-ignore", "--no-recurse-submodules", "--detach", target}
-	if branch != "" {
-		ref := "refs/heads/" + branch
-		if existing, ok := gitwork.RevParse(local, checkout, ref); ok && existing != target {
-			if _, err := nativeWarmGit(local, checkout, "merge-base", "--is-ancestor", existing, target); err != nil {
-				return fmt.Errorf("fixed warm checkout has local commits on %s", branch)
-			}
-		}
-		switchArgs = []string{"checkout", "--no-overwrite-ignore", "--no-recurse-submodules", "-B", branch, target}
+	fetch := append([]string{"-c", "protocol.file.allow=always", "fetch", "--no-auto-gc", "--no-tags", "--no-write-fetch-head", cache}, objects...)
+	if _, err := nativeWarmGit(local, checkout, fetch...); err != nil {
+		return ref, err
 	}
-	if err := checkWarmIgnoredCollisions(local, checkout, checkout, cache, head, target); err != nil {
-		return err
+	atTarget, err := inspectNativeWarmCheckout(local, checkout, cache, slot, repo, intent)
+	if err != nil {
+		return ref, fmt.Errorf("verify fixed checkout before writing: %w", err)
 	}
-	if slot.Path != "" && nativeWarmEditorBusy(slot) {
-		return errors.New("Unity opened while preparing the fixed warm checkout")
-	}
-	if err := beforeWrite(domain.WarmWorkspaceRef{RepositoryID: repo.RepositoryID, Branch: branch, Commit: target}); err != nil {
-		return err
-	}
-	if len(lfs.Files) > 0 {
-		if _, err := gitwork.C(local, checkout, "lfs", "install", "--local"); err != nil {
-			return err
+	if !atTarget {
+		if err := checkWarmIgnoredCollisions(local, checkout, checkout, cache, head, target); err != nil {
+			return ref, err
 		}
 	}
-	if _, err := nativeWarmGit(local, checkout, switchArgs...); err != nil {
-		return err
+	if pending == nil {
+		if err := beforeWrite(intent); err != nil {
+			return ref, err
+		}
 	}
-	return lfs.hydrate(checkout, "")
+	if err := applyNativeWarmCheckout(local, checkout, slot, intent, atTarget, lfs); err != nil {
+		return ref, err
+	}
+	return intent.Target, nil
 }
 
 func fetchNativeWarmCache(local, auth context.Context, cache, scratch string, slot warmWorkspaceSlot, checkout, head string, repo domain.RunnerRepository) error {

@@ -66,7 +66,7 @@ func TestWarmNativeLocalProofUsesOnlyCachedLFS(t *testing.T) {
 	warmGitWrite(t, f.source, "asset.bin", "original asset")
 	commit := f.publish(t)
 	slot := warmWorkspaceSlot{UnityProjectPath: "."}
-	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	// Vanish the remote after it has been verified by preparation.

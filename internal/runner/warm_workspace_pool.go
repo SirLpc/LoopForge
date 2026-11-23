@@ -250,7 +250,7 @@ func (p *warmWorkspacePool) reserve(lease domain.WarmWorkspaceLease) error {
 	for _, id := range lease.Slots {
 		record := p.state.Slots[id]
 		if p.native && nativeWarmEditorBusy(p.slots[id]) {
-			return fmt.Errorf("close Unity before leasing warm slot %q", id)
+			return fmt.Errorf("%w: close Unity before leasing warm slot %q", errNativeWarmCheckoutBusy, id)
 		}
 		if record.NeedsInspection || active[id] || record.Generation >= lease.Generation {
 			return fmt.Errorf("warm workspace slot %q is unavailable for generation %d", id, lease.Generation)

@@ -44,6 +44,7 @@ type warmWorkspaceSlotRecord struct {
 }
 
 type warmWorkspaceAllocation struct {
+	NativeCheckout   *nativeWarmCheckoutIntent          `json:"nativeCheckout,omitempty"`
 	PreparedRefs     map[string]domain.WarmWorkspaceRef `json:"preparedRefs,omitempty"`
 	PreparingGit     bool                               `json:"preparingGit,omitempty"`
 	CheckoutComplete bool                               `json:"checkoutComplete,omitempty"`
@@ -182,6 +183,14 @@ func (p *warmWorkspacePool) validateJournal(workspaceID warmWorkspaceIdentity) e
 		}
 		if err := p.validateLease(lease); err != nil {
 			return err
+		}
+		if intent := allocation.NativeCheckout; intent != nil {
+			if !p.native || allocation.Phase != warmWorkspacePlaced || !allocation.PreparingGit || allocation.GitReady ||
+				allocation.CheckoutComplete || allocation.ReturnProven || intent.SlotID == "" ||
+				lease.Slots[intent.Target.RepositoryID] != intent.SlotID ||
+				!intent.valid() {
+				return errors.New("warm workspace journal contains an invalid native checkout intent")
+			}
 		}
 		switch allocation.Phase {
 		case warmWorkspaceReserved, warmWorkspaceReleased:
