@@ -166,7 +166,7 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		}
 		switchArgs = []string{"checkout", "--no-overwrite-ignore", "--no-recurse-submodules", "-B", branch, target}
 	}
-	if err := checkNativeWarmIgnoredFiles(local, checkout, cache, head, target); err != nil {
+	if err := checkWarmIgnoredCollisions(local, checkout, checkout, cache, head, target); err != nil {
 		return err
 	}
 	if slot.Path != "" && nativeWarmEditorBusy(slot) {
@@ -249,37 +249,6 @@ func nativeWarmProofAlternates(meta, cache, checkout string) error {
 	return warmAlternate(meta, objects)
 }
 
-func checkNativeWarmIgnoredFiles(ctx context.Context, checkout, cache, head, target string) error {
-	added, err := gitwork.C(ctx, cache, "diff-tree", "-r", "--no-renames", "--name-only", "--diff-filter=A", "-z", head, target)
-	if err != nil || added == "" {
-		return err
-	}
-	localFiles, err := nativeWarmGit(ctx, checkout, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory")
-	if err != nil || localFiles == "" {
-		return err
-	}
-	ignoreCase, _ := nativeWarmGit(ctx, checkout, "config", "--type=bool", "--get", "core.ignorecase")
-	ignoredPaths := strings.Split(localFiles, "\x00")
-	for _, name := range strings.Split(added, "\x00") {
-		if name == "" {
-			continue
-		}
-		for _, ignored := range ignoredPaths {
-			if ignored == "" {
-				continue
-			}
-			a, b := name, strings.TrimSuffix(ignored, "/")
-			if ignoreCase == "true" {
-				a, b = strings.ToLower(a), strings.ToLower(b)
-			}
-			if warmWorkspacePathsOverlap(a, b) {
-				return fmt.Errorf("branch switch would overwrite ignored local file %s", ignored)
-			}
-		}
-	}
-	return nil
-}
-
 func nativeWarmProofConfig(ctx context.Context, checkout, stage string) (warmCheckoutFileRules, error) {
 	rules := warmCheckoutFileRules{fileMode: true, symlinks: true}
 	for _, setting := range []struct {
@@ -288,6 +257,7 @@ func nativeWarmProofConfig(ctx context.Context, checkout, stage string) (warmChe
 	}{
 		{"core.filemode", "--type=bool"},
 		{"core.symlinks", "--type=bool"},
+		{"core.ignorecase", "--type=bool"},
 		{"core.autocrlf", "--type=bool-or-str"},
 		{"core.eol", ""},
 	} {

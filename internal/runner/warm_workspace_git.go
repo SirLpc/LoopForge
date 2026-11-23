@@ -189,6 +189,9 @@ func prepareWarmCheckoutWithProof(ctx context.Context, checkout, cache, project,
 	if err := verifyWarmWorktree(local, checkout, stage, head, target, library, work); err != nil {
 		return err
 	}
+	if err := checkWarmIgnoredCollisions(local, stage, checkout, db, head, target); err != nil {
+		return err
+	}
 	if _, err := gitwork.C(local, stage, "update-ref", "--no-deref", "HEAD", target); err != nil {
 		return err
 	}
@@ -382,13 +385,6 @@ func verifyWarmWorktree(local context.Context, checkout, stage, head, target, li
 	if _, err := work(warmLFSVerificationArgs("update-index", "--really-refresh")...); err != nil {
 		return fmt.Errorf("warm checkout differs from its verified baseline: %w", err)
 	}
-	extra, err := work("ls-files", "-z", "--others", "--directory", "--no-empty-directory", "--", ".", ":(exclude,literal)"+library)
-	if err != nil {
-		return err
-	}
-	if extra != "" {
-		return fmt.Errorf("warm checkout contains unowned files: %s", extra)
-	}
 	if _, err := os.Lstat(filepath.Join(checkout, library)); err == nil {
 		lib, err := openWarmWorkspaceDir(filepath.Join(checkout, library), false)
 		if err != nil {
@@ -403,6 +399,16 @@ func verifyWarmWorktree(local context.Context, checkout, stage, head, target, li
 		}
 	} else if !os.IsNotExist(err) {
 		return err
+	}
+	if err := copyWarmGitExclude(checkout, stage); err != nil {
+		return err
+	}
+	extra, err := work("ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory", "--", ".", ":(exclude,literal)"+library)
+	if err != nil {
+		return err
+	}
+	if extra != "" {
+		return fmt.Errorf("warm checkout contains unowned files: %s", extra)
 	}
 	return nil
 }

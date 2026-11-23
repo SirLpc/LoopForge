@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func warmReturnFixture(t *testing.T) (warmPoolFixture, *warmWorkspacePool, domain.WarmWorkspaceLease, warmGitFixture) {
@@ -96,15 +98,18 @@ func TestWarmWorkspaceReleaseWithCommittedLineEndingAttributes(t *testing.T) {
 func TestWarmWorkspaceReleaseProtectsLocalData(t *testing.T) {
 	changes := map[string]func(*testing.T, warmGitFixture){
 		"worktree": func(t *testing.T, g warmGitFixture) { warmGitWrite(t, g.checkout, "README.md", "modified") },
+		"Library missing committed ignore rule": func(t *testing.T, g warmGitFixture) {
+			warmGitWrite(t, g.checkout, ".git/info/exclude", "/Library/\n")
+			warmGitWrite(t, g.checkout, ".gitignore", "# No committed Library rule\n")
+			runGitT(t, g.checkout, "add", ".gitignore")
+			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "-qm", "remove Library ignore")
+			runGitT(t, g.checkout, "push", "origin", "HEAD")
+		},
 		"staged": func(t *testing.T, g warmGitFixture) {
 			warmGitWrite(t, g.checkout, "staged", "data")
 			runGitT(t, g.checkout, "add", "staged")
 		},
 		"untracked": func(t *testing.T, g warmGitFixture) { warmGitWrite(t, g.checkout, "private", "data") },
-		"ignored": func(t *testing.T, g warmGitFixture) {
-			warmGitWrite(t, g.checkout, ".git/info/exclude", "private")
-			warmGitWrite(t, g.checkout, "private", "data")
-		},
 		"unpublished detached HEAD": func(t *testing.T, g warmGitFixture) {
 			runGitT(t, g.checkout, "checkout", "--detach")
 			runGitT(t, g.checkout, "-c", "user.name=test", "-c", "user.email=t@example.test", "commit", "--allow-empty", "-qm", "unpublished")
@@ -159,6 +164,118 @@ func TestWarmWorkspaceReleaseProtectsLocalData(t *testing.T) {
 	}
 }
 
+func TestWarmWorkspaceReusesSlotWithIgnoredFiles(t *testing.T) {
+	_, p, lease, g := warmReturnFixture(t)
+	warmGitWrite(t, g.checkout, ".git/info/exclude", "/ local.txt\n/local.pipe\n")
+	files := map[string]string{
+		".superpowers/sdd/.gitignore":        "*\n",
+		".superpowers/sdd/draft/progress.md": "draft",
+		" local.txt":                         "locally excluded",
+	}
+	for name, contents := range files {
+		warmGitWrite(t, g.checkout, name, contents)
+	}
+	if err := unix.Mkfifo(filepath.Join(g.checkout, "local.pipe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := p.proveReturn(t.Context(), lease, []domain.RunnerRepository{g.repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.commitReturn(t.Context(), lease, refs); err != nil {
+		t.Fatal(err)
+	}
+	checkFiles := func(checkout string) {
+		t.Helper()
+		for name, want := range files {
+			got, err := os.ReadFile(filepath.Join(checkout, name))
+			if err != nil || string(got) != want {
+				t.Fatalf("%s = %q, want %q, error %v", name, got, want, err)
+			}
+		}
+		if info, err := os.Lstat(filepath.Join(checkout, "local.pipe")); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			t.Fatalf("ignored pipe changed or removed: %v", err)
+		}
+	}
+	checkFiles(p.slots["a"].Path)
+
+	warmGitWrite(t, g.source, ".superpowers/README.md", "tracked sibling")
+	g.publish(t)
+	next := lease
+	next.OwnerRunID = "next-owner"
+	next.Generation++
+	if err := p.reserve(next); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.place(t.Context(), next, map[string]string{"a": "checkout"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.prepareLeaseCheckout(t.Context(), next, &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{g.repo}}); err != nil {
+		t.Fatal(err)
+	}
+	nextCheckout := filepath.Join(p.workspaceRoot, "runs", next.OwnerRunID, "workspace", "checkout")
+	checkFiles(nextCheckout)
+	if got := runGitT(t, nextCheckout, "status", "--porcelain"); got != "" {
+		t.Fatalf("next checkout lists ignored files: %s", got)
+	}
+}
+
+func TestWarmWorkspaceLegacyReturnKeepsIgnoredArtifact(t *testing.T) {
+	_, p, lease, g := warmReturnFixture(t)
+	const name, contents = "report.txt", "keep me"
+	warmGitWrite(t, g.checkout, name, contents)
+	files := []domain.WorkspaceArtifactFile{{
+		Path: "checkout/" + name, Content: contents, SHA256: runtime.WorkspaceContentSHA(contents),
+	}}
+	refs, err := p.proveReturnWithArtifacts(t.Context(), lease, []domain.RunnerRepository{g.repo}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The previous return policy could also record already ignored files as
+	// artifacts. The current policy must preserve files in those proofs.
+	warmGitWrite(t, g.checkout, ".git/info/exclude", "/"+name+"\n")
+	if err := p.commitReturn(t.Context(), lease, refs); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(p.slots["a"].Path, name)); err != nil || string(got) != contents {
+		t.Fatalf("ignored artifact = %q, err = %v", got, err)
+	}
+}
+
+func TestWarmReturnVerifiesManifestLFSFileWithoutGitPerPath(t *testing.T) {
+	const contents = "hydrated object"
+	object := fmt.Sprintf("%x", sha256.Sum256([]byte(contents)))
+	pointer := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n", object, len(contents))
+	checkout := t.TempDir()
+	warmGitWrite(t, checkout, "asset", contents)
+	if err := os.Mkdir(filepath.Join(checkout, "proof"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(checkout, "proof")
+	cmd := exec.Command("git", "hash-object", "--stdin")
+	cmd.Stdin = strings.NewReader(pointer)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := warmLFSManifest{byPath: map[string]warmLFSFile{"asset": {OID: object, Size: int64(len(contents))}}, verified: map[string]int64{object: int64(len(contents))}}
+	check := func() bool {
+		return warmBlobMatches(t.Context(), stage, "", manifest, filepath.Join(checkout, "asset"), "asset", strings.TrimSpace(string(out)), "100644")
+	}
+	if !check() {
+		t.Fatal("verified hydrated bytes should match without a Git object lookup")
+	}
+	warmGitWrite(t, checkout, "asset", pointer)
+	if !check() {
+		t.Fatal("the exact committed pointer should also match")
+	}
+	warmGitWrite(t, checkout, "asset", strings.Repeat("x", len(contents)))
+	if check() {
+		t.Fatal("modified bytes matched the verified manifest")
+	}
+}
+
 func TestWarmWorkspaceReleasePreservesUnprovenGeneratedAndLFS(t *testing.T) {
 	t.Run("generated", func(t *testing.T) {
 		_, p, l, g := warmReturnFixture(t)
@@ -197,8 +314,8 @@ func TestWarmWorkspaceReleasePreservesUnprovenGeneratedAndLFS(t *testing.T) {
 			if err := p.commitReturn(t.Context(), l, refs); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := os.Stat(filepath.Join(p.slots["a"].Path, "Temp")); !os.IsNotExist(err) {
-				t.Fatalf("verified generated directory remained: %v", err)
+			if content, err := os.ReadFile(filepath.Join(p.slots["a"].Path, "Temp", "user-work")); err != nil || string(content) != "unique" {
+				t.Fatalf("ignored generated file = %q, err = %v", content, err)
 			}
 		})
 	}

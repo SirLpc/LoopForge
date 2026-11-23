@@ -77,6 +77,22 @@ func TestWarmCheckoutPreservesLibraryAndUsesLatestRef(t *testing.T) {
 		t.Fatal("unchanged worktree file replaced")
 	}
 }
+
+func TestWarmCheckoutRejectsOverwriteOfIgnoredFile(t *testing.T) {
+	f := newWarmGitFixture(t)
+	warmGitWrite(t, f.checkout, ".git/info/exclude", "/local.txt\n")
+	warmGitWrite(t, f.checkout, "local.txt", "keep me")
+	warmGitWrite(t, f.source, "local.txt", "tracked on target")
+	f.publish(t)
+	err := prepareWarmCheckout(t.Context(), f.checkout, f.cache, f.repo, nil)
+	if err == nil || !strings.Contains(err.Error(), "overwrite ignored local file") {
+		t.Fatalf("ignored file collision was not diagnosed: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(f.checkout, "local.txt")); err != nil || string(content) != "keep me" {
+		t.Fatalf("ignored file = %q, err = %v", content, err)
+	}
+}
+
 func TestWarmCheckoutGitIsolation(t *testing.T) {
 	f := newWarmGitFixture(t)
 	f.prepare(t, nil)
@@ -181,6 +197,7 @@ func TestWarmCheckoutProtectsStagedSeedAndLibrary(t *testing.T) {
 				runGitT(t, f.checkout, "add", "README.md")
 				runGitT(t, f.checkout, "restore", "--source=HEAD", "--worktree", "README.md")
 			} else {
+				warmGitWrite(t, f.checkout, ".git/info/exclude", "/Library/\n")
 				warmGitWrite(t, f.source, ".gitignore", "# no longer ignored\n")
 				f.publish(t)
 			}

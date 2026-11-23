@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,6 +130,62 @@ func TestCancelWarmSOPClosesPlatformSandboxBeforeReturningSlot(t *testing.T) {
 	}
 	if data, err := os.ReadFile(localFile); err != nil || string(data) != "keep" {
 		t.Fatalf("platform workspace file = %q, err = %v", data, err)
+	}
+}
+
+func TestWarmWorkspaceBackgroundReturnAllowsLongVerification(t *testing.T) {
+	e, run := warmSOPWithReadySlot(t, "succeeded")
+	checked := false
+	e.WorkspaceCheckpointTransport = func(ctx context.Context, _ domain.Run, req domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
+			checked = true
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) < 25*time.Minute || time.Until(deadline) > 30*time.Minute {
+				t.Fatalf("unexpected return verification deadline: %s", time.Until(deadline))
+			}
+			return domain.RunnerWorkspaceResponse{Payload: []byte(`[{"repositoryId":"repo","commit":"0123456789012345678901234567890123456789"}]`)}, nil
+		}
+		return domain.RunnerWorkspaceResponse{Payload: []byte(`{"phase":"released"}`)}, nil
+	}
+	e.cleanupWarmWorkspace(run, time.Now())
+	if state, err := e.WarmWorkspaceStatus(run.ID); !checked || err != nil || state != domain.WarmWorkspaceReleased {
+		t.Fatalf("verification started = %t, state = %q, error = %v", checked, state, err)
+	}
+}
+
+func TestWarmWorkspaceLongReturnRenewsLeaseAndStopsOnLoss(t *testing.T) {
+	e, run := warmSOPWithReadySlot(t, "succeeded")
+	token, err := e.repo.BeginWorkspaceCheckpointSave(run.ID, time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, ok := e.repo.WorkspaceCheckpoint(run.ID)
+	if !ok || original.LeaseUntil == nil {
+		t.Fatal("workspace lease was not recorded")
+	}
+	parent, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	ctx, stop := e.keepWarmReturnLease(parent, run.ID, token, 10*time.Millisecond)
+	defer stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current, _ := e.repo.WorkspaceCheckpoint(run.ID)
+		if current.LeaseUntil != nil && current.LeaseUntil.After(*original.LeaseUntil) {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("lease did not renew: %v", context.Cause(ctx))
+		}
+	}
+	if err := e.repo.FinishWorkspaceUse(run.ID, token, time.Now(), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	<-ctx.Done()
+	if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "renew warm workspace return lease") {
+		t.Fatalf("return was not canceled on lease loss: %v", cause)
 	}
 }
 

@@ -22,7 +22,7 @@ type warmWorkspaceSlot struct {
 	RepositoryID     string   `json:"repositoryId"`
 	Path             string   `json:"path"`
 	UnityProjectPath string   `json:"unityProjectPath"`
-	DiscardGenerated []string `json:"discardGenerated,omitempty"`
+	DiscardGenerated []string `json:"discardGenerated,omitempty"` // Accepted in legacy configs. Ignored files remain in the slot.
 }
 
 type warmWorkspacePool struct {

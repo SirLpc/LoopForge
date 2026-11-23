@@ -106,6 +106,8 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 	if state == domain.WarmWorkspaceQueued {
 		return e.repo.CancelWarmWorkspaceEpoch(run.ID, l.Epoch, time.Now())
 	}
+	ctx, stopRenewal := e.keepWarmReturnLease(ctx, run.ID, token, time.Minute)
+	defer stopRenewal()
 	req := domain.RunnerWorkspaceRequest{RunID: run.ID, WarmWorkspaceLease: &l, Operation: domain.RunnerWorkspaceOperationWarmReleaseCheck}
 	receipt, err := e.repo.HasWarmWorkspaceReturnReceipt(l)
 	if err != nil {
@@ -136,6 +138,9 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 		}
 		proof, err := e.requestWorkspaceCheckpoint(ctx, current, req)
 		if err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
 			return err
 		}
 		if proof.Error != "" || proof.Status >= 400 {
@@ -156,6 +161,12 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 			return err
 		}
 	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	if err := e.repo.RenewWorkspaceUse(run.ID, token, time.Now()); err != nil {
+		return err
+	}
 	req.Operation = domain.RunnerWorkspaceOperationWarmReleaseCommit
 	ack, err := e.requestWorkspaceCheckpoint(ctx, current, req)
 	if err != nil {
@@ -166,6 +177,31 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 		return fmt.Errorf("workspace return pending: %s", ack.Error)
 	}
 	return e.repo.ConfirmWarmWorkspaceBinding(l, domain.WarmWorkspaceReleased)
+}
+
+func (e *Engine) keepWarmReturnLease(parent context.Context, runID, token string, interval time.Duration) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := e.repo.RenewWorkspaceUse(runID, token, time.Now()); err != nil {
+					cancel(fmt.Errorf("renew warm workspace return lease: %w", err))
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		cancel(nil)
+		<-done
+	}
 }
 
 func (e *Engine) cleanupWarmWorkspace(run domain.Run, now time.Time) {
@@ -193,7 +229,8 @@ func (e *Engine) cleanupWarmWorkspace(run domain.Run, now time.Time) {
 			}
 		}
 	}
-	ctx, stop := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Give the Runner its full proof budget and reserve time to commit it.
+	ctx, stop := context.WithTimeout(context.Background(), 31*time.Minute)
 	defer stop()
 	if err := e.ReleaseWarmWorkspace(ctx, run, 0); err != nil && !errors.Is(err, repo.ErrWorkspaceInUse) {
 		// Keep the diagnostic visible to the owner and avoid duplicate events

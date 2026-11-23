@@ -3,6 +3,7 @@ package gitwork
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,13 +12,21 @@ import (
 	"agentflow/internal/procwatch"
 )
 
+type outputMode int
+
+const (
+	combinedOutput outputMode = iota
+	stdoutOutput
+	rawStdoutOutput
+)
+
 // Run executes git with the context's host-scoped credential helper or SSH
 // key. Output is trimmed and redacted; on failure it is part of the error.
 func Run(ctx context.Context, workspace string, args ...string) (string, error) {
-	return run(ctx, workspace, false, args)
+	return run(ctx, workspace, combinedOutput, nil, args)
 }
 
-func run(ctx context.Context, workspace string, stdoutOnly bool, args []string) (string, error) {
+func run(ctx context.Context, workspace string, mode outputMode, input io.Reader, args []string) (string, error) {
 	token := TokenFrom(ctx)
 	sshEnv, cleanup, err := sshCommandEnvironment(ctx, args)
 	if err != nil {
@@ -30,17 +39,21 @@ func run(ctx context.Context, workspace string, stdoutOnly bool, args []string) 
 	}
 	defer closeHome()
 	cmd := command(ctx, workspace, sshEnv, args)
+	cmd.Stdin = input
 	if home != "" {
 		cmd.Env = WithEnvValue(cmd.Env, "HOME", home)
 	}
 	var out []byte
-	if stdoutOnly {
+	if mode != combinedOutput {
 		out, err = cmd.Output()
 		if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) > 0 {
 			out = append(append(out, '\n'), exit.Stderr...)
 		}
 	} else {
 		out, err = cmd.CombinedOutput()
+	}
+	if err == nil && mode == rawStdoutOutput {
+		return string(out), nil
 	}
 	text := redactContextGitSecrets(ctx, Redact(strings.TrimSpace(string(out)), token))
 	if err != nil {
@@ -129,7 +142,13 @@ func C(ctx context.Context, workspace string, args ...string) (string, error) {
 
 // CStdout returns only standard output on success. Failures include Git's diagnostics.
 func CStdout(ctx context.Context, workspace string, args ...string) (string, error) {
-	return run(ctx, workspace, true, append([]string{"-C", workspace}, args...))
+	return run(ctx, workspace, stdoutOutput, nil, append([]string{"-C", workspace}, args...))
+}
+
+// CStdoutRaw preserves machine-readable stdout byte for byte on success.
+// Use it for parsing, and keep the unredacted result out of logs.
+func CStdoutRaw(ctx context.Context, workspace string, input io.Reader, args ...string) (string, error) {
+	return run(ctx, workspace, rawStdoutOutput, input, append([]string{"-C", workspace}, args...))
 }
 
 // RevParse resolves ref to a commit SHA.

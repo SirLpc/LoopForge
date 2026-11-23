@@ -313,6 +313,26 @@ func TestWarmNativeCheckoutKeepsIgnoredPersonalFile(t *testing.T) {
 	}
 }
 
+func TestWarmNativeCheckoutAndReturnWithNestedIgnore(t *testing.T) {
+	f := nativeWarmTestClone(t, newWarmGitFixture(t))
+	slot := warmWorkspaceSlot{UnityProjectPath: "."}
+	warmGitWrite(t, f.checkout, ".superpowers/sdd/.gitignore", "*\n")
+	warmGitWrite(t, f.checkout, ".superpowers/sdd/progress.md", "draft")
+	warmGitWrite(t, f.source, ".superpowers/README.md", "tracked sibling")
+	commit := f.publish(t)
+	if err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	proof := warmReturnTree{root: filepath.Dir(f.checkout), checkout: f.checkout, native: true}
+	ref, err := proof.verify(t.Context(), slot, f.cache, f.repo)
+	if err != nil || ref.Commit != commit {
+		t.Fatalf("return proof = %+v, err = %v", ref, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(f.checkout, ".superpowers/sdd/progress.md")); err != nil || string(content) != "draft" {
+		t.Fatalf("ignored file = %q, err = %v", content, err)
+	}
+}
+
 func TestWarmNativeReturnReadsWindowsCheckoutTextAndSymlinks(t *testing.T) {
 	f := newWarmGitFixture(t)
 	warmGitWrite(t, f.source, "lines.txt", "first\nsecond\n")

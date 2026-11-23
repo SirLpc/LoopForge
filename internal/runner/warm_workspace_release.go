@@ -291,13 +291,18 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 	if err := warmTreeProtectsLibrary(local, cache, head, library); err != nil {
 		return ref, err
 	}
-	allowed := map[string]bool{library: true}
-	for _, name := range slot.DiscardGenerated {
-		rel := filepath.Join(slot.UnityProjectPath, name)
-		if err := warmTreeProtectsLibrary(local, cache, head, rel); err != nil {
+	if info, err := os.Lstat(filepath.Join(w.checkout, library)); err == nil {
+		if !info.IsDir() {
+			return ref, fmt.Errorf("Library path %s is not a directory", library)
+		}
+		if err := warmTargetIgnoresLibrary(local, stage, head, library); err != nil {
 			return ref, err
 		}
-		allowed[rel] = true
+	} else if !os.IsNotExist(err) {
+		return ref, err
+	}
+	if err := copyWarmGitExclude(w.checkout, stage); err != nil {
+		return ref, err
 	}
 	entries, err := gitwork.C(local, cache, "ls-tree", "-rz", head)
 	if err != nil {
@@ -324,6 +329,8 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 			return ref, err
 		}
 	}
+	untracked := make(map[string]fs.DirEntry)
+	var untrackedPaths []string
 	err = filepath.WalkDir(w.checkout, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -338,19 +345,9 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 		if rel == ".git" {
 			return filepath.SkipDir
 		}
-		if allowed[rel] {
+		if rel == library {
 			if !d.IsDir() {
-				return fmt.Errorf("generated path %s is not a directory", rel)
-			}
-			if err := warmTargetIgnoresLibrary(local, stage, head, rel); err != nil {
-				return err
-			}
-			if rel != library {
-				target, err := filepath.Rel(w.root, path)
-				if err != nil {
-					return err
-				}
-				w.remove = append(w.remove, target)
+				return fmt.Errorf("Library path %s is not a directory", library)
 			}
 			return filepath.SkipDir
 		}
@@ -372,7 +369,9 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 		if d.IsDir() {
 			return nil
 		}
-		return w.archive(path, d)
+		untracked[rel] = d
+		untrackedPaths = append(untrackedPaths, rel)
+		return nil
 	})
 	if err != nil {
 		return ref, err
@@ -380,6 +379,17 @@ func (w *warmReturnTree) verify(ctx context.Context, slot warmWorkspaceSlot, cac
 	for path, fields := range tracked {
 		if fields[0] != "160000" {
 			return ref, fmt.Errorf("tracked file %s is missing", path)
+		}
+	}
+	ignored, err := warmCheckIgnore(local, stage, w.checkout, untrackedPaths)
+	if err != nil {
+		return ref, err
+	}
+	for _, path := range untrackedPaths {
+		if !ignored[path] {
+			if err := w.archive(filepath.Join(w.checkout, path), untracked[path]); err != nil {
+				return ref, err
+			}
 		}
 	}
 	return ref, nil
@@ -438,6 +448,12 @@ func warmBlobMatchesWithRules(ctx context.Context, stage, head string, lfs warmL
 		return false
 	}
 	matches := hex.EncodeToString(h.Sum(nil)) == oid
+	if item, ok := lfs.byPath[rel]; ok {
+		// The manifest was read from the committed tree, and its cached
+		// objects already passed SHA-256 and size verification.
+		size, verified := lfs.verified[item.OID]
+		return verified && size == item.Size && (matches || st.Size() == item.Size && hex.EncodeToString(digest.Sum(nil)) == item.OID)
+	}
 	if matches {
 		const prefix = "version https://git-lfs.github.com/spec/v1\n"
 		if st.Size() < int64(len(prefix)) || st.Size() > 1024 {
@@ -526,24 +542,6 @@ func warmCheckoutBlobMatches(ctx context.Context, stage, head, actualPath, rel, 
 	return err == nil && cleanOID == oid
 }
 
-// Repeat destructive cleanup proof from the recorded commit after a crash.
-func verifyWarmCleanupIgnore(ctx context.Context, cache, head, rel string) error {
-	private, err := os.MkdirTemp(filepath.Dir(cache), ".check-ignore-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(private)
-	if _, err := gitwork.C(ctx, private, "init", "--template=", warmObjectFormat(head)); err != nil {
-		return err
-	}
-	if err := warmAlternate(filepath.Join(private, ".git"), filepath.Join(cache, "objects")); err != nil {
-		return err
-	}
-	if err := warmTreeProtectsLibrary(ctx, cache, head, rel); err != nil {
-		return err
-	}
-	return warmTargetIgnoresLibrary(ctx, private, head, rel)
-}
 func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
 	p.mu.Lock()
 	a, err := p.loadLease(ctx, l)
@@ -559,15 +557,22 @@ func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorks
 	}) {
 		return errors.New("missing durable acknowledgement of this return proof")
 	}
-	if a.Phase == warmWorkspacePlaced {
+	if a.Phase == warmWorkspacePlaced && len(a.ReturnRemove) != 0 {
 		root, err := os.OpenRoot(filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace"))
 		if err != nil {
 			return err
 		}
 		defer root.Close()
+		ignored, err := p.warmReturnIgnores(ctx, root.Name(), a)
+		if err != nil {
+			return err
+		}
 		for _, rel := range a.ReturnRemove {
 			if !validWarmWorkspaceRelativePath(rel) {
 				return errors.New("invalid return cleanup path")
+			}
+			if ignored[rel] {
+				continue
 			}
 			var digest string
 			for _, ref := range refs {
@@ -586,45 +591,18 @@ func (p *warmWorkspacePool) commitReturn(ctx context.Context, l domain.WarmWorks
 			if err != nil {
 				return err
 			}
-			if digest != "" {
-				if !info.Mode().IsRegular() || info.Size() > 1<<20 {
-					return fmt.Errorf("archived artifact changed at %s", rel)
-				}
-				b, err := root.ReadFile(rel)
-				if err != nil || runtime.WorkspaceContentSHA(string(b)) != digest {
-					return fmt.Errorf("archived artifact changed at %s", rel)
-				}
-				if err := root.Remove(rel); err != nil {
-					return err
-				}
-			} else {
-				generated := false
-				for id, target := range a.Targets {
-					slot := p.slots[id]
-					for _, name := range slot.DiscardGenerated {
-						if filepath.Join(root.Name(), rel) == filepath.Join(target, slot.UnityProjectPath, name) {
-							repoID := slot.RepositoryID
-							refIndex := slices.IndexFunc(refs, func(ref domain.WarmWorkspaceRef) bool { return ref.RepositoryID == repoID })
-							if refIndex < 0 {
-								return errors.New("missing generated-directory ref")
-							}
-							head := refs[refIndex].Commit
-							if actual, err := warmCurrentHead(filepath.Join(target, ".git")); err != nil || actual != head {
-								return errors.New("checkout changed before generated-directory cleanup")
-							}
-							if err := verifyWarmCleanupIgnore(ctx, p.gitCache(id), head, filepath.Join(slot.UnityProjectPath, name)); err != nil {
-								return err
-							}
-							generated = true
-						}
-					}
-				}
-				if !generated || !info.IsDir() {
-					return fmt.Errorf("unexpected generated path %s", rel)
-				}
-				if err := root.RemoveAll(rel); err != nil {
-					return err
-				}
+			if digest == "" {
+				return fmt.Errorf("missing archived artifact digest for %s", rel)
+			}
+			if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+				return fmt.Errorf("archived artifact changed at %s", rel)
+			}
+			b, err := root.ReadFile(rel)
+			if err != nil || runtime.WorkspaceContentSHA(string(b)) != digest {
+				return fmt.Errorf("archived artifact changed at %s", rel)
+			}
+			if err := root.Remove(rel); err != nil {
+				return err
 			}
 			if err := syncWarmWorkspaceParent(filepath.Join(root.Name(), rel)); err != nil {
 				return err

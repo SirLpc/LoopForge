@@ -31,6 +31,7 @@ type warmLFSManifest struct {
 	Files    []warmLFSFile `json:"files"`
 	storage  string
 	verified map[string]int64
+	byPath   map[string]warmLFSFile
 }
 
 func warmLFSCache(cache, project string, repo domain.RunnerRepository) string {
@@ -87,6 +88,7 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 	}
 	manifest.storage = filepath.Join(scope, ".git", "lfs")
 	manifest.verified = map[string]int64{}
+	manifest.byPath = make(map[string]warmLFSFile, len(manifest.Files))
 	missing := map[string]int64{}
 	for _, item := range manifest.Files {
 		if !validWarmWorkspaceRelativePath(item.Name) || len(item.OID) != 64 || item.Type != "sha256" || item.Size < 0 {
@@ -95,6 +97,10 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 		if _, err := hex.DecodeString(item.OID); err != nil {
 			return manifest, err
 		}
+		if previous, ok := manifest.byPath[item.Name]; ok && previous != item {
+			return manifest, errors.New("conflicting committed Git LFS paths")
+		}
+		manifest.byPath[item.Name] = item
 		expected, verified := manifest.verified[item.OID]
 		if !verified {
 			expected, verified = missing[item.OID]
