@@ -983,3 +983,59 @@ describe("sidebar reply status", () => {
     }
   });
 });
+
+describe("ending a Chat session", () => {
+  test("can end a Chat session from the context menu", async () => {
+    const user = userEvent.setup();
+    const previous = { ...chat };
+    const s = { id: "end-me", title: "归还工作区", messages: [{ role: "user", content: "继续开发" }] };
+    Object.assign(chat, {
+      session: s, activeId: s.id,
+      sessions: [s, { id: "scheduled", title: "定时会话", source: "scheduled" }],
+      endSession: vi.fn(async () => true),
+    });
+    const view = render(<App />);
+    try {
+      const showSidebar = screen.queryByLabelText("显示会话侧边栏");
+      if (showSidebar) await user.click(showSidebar);
+      const openMenu = async (title) => {
+        const row = screen.getAllByText(title).map((el) => el.closest(".session-link")).find(Boolean);
+        fireEvent.contextMenu(row, { clientX: 20, clientY: 20 });
+        return screen.findByRole("menu", { name: "会话操作" });
+      };
+      const scheduledMenu = await openMenu("定时会话");
+      expect(within(scheduledMenu).queryByRole("menuitem", { name: "结束会话" })).toBeNull();
+      fireEvent.keyDown(scheduledMenu, { key: "Escape" });
+      const menu = await openMenu("归还工作区");
+      await user.click(within(menu).getByRole("menuitem", { name: "结束会话" }));
+      const confirmation = await screen.findByRole("dialog", { name: "结束会话" });
+      expect(confirmation).toHaveTextContent("聊天记录会保留");
+      await user.click(within(confirmation).getByRole("button", { name: "结束会话" }));
+      expect(chat.endSession).toHaveBeenCalledExactlyOnceWith(s.id);
+    } finally {
+      view.unmount();
+      Object.assign(chat, previous);
+      delete chat.endSession;
+    }
+  });
+
+  test("shows ended chat history with no composer", () => {
+    const previous = { ...chat };
+    const s = {
+      id: "ended-chat", title: "历史会话", workspaceRunId: "old-run", end: { state: "ended" },
+      messages: [{ role: "user", content: "留在历史里的问题" }],
+    };
+    Object.assign(chat, { session: s, activeId: s.id, sessions: [s], readOnly: true });
+    const view = render(<App />);
+    try {
+      expect(screen.getByText("留在历史里的问题")).toBeInTheDocument();
+      expect(view.container.querySelector(".readonly-notice")).toHaveTextContent("会话已结束");
+      expect(screen.queryByRole("textbox", { name: "消息" })).toBeNull();
+      expect(screen.queryByLabelText("编辑消息")).toBeNull();
+      expect(screen.getByRole("button", { name: "历史会话", exact: true })).toBeEnabled();
+    } finally {
+      view.unmount();
+      Object.assign(chat, previous);
+    }
+  });
+});

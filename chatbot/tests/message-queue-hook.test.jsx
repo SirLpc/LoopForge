@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-const state = vi.hoisted(() => ({ transcript: [], generation: null, generationGate: null, preferences: {} }));
+const state = vi.hoisted(() => ({ transcript: [], generation: null, generationGate: null, preferences: {}, end: null }));
 const { apiMock, writeMock } = vi.hoisted(() => {
   const apiMock = vi.fn(async (path) => {
     if (path === "/api/auth/current")
@@ -21,7 +21,7 @@ const { apiMock, writeMock } = vi.hoisted(() => {
       return structuredClone(state.generation);
     }
     if (path.startsWith("/api/assistant/sessions/"))
-      return { id: "s1", title: "排队", projectId: "p1", model: "m1", messages: structuredClone(state.transcript) };
+      return { id: "s1", title: "排队", projectId: "p1", model: "m1", messages: structuredClone(state.transcript), end: structuredClone(state.end) };
     return [];
   });
   const writeMock = vi.fn(async (path) => {
@@ -93,6 +93,7 @@ describe("sending while a reply runs", () => {
     state.generation = { id: "g-running", status: "running", events: [{ sequence: 1, data: { kind: "tool", tool: "runs_get" } }] };
     state.generationGate = null;
     state.preferences = {};
+    state.end = null;
     globalThis.EventSource = FakeEventSource;
   });
   afterEach(() => {
@@ -139,6 +140,59 @@ describe("sending while a reply runs", () => {
     act(() => result.current.resumeQueue());
     await waitFor(() => expect(generationPosts()).toHaveLength(1));
     expect(generationPosts()[0][1].messages.at(-1).content).toBe("排队的消息");
+    unmount();
+  });
+
+  test("holds queued messages while ending and after a failed return", async () => {
+    const { result, unmount } = await openRunning();
+    await act(async () => { await result.current.send({ text: "排队的消息" }); });
+    writeMock.mockImplementationOnce(async () => {
+      state.end = { state: "ending" };
+      return { id: "s1", end: state.end };
+    });
+    await act(async () => { expect(await result.current.endSession("s1")).toBe(true); });
+    expect(result.current.readOnly).toBe(true);
+    expect(result.current.queueHeld).toBe(true);
+    await finish("cancelled");
+    state.end = { state: "failed", error: "请关闭工作区终端" };
+    await waitFor(() => expect(result.current.session?.end?.state).toBe("failed"), { timeout: 4000 });
+    expect(result.current.readOnly).toBe(false);
+    expect(result.current.queueHeld).toBe(true);
+    expect(generationPosts()).toHaveLength(0);
+    expect(result.current.session.end.error).toBe("请关闭工作区终端");
+    unmount();
+  });
+
+  test("a late end response leaves the newly selected conversation usable", async () => {
+    const { result, unmount } = await openRunning();
+    let respond;
+    writeMock.mockImplementationOnce(() => new Promise((resolve) => { respond = resolve; }));
+    let end;
+    act(() => { end = result.current.endSession("s1"); });
+    act(() => result.current.open("s2"));
+    await waitFor(() => expect(result.current.session?.id).toBe("s2"));
+    await act(async () => {
+      respond({ id: "s1", end: { state: "ended" } });
+      expect(await end).toBe(true);
+    });
+    expect(result.current.session?.id).toBe("s2");
+    expect(result.current.readOnly).toBe(false);
+    unmount();
+  });
+
+  test("an already ended history keeps its ready queue from sending", async () => {
+    state.end = { state: "ended" };
+    localStorage.setItem("agentflow.native-chat.queue.v1", JSON.stringify({
+      s1: { items: [{ id: "queued-existing", text: "旧排队内容" }], held: false },
+    }));
+    state.generation = { id: "g-running", status: "completed" };
+    const { result, unmount } = renderHook(() => useChat());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    act(() => result.current.open("s1"));
+    await waitFor(() => expect(result.current.readOnly).toBe(true));
+    await act(async () => { expect(await result.current.send({ text: "旧回调" })).toBe(false); });
+    act(() => result.current.resumeQueue());
+    expect(generationPosts()).toHaveLength(0);
     unmount();
   });
 

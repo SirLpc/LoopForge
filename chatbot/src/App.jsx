@@ -406,8 +406,12 @@ export default function App() {
   // Its git state drives the "改动" view of the side panel.
   // Task conversations keep their workspace on the task run; ordinary
   // conversations bind the temporary workspace opened by Main Bot.
-  const workspaceRunId =
-    chat.session?.workspaceRunId || chat.session?.runId || "";
+  const sessionEnded = chat.session?.end?.state === "ended";
+  const sessionEnding = chat.sessionEnding || chat.session?.end?.state === "ending";
+  const sessionClosedForWork = sessionEnded || sessionEnding;
+  const workspaceRunId = sessionClosedForWork
+    ? ""
+    : chat.session?.workspaceRunId || chat.session?.runId || "";
   const workspaceChanges = useWorkspaceChanges(workspaceRunId, {
     active: panel && panelView === "changes",
   });
@@ -1028,7 +1032,14 @@ export default function App() {
       } : undefined),
       unreadReply(s, { activeId: chat.activeId, read: readReplies }),
     );
-    const runState = runSessionState(s);
+    const endState = s.end?.state;
+    const runState = endState === "ended"
+      ? { state: "ended", label: "已结束" }
+      : endState === "ending"
+        ? { state: "running", label: "正在结束" }
+        : endState === "failed"
+          ? { state: "failed", label: "结束失败" }
+          : runSessionState(s);
     return (
     <div
       key={s.id}
@@ -1134,6 +1145,20 @@ export default function App() {
                 <HarnessIcon name="history" size={15} />
                 {archived ? "恢复会话" : "归档"}
               </button>
+              {chat.endSession && !chat.local && !s.runId && !scheduledSession(s) &&
+              (!s.source || s.source === "chat") && endState !== "ending" && endState !== "ended" &&
+              !(chat.activeId === s.id && (chat.session?.readOnly || sessionClosedForWork)) ? (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setDialog({ type: "end", session: s });
+                    closeMenu();
+                  }}
+                >
+                  <HarnessIcon name="chat-stop" size={15} />
+                  结束会话
+                </button>
+              ) : null}
               <button
                 role="menuitem"
                 className="danger"
@@ -1207,7 +1232,7 @@ export default function App() {
                 })}
               />
               <button
-                disabled={chat.readOnly}
+                disabled={chat.session?.readOnly}
                 title={sessionTitle}
                 aria-label={sessionTitle}
                 className={titleReveal ? "title-typing" : undefined}
@@ -1828,8 +1853,11 @@ export default function App() {
               <div className="readonly-notice" role="status">
                 <HarnessIcon name="eye" size={16} aria-hidden="true" />
                 <span>
-                  你不是「{projectName}
-                  」的成员，只能查看这个会话。加入项目后可以继续聊。
+                  {sessionEnded
+                    ? "会话已结束。聊天记录可查看，继续讨论请新建会话。"
+                    : sessionEnding
+                      ? "正在结束会话并检查预热工作区。"
+                      : `你不是「${projectName}」的成员，只能查看这个会话。加入项目后可以继续聊。`}
                 </span>
               </div>
             ) : (
@@ -2271,7 +2299,7 @@ export default function App() {
           }
           setSelected={setSelectedArtifact}
           chat={chat}
-          view={panelView}
+          view={sessionClosedForWork ? "artifacts" : panelView}
           onViewChange={setPanelView}
           workspaceChanges={workspaceChanges}
           workspaceRunId={workspaceRunId}
@@ -2297,6 +2325,7 @@ export default function App() {
               search: "搜索会话",
               rename: "重命名会话",
               delete: "删除会话",
+              end: "结束会话",
               edit: dialog.fork ? "创建分支" : "编辑消息",
               settings: "设置",
               advanced: "高级设置",
@@ -2304,7 +2333,7 @@ export default function App() {
           }
           onClose={closeDialog}
           footer={
-            ["rename", "edit", "delete"].includes(dialog.type) ? (
+            ["rename", "edit", "delete", "end"].includes(dialog.type) ? (
               <>
                 <button className="quiet-button" onClick={closeDialog}>
                   取消
@@ -2316,7 +2345,11 @@ export default function App() {
                       : "primary-button"
                   }
                   onClick={async () => {
-                    if (dialog.type === "delete") {
+                    if (dialog.type === "end") {
+                      const id = dialog.session.id;
+                      closeDialog();
+                      void chat.endSession(id);
+                    } else if (dialog.type === "delete") {
                       await chat.remove(dialog.session.id);
                       closeDialog();
                     } else if (dialog.type === "rename") {
@@ -2339,9 +2372,11 @@ export default function App() {
                       }
                     }
                   }}
-                  disabled={dialog.type !== "delete" && !dialog.value?.trim()}
+                  disabled={["rename", "edit"].includes(dialog.type) && !dialog.value?.trim()}
                 >
-                  {dialog.type === "delete"
+                  {dialog.type === "end"
+                    ? "结束会话"
+                    : dialog.type === "delete"
                     ? "删除"
                     : dialog.type === "rename"
                       ? "保存"
@@ -2419,6 +2454,8 @@ export default function App() {
                 }}
               />
             </label>
+          ) : dialog.type === "end" ? (
+            <p>停止当前回复并尝试归还预热工作区。聊天记录会保留，继续讨论请新建会话。</p>
           ) : dialog.type === "delete" ? (
             <p>
               删除“{dialog.session.title}”的聊天记录？本对话里还没提交 MR

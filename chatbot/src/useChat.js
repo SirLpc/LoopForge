@@ -99,8 +99,14 @@ const PROJECT_LIST_TOOLS = new Set([
 ]);
 const initialProject =
   new URLSearchParams(location.search).get("projectId") || "";
+function sessionWritesBlocked(session) {
+  return !!(session?.readOnly || session?.end?.state === "ended" || session?.end?.state === "ending");
+}
+
 export function useChat() {
   const stopRequestRef = useRef(null);
+  const endRequests = useRef(new Set());
+  const [pendingEnds, setPendingEnds] = useState(() => new Set());
   const [user, setUser] = useState(null),
     [projects, setProjects] = useState([]),
     [sandboxes, setSandboxes] = useState([]),
@@ -116,7 +122,7 @@ export function useChat() {
     [models, setModels] = useState([]),
     [modelCatalogRefresh, requestModelCatalogRefresh] = useState(0),
     [sessions, setSessions] = useState([]),
-    [session, setSession] = useState(null),
+    [session, setSessionState] = useState(null),
     [activeId, setActiveId] = useState(
       new URLSearchParams(location.search).get("session") || null,
     ),
@@ -149,10 +155,22 @@ export function useChat() {
     // A queued message sent with "send now": it interrupts the running reply
     // and stays on screen until the server's follow-up turn has started.
     [steering, setSteering] = useState(null);
+  const setSession = useCallback((update) => {
+    setSessionState((previous) => {
+      const next = typeof update === "function" ? update(previous) : update;
+      if (!next || next.id !== previous?.id) return next;
+      // A generation or metadata fetch started before the end request
+      // can still be in flight when its response is applied.
+      if (previous.end?.state === "ended" && next.end?.state !== "ended") return previous;
+      return previous.end && !next.end ? { ...next, end: previous.end } : next;
+    });
+  }, []);
+  const sessionEnding = pendingEnds.has(activeId) || session?.end?.state === "ending";
+  const readOnly = sessionEnding || sessionWritesBlocked(session);
   const executionMachines = useExecutionMachines(
     user?.isGuest ? null : user?.id,
     submitting || generation?.status === "running",
-    !!session?.readOnly,
+    readOnly,
     setError,
     bindExecutionMachine,
     session?.executionTarget,
@@ -175,6 +193,11 @@ export function useChat() {
     setSessions(rows || []);
     const current = sessionRef.current;
     const row = (rows || []).find((item) => item.id === current?.id);
+    if (row?.end && (row.end.state !== current.end?.state || row.end.error !== current.end?.error)) {
+      const stored = await api(sessionPath(row.id)).catch(() => null);
+      if (stored && currentId.current === row.id) setSession(stored);
+      return;
+    }
     if (row?.title && current && !current.titleEdited && row.title !== current.title) {
       setSession((prev) =>
         prev && prev.id === row.id && !prev.titleEdited
@@ -182,7 +205,7 @@ export function useChat() {
           : prev,
       );
     }
-  }, []);
+  }, [setSession]);
   const changeURL = useCallback((id) => {
     const url = new URL(location.href);
     url.searchParams.delete("issueId");
@@ -350,6 +373,36 @@ export function useChat() {
     );
     return () => clearInterval(timer);
   }, [ready, refreshSessions]);
+  useEffect(() => {
+    if (!activeId || session?.id !== activeId || session.end?.state !== "ending") return;
+    let current = true;
+    let timer;
+    async function pollEnd() {
+      try {
+        const stored = await api(sessionPath(activeId));
+        if (!current || currentId.current !== activeId) return;
+        setSession(stored);
+        if (stored.end?.state !== "ending") {
+          void refreshSessions().catch(() => {});
+          return;
+        }
+      } catch {}
+      if (current) timer = setTimeout(pollEnd, 1000);
+    }
+    timer = setTimeout(pollEnd, 1000);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [activeId, refreshSessions, session?.id, session?.end?.state, setSession]);
+  useEffect(() => {
+    if (!session?.id || !session.end) return;
+    if (session.end.state === "ending" || session.end.state === "ended") {
+      setQueues((old) => holdQueue(old, session.id, true));
+    } else if (session.end.state === "failed" && session.end.error) {
+      setError(session.end.error);
+    }
+  }, [session?.id, session?.end?.state, session?.end?.error]);
   const titlePrompt = (session?.messages || []).find((message) => message.role === "user")?.content || "";
   useEffect(() => {
     if (!ready || !session?.id || session.titleEdited || session.titleGenerated) return;
@@ -770,7 +823,7 @@ export function useChat() {
   useEffect(() => {
     const id = activeId;
     const next = nextQueued(queues, id);
-    if (!next || dispatchingRef.current || submittingRef.current) return;
+    if (!next || writesBlocked(id) || dispatchingRef.current || submittingRef.current) return;
     if (steeringRef.current) return;
     if (generation?.status === "running" || sessionRef.current?.id !== id) return;
     // Wait until this conversation's reply status is known: right after
@@ -794,6 +847,7 @@ export function useChat() {
     [],
   );
   const resumeQueue = useCallback(() => {
+    if (endRequests.current.has(currentId.current) || sessionWritesBlocked(sessionRef.current)) return;
     setError("");
     setQueues((old) => holdQueue(old, currentId.current, false));
   }, []);
@@ -804,7 +858,7 @@ export function useChat() {
   async function sendNow(itemId) {
     const id = currentId.current;
     const item = id ? queues[id]?.items.find((m) => m.id === itemId) : null;
-    if (!item || steeringRef.current || dispatchingRef.current) return false;
+    if (!item || writesBlocked(id) || steeringRef.current || dispatchingRef.current) return false;
     if (generation?.status !== "running" || !generation.id) {
       if (submittingRef.current || generationKnown !== id) return false;
       dispatchingRef.current = true;
@@ -822,7 +876,11 @@ export function useChat() {
     }
     return steerMessage(id, item);
   }
+  function writesBlocked(id) {
+    return endRequests.current.has(id) || (sessionRef.current?.id === id && sessionWritesBlocked(sessionRef.current));
+  }
   async function steerMessage(id, item) {
+    if (writesBlocked(id)) return false;
     const from = generation.id;
     const request = { sessionId: id, generationId: from, item, pending: true };
     steeringRef.current = request;
@@ -866,7 +924,7 @@ export function useChat() {
     messagesOverride = null,
     fromQueue = false,
   }) {
-    if (!text.trim() && !attachments.length) return false;
+    if (writesBlocked(currentId.current) || (!text.trim() && !attachments.length)) return false;
     const approval = fromQueue
       ? queuedApproval({ approvalMode, approvalUserId }, user?.id)
       : { approvalMode, approvalUserId: user?.id };
@@ -1066,6 +1124,30 @@ export function useChat() {
       setError(e.message);
     }
   }
+  async function endSession(id) {
+    if (!id || writesBlocked(id)) return false;
+    endRequests.current.add(id);
+    setPendingEnds(new Set(endRequests.current));
+    setQueues((old) => holdQueue(old, id, true));
+    setError("");
+    try {
+      const stored = await write(`${sessionPath(id)}/end`, {});
+      setSessions((rows) => rows.map((row) => row.id === id ? { ...row, end: stored.end } : row));
+      if (currentId.current === id) {
+        setSession((previous) => previous?.id === id ? { ...previous, ...stored } : previous);
+      }
+      void refreshSessions().catch(() => {});
+      return true;
+    } catch (e) {
+      // The server might have accepted the operation before the link dropped.
+      if (!e.status || e.status >= 500) void refreshSessions().catch(() => {});
+      if (currentId.current === id) setError(e.message);
+      return false;
+    } finally {
+      endRequests.current.delete(id);
+      setPendingEnds(new Set(endRequests.current));
+    }
+  }
   async function remove(id) {
     try {
       await api(sessionPath(id), { method: "DELETE" });
@@ -1076,6 +1158,7 @@ export function useChat() {
     }
   }
   async function edit(index, content, fork = false) {
+    if (writesBlocked(currentId.current)) return null;
     try {
       const stored = await write(
         `${sessionPath(activeId)}/${fork ? "fork" : "edit"}`,
@@ -1095,6 +1178,7 @@ export function useChat() {
   // approvalMode is the composer's current choice, so a regenerated reply
   // follows it like a new message does.
   async function regenerate(stored, approvalMode = "confirm") {
+    if (writesBlocked(stored.id) || sessionWritesBlocked(stored)) return false;
     try {
       submittingRef.current = true;
       setSubmitting(true);
@@ -1126,6 +1210,7 @@ export function useChat() {
     }
   }
   async function applyDraft(messageIndex, draftIndex, review = {}) {
+    if (writesBlocked(currentId.current)) return;
     const id = activeId;
     const key = `${id}:${messageIndex}:${draftIndex}`;
     if (applyingRef.current.has(key)) throw Error("这项操作正在执行，请稍候。");
@@ -1237,6 +1322,7 @@ export function useChat() {
   // Answers an assistant proposal card. Declining work the assistant had not
   // started continues with the turn the server returns.
   async function decideProposal(messageIndex, draftIndex, decision, approvalMode = "confirm") {
+    if (writesBlocked(currentId.current)) return;
     const id = activeId;
     if (generation?.status === "running")
       throw Error("请等待回复结束后再处理建议。");
@@ -1429,7 +1515,9 @@ export function useChat() {
     resumeQueue,
     sendNow,
     steering: (steering?.sessionId === activeId && steering.item) || null,
-    readOnly: !!session?.readOnly,
+    readOnly,
+    sessionEnding,
+    endSession,
     setError,
     adoptCLIInstall,
     setModel: chooseModel,
