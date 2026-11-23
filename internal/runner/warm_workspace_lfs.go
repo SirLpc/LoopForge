@@ -28,10 +28,11 @@ type warmLFSFile struct {
 	Type string `json:"oid_type"`
 }
 type warmLFSManifest struct {
-	Files    []warmLFSFile `json:"files"`
-	storage  string
-	verified map[string]int64
-	byPath   map[string]warmLFSFile
+	Files       []warmLFSFile `json:"files"`
+	storage     string
+	verified    map[string]int64
+	byPath      map[string]warmLFSFile
+	contentOnly bool
 }
 
 func warmLFSCache(cache, project string, repo domain.RunnerRepository) string {
@@ -43,9 +44,21 @@ func warmLFSObject(storage, oid string) string {
 	return filepath.Join(storage, "objects", oid[:2], oid[2:4], oid)
 }
 
+type warmProofLFSMode uint8
+
+const (
+	warmProofLFSFetch warmProofLFSMode = iota
+	warmProofLFSCache
+	warmProofLFSContent
+)
+
 // Each exclusive cache is shared only by slots for the same project, registered
 // repo and frozen origin. Git authorization happens on each checkout and return.
 func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, repo domain.RunnerRepository, syncDir func(*os.File) error) (warmLFSManifest, error) {
+	return prepareWarmLFSForProof(local, auth, stage, db, scope, head, repo, syncDir, warmProofLFSFetch)
+}
+
+func prepareWarmLFSForProof(local, auth context.Context, stage, db, scope, head string, repo domain.RunnerRepository, syncDir func(*os.File) error, mode warmProofLFSMode) (warmLFSManifest, error) {
 	var manifest warmLFSManifest
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		return manifest, checkWarmWithoutLFS(local, stage, head)
@@ -60,7 +73,24 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 	if len(manifest.Files) == 0 {
 		return manifest, nil
 	}
-	dir, err := openWarmWorkspaceDir(scope, true)
+	manifest.byPath = make(map[string]warmLFSFile, len(manifest.Files))
+	manifest.contentOnly = mode == warmProofLFSContent
+	for _, item := range manifest.Files {
+		if !validWarmWorkspaceRelativePath(item.Name) || len(item.OID) != 64 || item.Type != "sha256" || item.Size < 0 {
+			return manifest, errors.New("invalid committed Git LFS pointer")
+		}
+		if _, err := hex.DecodeString(item.OID); err != nil {
+			return manifest, err
+		}
+		if previous, ok := manifest.byPath[item.Name]; ok && previous != item {
+			return manifest, errors.New("conflicting committed Git LFS paths")
+		}
+		manifest.byPath[item.Name] = item
+	}
+	if manifest.contentOnly {
+		return manifest, nil
+	}
+	dir, err := openWarmWorkspaceDir(scope, mode == warmProofLFSFetch)
 	if err != nil {
 		return manifest, err
 	}
@@ -88,19 +118,8 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 	}
 	manifest.storage = filepath.Join(scope, ".git", "lfs")
 	manifest.verified = map[string]int64{}
-	manifest.byPath = make(map[string]warmLFSFile, len(manifest.Files))
 	missing := map[string]int64{}
 	for _, item := range manifest.Files {
-		if !validWarmWorkspaceRelativePath(item.Name) || len(item.OID) != 64 || item.Type != "sha256" || item.Size < 0 {
-			return manifest, errors.New("invalid committed Git LFS pointer")
-		}
-		if _, err := hex.DecodeString(item.OID); err != nil {
-			return manifest, err
-		}
-		if previous, ok := manifest.byPath[item.Name]; ok && previous != item {
-			return manifest, errors.New("conflicting committed Git LFS paths")
-		}
-		manifest.byPath[item.Name] = item
 		expected, verified := manifest.verified[item.OID]
 		if !verified {
 			expected, verified = missing[item.OID]
@@ -119,6 +138,9 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 		if ok {
 			manifest.verified[item.OID] = item.Size
 			continue
+		}
+		if mode == warmProofLFSCache {
+			return manifest, fmt.Errorf("verified Git LFS cache object unavailable: %s", item.OID)
 		}
 		if err == nil {
 			if err := os.Remove(path); err != nil {
