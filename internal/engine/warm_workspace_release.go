@@ -109,7 +109,7 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 	ctx, stopRenewal := e.keepWarmReturnLease(ctx, run.ID, token, time.Minute)
 	defer stopRenewal()
 	req := domain.RunnerWorkspaceRequest{RunID: run.ID, WarmWorkspaceLease: &l, Operation: domain.RunnerWorkspaceOperationWarmReleaseCheck}
-	receipt, err := e.repo.HasWarmWorkspaceReturnReceipt(l)
+	receiptID, receipt, err := e.repo.WarmWorkspaceReturnReceipt(l)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,13 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 		if _, err = warmRestoreFiles(current, refs); err != nil {
 			return err
 		}
-		if err = e.repo.RecordWarmWorkspaceRefs(run.ID, l, refs); err != nil {
+		receiptID = proof.WarmWorkspaceReturnID
+		if receiptID != "" {
+			err = e.repo.RecordNativeWarmWorkspaceReturn(l, token, receiptID, refs, time.Now())
+		} else {
+			err = e.repo.RecordWarmWorkspaceRefs(run.ID, l, refs)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -172,9 +178,19 @@ func (e *Engine) ReleaseWarmWorkspace(ctx context.Context, run domain.Run, actor
 	if err != nil {
 		return err
 	}
+	if ack.WarmWorkspaceReturnID != receiptID {
+		return errors.New("workspace return acknowledgment does not match the receipt")
+	}
+	if ack.Code == domain.WorkspaceErrorWarmReturnStale {
+		err := e.repo.InvalidateNativeWarmWorkspaceReturn(l, token, receiptID, time.Now())
+		return errors.Join(fmt.Errorf("workspace retained: %s", ack.Error), err)
+	}
 	var result struct{ Phase string }
 	if ack.Status >= 400 || ack.Error != "" || json.Unmarshal(ack.Payload, &result) != nil || result.Phase != "released" {
 		return fmt.Errorf("workspace return pending: %s", ack.Error)
+	}
+	if receiptID != "" {
+		return e.repo.ConfirmNativeWarmWorkspaceReturn(l, token, receiptID, time.Now())
 	}
 	return e.repo.ConfirmWarmWorkspaceBinding(l, domain.WarmWorkspaceReleased)
 }

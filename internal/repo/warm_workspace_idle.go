@@ -56,7 +56,20 @@ func (r *RunnersRepo) WarmWorkspaceReturnCandidates() ([]string, error) {
 }
 
 func (r *RunnersRepo) RetainWarmWorkspaceOwner(l domain.WarmWorkspaceLease) error {
-	return r.DB.Model(&warmWorkspaceRow{}).Where("owner_run_id = ? AND runner_id = ? AND generation = ? AND epoch = ? AND state = ?", l.OwnerRunID, l.RunnerID, l.Generation, l.Epoch, domain.WarmWorkspaceReleasing).Where("ready_generation = generation").Where("NOT EXISTS (?)", r.DB.Model(&warmWorkspaceRefRow{}).Select("1").Where("run_id = ? AND generation = ? AND epoch = ?", l.OwnerRunID, l.Generation, l.Epoch)).Update("state", domain.WarmWorkspaceReady).Error
+	return r.DB.Transaction(func(tx *gorm.DB) error {
+		var row warmWorkspaceRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, "owner_run_id = ?", l.OwnerRunID).Error; err != nil {
+			return err
+		}
+		if !matchesWarmLease(row, l) || row.State != domain.WarmWorkspaceReleasing || row.ReadyGeneration != l.Generation {
+			return nil
+		}
+		_, _, found, err := warmReturnReceipt(tx, l)
+		if err != nil || found {
+			return err
+		}
+		return tx.Model(&row).Update("state", domain.WarmWorkspaceReady).Error
+	})
 }
 
 func (r *RunnersRepo) lockReturnedWorkspace(tx *gorm.DB, id string, expected *domain.WarmWorkspaceLease) error {

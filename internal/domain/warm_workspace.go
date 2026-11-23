@@ -56,6 +56,7 @@ type WarmWorkspaceSlot struct {
 }
 
 const WorkspaceErrorWarmCheckoutRetryable = "warm_checkout_retryable"
+const WorkspaceErrorWarmReturnStale = "warm_return_stale"
 
 const RunnerVersionWarmWorkspace = "0.12.0"
 

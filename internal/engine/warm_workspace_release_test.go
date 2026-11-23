@@ -355,3 +355,95 @@ func TestWarmWorkspaceReclaimDuringRestart(t *testing.T) {
 		t.Fatal("no new lease", recovered, err)
 	}
 }
+
+func nativeWarmSOPWithReadySlot(t *testing.T) (*Engine, domain.Run) {
+	t.Helper()
+	e, run := warmSOPWithReadySlot(t, "succeeded")
+	run.WorkflowSnapshot.SandboxSnapshot.Profile.Driver = domain.SandboxDriverNative
+	run.ExecutionContext.ResponsibleUserID = 1
+	if err := e.repo.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	runner, ok := e.repo.Runner("machine")
+	if !ok {
+		t.Fatal("missing native Runner")
+	}
+	runner.OwnerUserID = 1
+	runner.Labels = append(runner.Labels, domain.RunnerLabelNativeWarmWorkspace)
+	if err := e.repo.PutRunner(runner); err != nil {
+		t.Fatal(err)
+	}
+	return e, run
+}
+
+func TestWarmNativeReturnEngineRetriesDurableReceipt(t *testing.T) {
+	e, run := nativeWarmSOPWithReadySlot(t)
+	var checked, committed int
+	e.WorkspaceCheckpointTransport = func(_ context.Context, _ domain.Run, req domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+		if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
+			checked++
+			return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: "receipt-a", Payload: []byte(`[{"repositoryId":"repo","commit":"0123456789012345678901234567890123456789"}]`)}, nil
+		}
+		if req.WarmWorkspaceReturnID != "receipt-a" {
+			t.Fatalf("commit received wrong proof: %q", req.WarmWorkspaceReturnID)
+		}
+		committed++
+		if committed == 1 {
+			return domain.RunnerWorkspaceResponse{}, errors.New("acknowledgment lost")
+		}
+		return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: "receipt-a", Payload: []byte(`{"phase":"released"}`)}, nil
+	}
+	if err := e.ReleaseWarmWorkspace(t.Context(), run, 1); err == nil {
+		t.Fatal("expected the lost acknowledgment")
+	}
+	if err := e.ReleaseWarmWorkspace(t.Context(), run, 1); err != nil {
+		t.Fatal(err)
+	}
+	if checked != 1 || committed != 2 {
+		t.Fatalf("checked %d and committed %d times", checked, committed)
+	}
+}
+
+func TestWarmNativeReturnEngineInvalidatesMatchingReceipt(t *testing.T) {
+	for _, matches := range []bool{false, true} {
+		name := "old response"
+		if matches {
+			name = "matched response"
+		}
+		t.Run(name, func(t *testing.T) {
+			e, run := nativeWarmSOPWithReadySlot(t)
+			var checked int
+			id := "receipt-a"
+			e.WorkspaceCheckpointTransport = func(_ context.Context, _ domain.Run, req domain.RunnerWorkspaceRequest) (domain.RunnerWorkspaceResponse, error) {
+				if req.Operation == domain.RunnerWorkspaceOperationWarmReleaseCheck {
+					checked++
+					return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: id, Payload: []byte(`[{"repositoryId":"repo","commit":"0123456789012345678901234567890123456789"}]`)}, nil
+				}
+				if checked == 1 {
+					replyID := "another-receipt"
+					if matches {
+						replyID = id
+					}
+					return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: replyID, Code: domain.WorkspaceErrorWarmReturnStale, Status: 409, Error: "checkout changed"}, nil
+				}
+				return domain.RunnerWorkspaceResponse{WarmWorkspaceReturnID: id, Payload: []byte(`{"phase":"released"}`)}, nil
+			}
+			if err := e.ReleaseWarmWorkspace(t.Context(), run, 1); err == nil {
+				t.Fatal("stale proof must return a diagnostic")
+			}
+			want := domain.WarmWorkspaceReleasing
+			if matches {
+				want = domain.WarmWorkspaceReady
+			}
+			if state, _ := e.WarmWorkspaceStatus(run.ID); state != want {
+				t.Fatalf("workspace state = %s, want %s", state, want)
+			}
+			if matches {
+				id = "receipt-b"
+				if err := e.ReleaseWarmWorkspace(t.Context(), run, 1); err != nil || checked != 2 {
+					t.Fatalf("new release did not obtain replacement proof: %d, %v", checked, err)
+				}
+			}
+		})
+	}
+}

@@ -11,18 +11,19 @@ import (
 )
 
 type warmWorkspaceRefRow struct {
-	RunID             string `gorm:"primaryKey;size:64"`
-	Epoch, Generation uint64
-	Unplaced          bool
-	Refs              []domain.WarmWorkspaceRef `gorm:"serializer:json;type:json;not null"`
+	PendingNativeReturn *nativeWarmReturnReceipt `gorm:"serializer:json;type:json"`
+	RunID               string                   `gorm:"primaryKey;size:64"`
+	Epoch, Generation   uint64
+	Unplaced            bool
+	Refs                []domain.WarmWorkspaceRef `gorm:"serializer:json;type:json;not null"`
 }
 
 func (warmWorkspaceRefRow) TableName() string { return "run_warm_workspace_refs" }
 
 var warmRefOID = regexp.MustCompile("^[a-f0-9]{40}([a-f0-9]{24})?$")
 
-func (r *RunsRepo) RecordWarmWorkspaceRefs(id string, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
-	if id != l.OwnerRunID || len(refs) > 0 && len(refs) != len(l.Slots) {
+func validateWarmWorkspaceRefs(l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
+	if len(refs) > 0 && len(refs) != len(l.Slots) {
 		return errors.New("incomplete warm workspace proof")
 	}
 	seen := map[string]bool{}
@@ -31,6 +32,16 @@ func (r *RunsRepo) RecordWarmWorkspaceRefs(id string, l domain.WarmWorkspaceLeas
 			return errors.New("invalid warm workspace reference")
 		}
 		seen[ref.RepositoryID] = true
+	}
+	return nil
+}
+
+func (r *RunsRepo) RecordWarmWorkspaceRefs(id string, l domain.WarmWorkspaceLease, refs []domain.WarmWorkspaceRef) error {
+	if id != l.OwnerRunID {
+		return errors.New("incomplete warm workspace proof")
+	}
+	if err := validateWarmWorkspaceRefs(l, refs); err != nil {
+		return err
 	}
 	return r.DB.Transaction(func(tx *gorm.DB) error {
 		var row warmWorkspaceRow
@@ -47,6 +58,9 @@ func (r *RunsRepo) RecordWarmWorkspaceRefs(id string, l domain.WarmWorkspaceLeas
 		err := tx.Take(&existing, "run_id = ?", id).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
+		}
+		if err == nil && existing.PendingNativeReturn != nil {
+			return errors.New("native warm return receipt already recorded")
 		}
 		if err == nil && existing.Generation == l.Generation && existing.Epoch == l.Epoch {
 			if existing.Unplaced != (len(refs) == 0) || !existing.Unplaced && !reflect.DeepEqual(existing.Refs, refs) {
@@ -102,9 +116,8 @@ func (r *RunsRepo) ConfirmWarmWorkspaceBinding(l domain.WarmWorkspaceLease, stat
 }
 
 func (r *RunsRepo) HasWarmWorkspaceReturnReceipt(l domain.WarmWorkspaceLease) (bool, error) {
-	var count int64
-	err := r.DB.Model(&warmWorkspaceRefRow{}).Where("run_id = ? AND epoch = ? AND generation = ?", l.OwnerRunID, l.Epoch, l.Generation).Count(&count).Error
-	return count == 1, err
+	_, found, err := r.WarmWorkspaceReturnReceipt(l)
+	return found, err
 }
 
 func (r *RunsRepo) WarmWorkspaceBorrowed(id string, now time.Time) (bool, error) {

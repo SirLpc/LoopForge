@@ -361,13 +361,8 @@ func (r *RunnersRepo) AuthorizeWarmWorkspaceControl(runnerID string, run domain.
 	case domain.RunnerWorkspaceOperationWarmReleaseCheck:
 		allowed = row.State == domain.WarmWorkspaceReleasing
 	case domain.RunnerWorkspaceOperationWarmReleaseCommit:
-		var proof warmWorkspaceRefRow
-		if err := r.DB.Take(&proof, "run_id = ? AND generation = ? AND epoch = ?", row.OwnerRunID, row.Generation, row.Epoch).Error; err != nil {
-			return fmt.Errorf("no matching durable return proof: %w", err)
-		}
-		req.WarmWorkspaceRefs = nil
-		if !proof.Unplaced {
-			req.WarmWorkspaceRefs = proof.Refs
+		if err := canonicalWarmReturnReceipt(r.DB, row.lease(), req); err != nil {
+			return err
 		}
 		allowed = row.State == domain.WarmWorkspaceReleasing
 	}

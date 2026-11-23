@@ -39,9 +39,10 @@ const (
 // runner's outbound control socket. Responses are transient and are never
 // persisted in runner_tasks or the run record.
 type RunnerWorkspaceRequest struct {
-	WarmWorkspaceRefs    []WarmWorkspaceRef  `json:"warmWorkspaceRefs,omitempty"`
-	WarmWorkspaceActorID int64               `json:"warmWorkspaceActorId,omitempty"`
-	WarmWorkspaceLease   *WarmWorkspaceLease `json:"warmWorkspaceLease,omitempty"`
+	WarmWorkspaceReturnID string              `json:"warmWorkspaceReturnId,omitempty"`
+	WarmWorkspaceRefs     []WarmWorkspaceRef  `json:"warmWorkspaceRefs,omitempty"`
+	WarmWorkspaceActorID  int64               `json:"warmWorkspaceActorId,omitempty"`
+	WarmWorkspaceLease    *WarmWorkspaceLease `json:"warmWorkspaceLease,omitempty"`
 
 	Maintenance   *RunnerMaintenanceRequest `json:"maintenance,omitempty"`
 	ModelProvider string                    `json:"modelProvider,omitempty"`
@@ -128,10 +129,11 @@ func IsWorkspaceCheckpointTransferOperation(op string) bool {
 }
 
 type RunnerWorkspaceResponse struct {
-	Payload json.RawMessage `json:"payload,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Code    string          `json:"code,omitempty"`
-	Status  int             `json:"status,omitempty"`
+	WarmWorkspaceReturnID string          `json:"warmWorkspaceReturnId,omitempty"`
+	Payload               json.RawMessage `json:"payload,omitempty"`
+	Error                 string          `json:"error,omitempty"`
+	Code                  string          `json:"code,omitempty"`
+	Status                int             `json:"status,omitempty"`
 }
 
 const (
