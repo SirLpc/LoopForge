@@ -525,6 +525,11 @@ func bwrapArgsCommand(workspace string, requirements SandboxRequirements) ([]str
 	}
 	if native := requirements.NativeWarm; native != nil {
 		args = append(args, "--tmpfs", "/tmp", "--tmpfs", native.WorkspaceRoot)
+		if conversation := requirements.ConversationRoot; conversation != "" {
+			// Restore this conversation's staged inputs after masking the Runner
+			// root. Mount it before the writable workspace and HOME overlays.
+			args = append(args, "--ro-bind", conversation, conversation)
+		}
 	}
 	args = append(args, "--bind", root, root, "--chdir", root)
 	if requirements.NativeWarm == nil {

@@ -2,12 +2,59 @@ package runtime
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"agentflow/internal/domain"
 )
+
+func TestBwrapWarmConversationCanReadStagedConfig(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap is Linux-only")
+	}
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("bubblewrap is unavailable")
+	}
+	if out, err := exec.CommandContext(t.Context(), bwrap, "--unshare-user", "--ro-bind", "/", "/", "--", "/bin/true").CombinedOutput(); err != nil {
+		t.Skipf("bubblewrap namespaces are unavailable: %s", out)
+	}
+	runnerRoot := t.TempDir()
+	conversation := filepath.Join(runnerRoot, ".conversations", "current")
+	sibling := filepath.Join(runnerRoot, ".conversations", "sibling")
+	platformWorkspace := filepath.Join(conversation, "ws")
+	runWorkspace := filepath.Join(runnerRoot, "runs", "current", "workspace")
+	for _, dir := range []string{filepath.Join(conversation, "home"), platformWorkspace, runWorkspace, sibling} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := filepath.Join(conversation, "current-mcp.json")
+	if err := os.WriteFile(config, []byte("staged MCP config"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range []string{platformWorkspace, runWorkspace} {
+		args, err := bwrapArgsCommand(workspace, SandboxRequirements{
+			ConversationRoot: conversation,
+			NativeWarm:       &NativeWarmIsolation{WorkspaceRoot: runnerRoot},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "/bin/sh", "-ec", `
+			test "$(cat "$1")" = "staged MCP config"
+			test ! -e "$2"
+			! touch "$3/readonly-probe" 2>/dev/null || exit 1
+			touch "$3/home/home-probe" "$3/ws/workspace-probe"
+		`, "test", config, sibling, conversation)
+		if out, err := exec.CommandContext(t.Context(), bwrap, args...).CombinedOutput(); err != nil {
+			t.Fatalf("warm conversation in %s: %v: %s", workspace, err, out)
+		}
+	}
+}
 
 func stubBunFSMountPoint(t *testing.T, path string) string {
 	t.Helper()
