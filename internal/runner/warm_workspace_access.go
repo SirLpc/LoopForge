@@ -38,6 +38,7 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 	if inv == nil || len(inv.Repositories) != len(l.Slots) {
 		return errors.New("incomplete warm checkout request")
 	}
+	verifyNativeContents := a.NativeCheckout != nil || len(a.PreparedRefs) > 0 || len(inv.WarmWorkspaceRefs) > 0
 	ctx = gitwork.WithSSHKeys(ctx, inv.GitSSHKeys)
 	ctx = invocationGitHTTPContext(ctx, inv)
 	dirs := map[string]string{}
@@ -150,7 +151,7 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 	}
 	root := filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace")
 	if p.native {
-		if err := p.checkNativeLeaseBeforeReady(ctx, a, root, inv); err != nil {
+		if err := p.checkNativeLeaseBeforeReady(ctx, a, root, inv, verifyNativeContents); err != nil {
 			return err
 		}
 	}

@@ -59,11 +59,17 @@ func prepareWarmLFS(local, auth context.Context, stage, db, scope, head string, 
 }
 
 func prepareWarmLFSForProof(local, auth context.Context, stage, db, scope, head string, repo domain.RunnerRepository, syncDir func(*os.File) error, mode warmProofLFSMode) (warmLFSManifest, error) {
+	return prepareWarmLFSManifest(local, stage, scope, head, syncDir, mode, func() error {
+		return fetchWarmLFS(local, auth, stage, db, scope, head, repo)
+	})
+}
+
+func prepareWarmLFSManifest(local context.Context, stage, scope, tree string, syncDir func(*os.File) error, mode warmProofLFSMode, fetch func() error) (warmLFSManifest, error) {
 	var manifest warmLFSManifest
 	if _, err := exec.LookPath("git-lfs"); err != nil {
-		return manifest, checkWarmWithoutLFS(local, stage, head)
+		return manifest, checkWarmWithoutLFS(local, stage, tree)
 	}
-	list, err := gitwork.C(local, stage, "lfs", "ls-files", "--json", "--include=*", "--exclude=", head)
+	list, err := gitwork.C(local, stage, "lfs", "ls-files", "--json", "--include=*", "--exclude=", tree)
 	if err != nil {
 		return manifest, err
 	}
@@ -150,7 +156,7 @@ func prepareWarmLFSForProof(local, auth context.Context, stage, db, scope, head 
 		missing[item.OID] = item.Size
 	}
 	if len(missing) > 0 {
-		if err := fetchWarmLFS(local, auth, stage, db, scope, head, repo); err != nil {
+		if err := fetch(); err != nil {
 			return manifest, err
 		}
 	}
@@ -210,19 +216,26 @@ func fetchWarmLFS(local, auth context.Context, stage, db, scope, head string, re
 	if err := warmAlternate(filepath.Join(scope, ".git"), objects); err != nil {
 		return err
 	}
-	config, err := gitwork.C(local, scope, "ls-tree", head, "--", ".lfsconfig")
+	if err := stageWarmLFSConfig(local, scope, head); err != nil {
+		return err
+	}
+	return fetchWarmLFSRef(auth, scope, "lfs", head, repo.CloneURL)
+}
+
+func stageWarmLFSConfig(ctx context.Context, stage, head string) error {
+	config, err := gitwork.C(ctx, stage, "ls-tree", head, "--", ".lfsconfig")
 	if err != nil {
 		return err
 	}
 	if strings.HasPrefix(config, "100") {
-		_, err = gitwork.C(local, scope, "restore", "--source="+head, "--worktree", "--", ".lfsconfig")
-	} else {
-		err = os.WriteFile(filepath.Join(scope, ".lfsconfig"), nil, 0600)
-	}
-	if err != nil {
+		_, err = gitwork.C(ctx, stage, "restore", "--source="+head, "--worktree", "--", ".lfsconfig")
 		return err
 	}
-	if _, err := gitwork.C(auth, scope, "-c", "lfs.storage=lfs", "-c", "remote.origin.url="+repo.CloneURL, "-c", "lfs.fetchrecentalways=false", "lfs", "fetch", "--include=*", "--exclude=", "origin", head); err != nil {
+	return os.WriteFile(filepath.Join(stage, ".lfsconfig"), nil, 0600)
+}
+
+func fetchWarmLFSRef(auth context.Context, stage, storage, ref, origin string) error {
+	if _, err := gitwork.C(auth, stage, "-c", "lfs.storage="+storage, "-c", "remote.origin.url="+origin, "-c", "lfs.fetchrecentalways=false", "lfs", "fetch", "--include=*", "--exclude=", "origin", ref); err != nil {
 		return fmt.Errorf("%w: cannot recover Git LFS objects: %w", errWarmCheckoutRetryable, err)
 	}
 	return nil

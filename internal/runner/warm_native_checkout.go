@@ -102,7 +102,7 @@ func inspectNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	if current.Commit == intent.Target.Commit &&
 		(current.Branch == intent.Target.Branch && (current.Branch == "" || tip == current.Commit) ||
 			current.Branch == "" && intent.Target.Branch != "" && (tip == intent.BranchBefore || tip == current.Commit)) {
-		return true, proof.verifyLocal(ctx, slot, cache, repo, current, warmProofLFSCache)
+		return true, proof.verifyLocal(ctx, slot, cache, repo, current, warmProofLFSContent)
 	}
 	return false, warmTreeChanged("interrupted warm checkout references differ from the journal")
 }
@@ -288,7 +288,7 @@ func (p *warmWorkspacePool) recoverNativeCheckoutForReturn(ctx context.Context, 
 	return a, errors.New("missing repository for interrupted native checkout")
 }
 
-func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a warmWorkspaceAllocation, root string, inv *domain.RunnerInvocation) error {
+func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a warmWorkspaceAllocation, root string, inv *domain.RunnerInvocation, verifyContents bool) error {
 	if err := p.checkNativeWarmEditors(a); err != nil {
 		return errors.Join(errNativeWarmCheckoutBusy, err)
 	}
@@ -298,12 +298,27 @@ func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a w
 	}
 	for _, repo := range inv.Repositories {
 		id := a.Lease.Slots[repo.RepositoryID]
+		checkout := a.Targets[id]
+		cache := p.gitCache(id)
 		ref, ok := a.PreparedRefs[id]
 		if !ok {
 			return errors.New("missing prepared native warm workspace reference")
 		}
-		proof := warmReturnTree{root: root, checkout: a.Targets[id], native: true, archived: archived, collected: make(map[string]string)}
-		if err := proof.verifyLocal(ctx, p.slots[id], p.gitCache(id), repo, ref, warmProofLFSCache); err != nil {
+		if !verifyContents {
+			current, err := warmCheckoutRef(checkout, repo.RepositoryID)
+			if err != nil {
+				return err
+			}
+			if current.RepositoryID != ref.RepositoryID || current.Branch != ref.Branch || current.Commit != ref.Commit {
+				return warmTreeChanged("prepared native checkout %s changed", repo.Dir)
+			}
+			if err := checkNativeWarmClean(ctx, checkout, filepath.Dir(cache)); err != nil {
+				return fmt.Errorf("%s: verify prepared native checkout: %w", repo.Dir, err)
+			}
+			continue
+		}
+		proof := warmReturnTree{root: root, checkout: checkout, native: true, archived: archived, collected: make(map[string]string)}
+		if err := proof.verifyLocal(ctx, p.slots[id], cache, repo, ref, warmProofLFSContent); err != nil {
 			return fmt.Errorf("%s: verify prepared native checkout: %w", repo.Dir, err)
 		}
 	}

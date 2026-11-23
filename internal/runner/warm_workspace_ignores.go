@@ -77,6 +77,20 @@ func warmCheckIgnore(ctx context.Context, stage, checkout string, paths []string
 	return ignored, nil
 }
 
+func warmIgnoredDirectories(ctx context.Context, stage, checkout string) (map[string]bool, error) {
+	entries, err := gitwork.CStdoutRaw(ctx, stage, nil, "--work-tree="+checkout, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+	if err != nil {
+		return nil, err
+	}
+	ignored := make(map[string]bool)
+	for entry := range strings.SplitSeq(entries, "\x00") {
+		if path, ok := strings.CutSuffix(entry, "/"); ok {
+			ignored[path] = true
+		}
+	}
+	return ignored, nil
+}
+
 func checkWarmIgnoredCollisions(ctx context.Context, stage, checkout, cache, head, target string) error {
 	added, err := gitwork.CStdoutRaw(ctx, cache, nil, "diff-tree", "-r", "--no-renames", "--name-only", "--diff-filter=A", "-z", head, target)
 	if err != nil || added == "" {

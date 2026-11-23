@@ -15,14 +15,19 @@ import (
 )
 
 func nativeWarmGit(ctx context.Context, checkout string, args ...string) (string, error) {
-	return gitwork.CStdout(ctx, checkout, append([]string{
+	return gitwork.CStdout(ctx, checkout, nativeWarmGitArgs(args...)...)
+}
+
+func nativeWarmGitArgs(args ...string) []string {
+	return append([]string{
+		"--no-replace-objects",
 		"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "filter.lfs.process=git-lfs filter-process --skip",
 		"-c", "filter.lfs.smudge=git-lfs smudge --skip -- %f",
 		"-c", "filter.lfs.clean=" + warmLFSVerificationClean,
 		"-c", "filter.lfs.required=true",
 		"-c", "core.fsmonitor=false",
-	}, args...)...)
+	}, args...)
 }
 
 // An operator's checkout keeps its Git database. Only the trusted cache
@@ -80,6 +85,72 @@ func nativeWarmConfigEntry(key, value string) bool {
 	return strings.HasPrefix(key, "lfs.") && strings.HasSuffix(key, ".access")
 }
 
+func checkNativeWarmClean(ctx context.Context, checkout, scratch string) error {
+	if err := verifyNativeWarmConfig(ctx, checkout, scratch); err != nil {
+		return err
+	}
+	// Git status must compare the published tree using the repository's indexed
+	// attributes and ancestry. A local override could hide a worktree edit.
+	for _, name := range []string{"attributes", "grafts"} {
+		info, err := os.Lstat(filepath.Join(checkout, ".git", "info", name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() != 0 {
+			return fmt.Errorf("fixed warm checkout has unsupported local Git info/%s", name)
+		}
+	}
+	if err := warmRegular(filepath.Join(checkout, ".git", "index")); err != nil {
+		return err
+	}
+	entries, err := gitwork.CStdoutRaw(ctx, checkout, nil, "ls-files", "-v", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	for entry := range strings.SplitSeq(strings.TrimSuffix(entries, "\x00"), "\x00") {
+		if entry == "" {
+			continue
+		}
+		flags, path, ok := strings.Cut(entry, "\t")
+		if !ok || !strings.HasPrefix(flags, "H ") {
+			return fmt.Errorf("fixed warm checkout has hidden or unmerged index entries: %q", path)
+		}
+		if strings.HasPrefix(flags, "H 160000 ") {
+			if !validWarmWorkspaceRelativePath(path) {
+				return errors.New("invalid fixed warm submodule path")
+			}
+			children, err := os.ReadDir(filepath.Join(checkout, path))
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if len(children) > 0 {
+				return warmTreeChanged("populated submodule %s needs inspection", path)
+			}
+		}
+	}
+	// Let Git refresh index stat information after LFS files are materialized.
+	status, err := gitwork.CStdoutRaw(ctx, checkout, nil, nativeWarmGitArgs("status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=none")...)
+	if err != nil || status == "" {
+		return err
+	}
+	// Git can report replaced LFS placeholders as modified when only their
+	// index stat information is stale. Compare filtered contents in that case.
+	changes := strings.TrimSuffix(status, "\x00")
+	for change := range strings.SplitSeq(changes, "\x00") {
+		if !strings.HasPrefix(change, " M ") {
+			return fmt.Errorf("fixed warm checkout is not clean: %s", strings.ReplaceAll(changes, "\x00", "\n"))
+		}
+	}
+	_, err = nativeWarmGit(ctx, checkout, "diff", "--quiet", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--")
+	if err != nil {
+		return fmt.Errorf("fixed warm checkout is not clean: %s: %w", strings.ReplaceAll(changes, "\x00", "\n"), err)
+	}
+	return nil
+}
+
 func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot warmWorkspaceSlot, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef, pending *nativeWarmCheckoutIntent, beforeWrite func(nativeWarmCheckoutIntent) error) (domain.WarmWorkspaceRef, error) {
 	var ref domain.WarmWorkspaceRef
 	if slot.Path != "" && nativeWarmEditorBusy(slot) {
@@ -108,12 +179,6 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	}
 	if err := gitwork.ValidateRemoteURL(repo.CloneURL, true); err != nil {
 		return ref, err
-	}
-	if pending == nil {
-		status, err := nativeWarmGit(local, checkout, "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none")
-		if err != nil || status != "" {
-			return ref, fmt.Errorf("fixed warm checkout must be clean before switching branches: %w", errors.Join(err, errors.New(status)))
-		}
 	}
 	current, err := warmCheckoutRef(checkout, repo.RepositoryID)
 	if err != nil {
@@ -167,40 +232,67 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		}
 	}
 	target := intent.Target.Commit
-	library := filepath.Join(slot.UnityProjectPath, "Library")
-	if err := warmTreeProtectsLibrary(local, cache, target, library); err != nil {
-		return ref, err
+	if pending == nil && current.Branch == "" && head != target {
+		if err := authorizeWarmRestore(local, auth, scratch, cache, repo, head); err != nil {
+			return ref, fmt.Errorf("fixed warm checkout is detached at a commit unavailable from the remote: %w", err)
+		}
 	}
 	if err := validateWarmLFSConfig(local, cache, target, repo.CloneURL); err != nil {
 		return ref, err
 	}
-	stage := filepath.Join(scratch, "check")
-	if _, err := gitwork.C(local, scratch, "init", "--template=", warmObjectFormat(head), stage); err != nil {
-		return ref, err
-	}
-	if err := nativeWarmProofAlternates(filepath.Join(stage, ".git"), cache, checkout); err != nil {
-		return ref, err
-	}
-	if err := warmTargetIgnoresLibrary(local, stage, target, library); err != nil {
-		return ref, err
-	}
-	lfs, err := prepareWarmLFS(local, auth, stage, cache, warmLFSCache(cache, slot.ProjectID, repo), target, repo, (*os.File).Sync)
-	if err != nil {
-		return ref, err
+	verifyRecovery := pending != nil || restore != nil
+	var lfs warmLFSManifest
+	if verifyRecovery || head != target {
+		stage := filepath.Join(scratch, "check")
+		if _, err := gitwork.C(local, scratch, "init", "--template=", warmObjectFormat(head), stage); err != nil {
+			return ref, err
+		}
+		if err := nativeWarmProofAlternates(filepath.Join(stage, ".git"), cache, checkout); err != nil {
+			return ref, err
+		}
+		scope := warmLFSCache(cache, slot.ProjectID, repo)
+		if verifyRecovery {
+			lfs, err = prepareWarmLFS(local, auth, stage, cache, scope, target, repo, (*os.File).Sync)
+		} else {
+			lfs, err = prepareNativeWarmChangedLFS(local, auth, stage, scope, head, target, repo)
+		}
+		if err != nil {
+			return ref, err
+		}
 	}
 	// Import only missing Git objects from the authenticated local cache.
 	// The checkout stays self-contained and can still be read by Windows Git.
-	objects := []string{target}
-	if intent.Baseline != target {
-		objects = append(objects, intent.Baseline)
+	if head != target || intent.Baseline != head {
+		if err := verifyNativeWarmConfig(local, checkout, scratch); err != nil {
+			return ref, err
+		}
+		objects := []string{target}
+		if intent.Baseline != target {
+			objects = append(objects, intent.Baseline)
+		}
+		fetch := append([]string{"-c", "protocol.file.allow=always", "fetch", "--no-auto-gc", "--no-tags", "--no-write-fetch-head", cache}, objects...)
+		if _, err := nativeWarmGit(local, checkout, fetch...); err != nil {
+			return ref, err
+		}
 	}
-	fetch := append([]string{"-c", "protocol.file.allow=always", "fetch", "--no-auto-gc", "--no-tags", "--no-write-fetch-head", cache}, objects...)
-	if _, err := nativeWarmGit(local, checkout, fetch...); err != nil {
-		return ref, err
-	}
-	atTarget, err := inspectNativeWarmCheckout(local, checkout, cache, slot, repo, intent)
-	if err != nil {
-		return ref, fmt.Errorf("verify fixed checkout before writing: %w", err)
+	var atTarget bool
+	if verifyRecovery {
+		atTarget, err = inspectNativeWarmCheckout(local, checkout, cache, slot, repo, intent)
+		if err != nil {
+			return ref, fmt.Errorf("verify fixed checkout before writing: %w", err)
+		}
+	} else {
+		current, err := warmCheckoutRef(checkout, repo.RepositoryID)
+		if err != nil {
+			return ref, err
+		}
+		if current.Commit != intent.Before.Commit || current.Branch != intent.Before.Branch {
+			return ref, warmTreeChanged("fixed warm checkout changed while fetching")
+		}
+		if err := checkNativeWarmClean(local, checkout, scratch); err != nil {
+			return ref, err
+		}
+		atTarget = current.Commit == intent.Target.Commit && current.Branch == intent.Target.Branch
 	}
 	if !atTarget {
 		if err := checkWarmIgnoredCollisions(local, checkout, checkout, cache, head, target); err != nil {

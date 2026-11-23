@@ -127,18 +127,20 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 		return err
 	}
 	library := filepath.Join(slot.UnityProjectPath, "Library")
-	if err := warmTreeProtectsLibrary(local, stage, head, library); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(filepath.Join(w.checkout, library)); err == nil {
-		if !info.IsDir() {
-			return warmTreeChanged("Library path %s is not a directory", library)
-		}
-		if err := warmTargetIgnoresLibrary(local, stage, head, library); err != nil {
+	if !w.native {
+		if err := warmTreeProtectsLibrary(local, stage, head, library); err != nil {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return err
+		if info, err := os.Lstat(filepath.Join(w.checkout, library)); err == nil {
+			if !info.IsDir() {
+				return warmTreeChanged("Library path %s is not a directory", library)
+			}
+			if err := warmTargetIgnoresLibrary(local, stage, head, library); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	if err := copyWarmGitExclude(w.checkout, stage); err != nil {
 		return err
@@ -168,6 +170,18 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 			return err
 		}
 	}
+	var ignoredDirs map[string]bool
+	if w.native {
+		ignoredDirs, err = warmIgnoredDirectories(local, stage, w.checkout)
+		if err != nil {
+			return err
+		}
+		for path := range tracked {
+			for parent := path; parent != "."; parent = filepath.Dir(parent) {
+				delete(ignoredDirs, parent)
+			}
+		}
+	}
 	untracked := make(map[string]fs.DirEntry)
 	var untrackedPaths []string
 	err = filepath.WalkDir(w.checkout, func(path string, d fs.DirEntry, err error) error {
@@ -184,10 +198,13 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 		if rel == ".git" {
 			return filepath.SkipDir
 		}
-		if rel == library {
+		if !w.native && rel == library {
 			if !d.IsDir() {
 				return warmTreeChanged("Library path %s is not a directory", library)
 			}
+			return filepath.SkipDir
+		}
+		if d.IsDir() && ignoredDirs[rel] {
 			return filepath.SkipDir
 		}
 		fields, ok := tracked[rel]
