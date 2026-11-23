@@ -124,7 +124,7 @@ func (h *assistantHandlers) waitForSessionEndDrain(ctx context.Context, session 
 		}
 		_, admitting := h.warmAdmissions.Load(g.ID)
 		if g.Status != "running" && !generationExecutingHere(g.ID) && !admitting {
-			if g.Status == "interrupted" {
+			if g.Status == "interrupted" || g.Status == "cancelled" || g.Status == "failed" {
 				appended, err := h.persistInterruptedReply(settled, g)
 				if err != nil {
 					return settled, err

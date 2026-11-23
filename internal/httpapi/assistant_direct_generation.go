@@ -90,7 +90,7 @@ func (h *assistantHandlers) claimDirectGeneration(ctx context.Context, req assis
 				g.Error = g.Failure.Message
 			}
 		}
-		if g.Status != "completed" {
+		if g.Status == "cancelled" {
 			if err := h.commitTurnTranscript(g, nil, true); err != nil {
 				log.Printf("keep direct assistant transcript id=%s: %v", g.ID, err)
 			}
