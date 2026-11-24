@@ -40,7 +40,8 @@ if ($request.gitArgs) {
                 if ($scratch.StartsWith($request.worktree.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
                     throw 'LFS scratch must be outside the workspace'
                 }
-                $start.Arguments = '-c "lfs.storage=' + $scratch + '" -c "filter.lfs.process=' + $filter + '" ' + $start.Arguments
+                $storage = if ($request.stageLfs) { Join-Path $request.worktree $request.stageLfs } else { $scratch }
+                $start.Arguments = '-c "lfs.storage=' + $storage + '" -c "filter.lfs.process=' + $filter + '" ' + $start.Arguments
                 break
             }
         }
@@ -73,6 +74,17 @@ if ($request.gitArgs) {
             [LoopForgeWarmGit]::FenceProcessTree()
             [LoopForgeWarmGit]::PinCheckout($request.worktree)
             [LoopForgeWarmGit]::CheckCheckoutPaths($request.worktree, [string[]]$request.changedPaths)
+            if ($request.pinChangedParents) {
+                [LoopForgeWarmGit]::PinChangedParents($request.worktree, [string[]]$request.changedPaths)
+            }
+            if ($request.pinConfig) {
+                [LoopForgeWarmGit]::PinConfig($request.worktree)
+                if ($request.stageLfs) {
+                    $staging = Join-Path $request.worktree $request.stageLfs
+                    [LoopForgeWarmGit]::PinDirectory([IO.Path]::GetDirectoryName($staging))
+                    [LoopForgeWarmGit]::PinDirectory($staging)
+                }
+            }
             [Console]::Error.WriteLine('loopforge-windows-git-ready')
             if ([Console]::In.ReadLine() -cne 'run') { exit 124 }
             $inputPipe = [Console]::OpenStandardInput()

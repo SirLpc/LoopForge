@@ -82,6 +82,9 @@ func Checkouts(ctx context.Context, root string) []Checkout {
 // hooks, pager, editor, askpass, credential helpers); config reads skip
 // includes. Only read-only plumbing is run.
 func checkoutGit(ctx context.Context, dir string, args ...string) (string, error) {
+	if out, err, handled := alternateLocalGit(ctx, dir, nil, args); handled {
+		return strings.TrimSpace(string(out)), err
+	}
 	base := []string{
 		"--git-dir=" + filepath.Join(dir, ".git"), "--work-tree=" + dir,
 		"-c", "safe.directory=*",

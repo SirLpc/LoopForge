@@ -3,6 +3,8 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,16 @@ import (
 )
 
 func RunNativeWarmGit(ctx context.Context, workspace, executable string, input []byte, writable, network bool, isolation *NativeWarmIsolation) ([]byte, error) {
+	return runNativeWarmGit(ctx, workspace, executable, input, writable, network, isolation, nil)
+}
+
+// RunNativeWarmGitSession exchanges requests with the trusted helper over its
+// own standard streams. No Windows executable or interop endpoint is mounted.
+func RunNativeWarmGitSession(ctx context.Context, workspace, executable string, writable, network bool, isolation *NativeWarmIsolation, exchange func(io.Reader, io.Writer) ([]byte, error)) ([]byte, error) {
+	return runNativeWarmGit(ctx, workspace, executable, nil, writable, network, isolation, exchange)
+}
+
+func runNativeWarmGit(ctx context.Context, workspace, executable string, input []byte, writable, network bool, isolation *NativeWarmIsolation, exchange func(io.Reader, io.Writer) ([]byte, error)) ([]byte, error) {
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
 		return nil, err
@@ -40,7 +52,6 @@ func RunNativeWarmGit(ctx context.Context, workspace, executable string, input [
 	args = append(args, "--ro-bind", executable, helper, "--", helper, "warm-git-helper-native", workspace)
 	cmd := exec.CommandContext(ctx, bwrap, args...)
 	cmd.Dir = workspace
-	cmd.Stdin = bytes.NewReader(input)
 	env := controlledBaseEnvironment(os.Environ())
 	for _, key := range []string{"HOME", "TMPDIR", "TMP", "TEMP", "PWD"} {
 		value := "/tmp"
@@ -53,6 +64,28 @@ func RunNativeWarmGit(ctx context.Context, workspace, executable string, input [
 		env = upsertEnv(env, key, value)
 	}
 	cmd.Env = env
+	if exchange != nil {
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, err
+		}
+		defer stdout.Close()
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, err
+		}
+		defer stdin.Close()
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		out, err := exchange(stdout, stdin)
+		_ = stdin.Close()
+		if err != nil {
+			_ = cmd.Process.Kill()
+		}
+		return out, errors.Join(err, cmd.Wait())
+	}
+	cmd.Stdin = bytes.NewReader(input)
 	out, err := cmd.Output()
 	return []byte(strings.TrimSpace(string(out))), err
 }

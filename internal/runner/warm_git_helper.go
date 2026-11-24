@@ -15,6 +15,7 @@ import (
 )
 
 type warmGitCommand struct {
+	WindowsGit             bool
 	Outputs                *domain.RunnerInvocation
 	Read                   *domain.RunnerWorkspaceRequest
 	Action, Message, Label string
@@ -35,18 +36,31 @@ func RunWarmGitHelperCLI(args []string) bool {
 	}
 	var op warmGitCommand
 	resp := domain.RunnerWorkspaceResponse{}
-	if err := json.NewDecoder(io.LimitReader(os.Stdin, 20<<20)).Decode(&op); err != nil {
+	decoder := json.NewDecoder(io.LimitReader(os.Stdin, warmGitMessageLimit))
+	if len(args) == 2 {
+		decoder = json.NewDecoder(io.LimitReader(os.Stdin, maxWarmGitSessionBytes))
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	if err := decoder.Decode(&op); err != nil {
 		resp = runnerWorkspaceError(err)
 	} else {
-		resp = op.executeAt(context.Background(), root, args[0] == "warm-git-helper-native")
+		ctx := context.Background()
+		if op.WindowsGit && args[0] == "warm-git-helper-native" {
+			ctx = warmWindowsHelperContext(ctx, decoder, encoder)
+		}
+		resp = op.executeAt(ctx, root, args[0] == "warm-git-helper-native")
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(resp)
+	if op.WindowsGit {
+		_ = encoder.Encode(warmWindowsHelperMessage{Result: &resp})
+	} else {
+		_ = encoder.Encode(resp)
+	}
 	return true
 }
 
 func (op warmGitCommand) executeAt(ctx context.Context, root string, native bool) domain.RunnerWorkspaceResponse {
 	if op.Outputs != nil {
-		return runnerWorkspacePayload(collectTaskOutputs(root, op.Outputs))
+		return runnerWorkspacePayload(collectTaskOutputsContext(ctx, root, op.Outputs))
 	}
 	if op.Read != nil {
 		if !domain.IsWorkspaceGitRead(op.Read.Operation, op.Read.Ref) {

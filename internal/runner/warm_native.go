@@ -113,6 +113,15 @@ func (d *Daemon) runNativeWarmGit(ctx context.Context, task domain.RunnerTask, c
 	}
 	requirements, _ := d.localTaskSandboxSpec(task)
 	writable := command.Action != "" || command.Outputs != nil && command.Outputs.RecoverOutputs
+	if targets := d.warmWindowsGitTargets(ctx, task, workspace); len(targets) > 0 {
+		if writable {
+			unlock := lockInvocationWorkspace(workspace)
+			defer unlock()
+		}
+		ctx = context.WithValue(ctx, warmGitRunIDKey{}, task.RunID)
+		command.WindowsGit = true
+		return runtime.RunNativeWarmGitSession(ctx, workspace, executable, writable, command.Action != "", requirements.NativeWarm, warmWindowsGitExchange(ctx, command, targets))
+	}
 	return runtime.RunNativeWarmGit(ctx, workspace, executable, input, writable, command.Action != "", requirements.NativeWarm)
 }
 

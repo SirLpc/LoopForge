@@ -1,8 +1,8 @@
 package gitwork
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -553,8 +553,11 @@ func UnquoteLsFilesPath(rel string) string {
 // StageUntracked intent-adds untracked sources that are not Excluded, so they
 // show up in diffs and are picked up by `git add -u`.
 func StageUntracked(workspace string) error {
-	cmd := exec.Command("git", "-C", workspace, "ls-files", "-z", "--others", "--exclude-standard")
-	out, err := cmd.CombinedOutput()
+	return stageUntracked(context.Background(), workspace)
+}
+
+func stageUntracked(ctx context.Context, workspace string) error {
+	out, err := LocalGit(ctx, workspace, nil, "ls-files", "-z", "--others", "--exclude-standard")
 	if err != nil {
 		return fmt.Errorf("list untracked files: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -570,9 +573,7 @@ func StageUntracked(workspace string) error {
 		return nil
 	}
 	payload := strings.Join(files, "\x00") + "\x00"
-	add := exec.Command("git", "-C", workspace, "add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul")
-	add.Stdin = strings.NewReader(payload)
-	if out, err := add.CombinedOutput(); err != nil {
+	if out, err := LocalGit(ctx, workspace, strings.NewReader(payload), "add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return fmt.Errorf("intent-add untracked files: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

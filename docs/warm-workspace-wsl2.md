@@ -45,10 +45,20 @@ unshare --user --map-root-user --mount --propagation private -- \
 
 符合条件的 Windows 槽位用 Windows Git 切换提交、更新任务分支和挂接 HEAD。Runner 在执行前确认 Windows 路径与租约挂载指向同一个检出，并在命令执行期间锁定路径。Windows Git 在临时索引上验证工作区和刷新文件状态，确认暂存条目及真实索引都符合预期后发布。LFS 仍按变更验证并落盘，索引刷新只处理本次替换的资产和中断恢复涉及的变更。文本换行沿用工作区原有规则。
 
-远端认证、Git 对象缓存和 LFS 下载仍由 WSL Runner 执行。页面和 SOP 交付的 Git 操作沿用隔离的 Git helper。Runner 日志以运行 ID 记录拉取、本地对象导入、切换前检查、提交切换、LFS 落盘、索引刷新、就绪和归还耗时。若 Windows helper 无法启动，且本地检出写入尚未开始，Runner 可以使用 WSL 路径。写入受系统中断时，可按现有检出意图和内容证明检查槽位，再决定是否恢复。
+远端认证、Git 对象缓存和 LFS 下载仍由 WSL Runner 执行。
+
+符合条件的租约也会在 Windows 侧执行 SOP 产物交接的工作树 diff、页面状态和版本查询，以及交付时的本地暂存和提交。Windows 暂存先写入临时索引和 LFS 对象目录，Runner 发布对象后才替换正式索引。可验证为本地且无需转换 LFS 资产的分支切换和合并也使用 Windows Git。需要下载或重新物化 LFS 资产的操作、LFS 仓库的变基、WSL 私有缓存与临时工作树，以及带凭据的远端操作沿用现有隔离执行路径。预热 Runner 日志的 `backend=windows` 可以确认实际执行端。
+
+Runner 日志以运行 ID 记录拉取、本地对象导入、切换前检查、提交切换、LFS 落盘、索引刷新、就绪和归还耗时。若 Windows helper 无法启动，且本地检出写入尚未开始，Runner 可以使用 WSL 路径。写入受系统中断时，可按现有检出意图和内容证明检查槽位，再决定是否恢复。
 
 归还先确认远端提交、索引、归档文件和 LFS 缓存，收到归还回执后再于卸载前完整核对原目录。确认阶段复用同一回执已经验证的 LFS 清单及未发生变化的缓存对象。Runner 重启后会重新验证清单和缓存。若本地源码或索引发生变化，原租约继续持有槽位。处理改动后，可以重新发起归还。暂时的编辑器占用会等待下一次确认。
 
 升级时先更新 API 和 Worker，再更新原生 Runner。升级期间暂停该槽位调度并结束已有工作区用量，待相关进程使用同版协议后恢复。新版 Runner 可以读取先前的租约日志。需要回退时，先用新版 Runner 处理存量租约，再按独立 Runner 状态流程切换。
+
+## 同机一键更新
+
+平台通过 Compose 源码部署且原生 Runner 由同一个 WSL 用户的 systemd 服务管理时，可在 Windows 双击仓库根目录的 `redeploy-wsl.bat`。执行前暂停相关槽位并完成现有工作区的归还。脚本从安装目录当前检出的源码构建平台，等待平台健康检查，再从新容器取出对应的 Linux Runner，备份旧二进制为 `agentflow-runner.previous` 并重启 Runner 服务。源码更新和本次发布要求的手工 SQL 由部署人员处理。
+
+可先在 Windows CMD 执行 `redeploy-wsl.bat --check` 检查部署目标。批处理使用 Ubuntu。在其他 WSL 发行版中可直接执行 `bash scripts/redeploy-wsl.sh`。脚本默认重启 `loopforge-native-runner.service` 并更新 `~/.local/share/loopforge-native/agentflow-runner`，可在 WSL 中分别设置 `LOOPFORGE_RUNNER_UNIT` 和 `LOOPFORGE_RUNNER_BINARY` 指定已有安装的服务与二进制。更新完成后，在平台确认 Runner 在线并验证一个槽位的交付与归还，再恢复其余槽位。
 
 通用池协议见[Runner 预热工作区池](warm-workspace-pool.md)。

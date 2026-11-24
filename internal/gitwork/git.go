@@ -27,6 +27,16 @@ func Run(ctx context.Context, workspace string, args ...string) (string, error) 
 }
 
 func run(ctx context.Context, workspace string, mode outputMode, input io.Reader, args []string) (string, error) {
+	localArgs := args
+	if len(args) >= 2 && args[0] == "-C" && args[1] == workspace {
+		localArgs = args[2:]
+	}
+	if out, err, handled := alternateLocalGit(ctx, workspace, input, localArgs); handled {
+		if mode == rawStdoutOutput && err == nil {
+			return string(out), nil
+		}
+		return redactContextGitSecrets(ctx, Redact(strings.TrimSpace(string(out)), TokenFrom(ctx))), err
+	}
 	token := TokenFrom(ctx)
 	sshEnv, cleanup, err := sshCommandEnvironment(ctx, args)
 	if err != nil {

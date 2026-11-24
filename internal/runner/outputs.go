@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -85,6 +86,10 @@ func writeInputFile(workspace string, input domain.RunnerInputFile) error {
 // repository-patch inventory of every checkout, and workspace facts. It runs
 // after success and failure alike so a failed node keeps its diagnostics.
 func collectTaskOutputs(workspace string, inv *domain.RunnerInvocation) *domain.RunnerTaskOutputs {
+	return collectTaskOutputsContext(context.Background(), workspace, inv)
+}
+
+func collectTaskOutputsContext(ctx context.Context, workspace string, inv *domain.RunnerInvocation) *domain.RunnerTaskOutputs {
 	if inv == nil || !inv.ReportOutputs {
 		return nil
 	}
@@ -93,7 +98,7 @@ func collectTaskOutputs(workspace string, inv *domain.RunnerInvocation) *domain.
 		out.Recovered = recoverOutputFiles(workspace, inv.OutputFiles)
 	}
 	out.Files, out.TooLarge = readOutputFiles(workspace, inv.OutputFiles)
-	out.Patches = collectPatchInventories(workspace, patchInventoryDirs(inv))
+	out.Patches = collectPatchInventoriesContext(ctx, workspace, patchInventoryDirs(inv))
 	frontend, evidence := domain.DetectFrontendProject(workspace)
 	out.Facts = &domain.RunnerWorkspaceFacts{Frontend: frontend, FrontendEvidence: evidence}
 	return out
@@ -146,9 +151,13 @@ func patchInventoryDirs(inv *domain.RunnerInvocation) []string {
 // collectPatchInventories maps each directory with a non-empty patch
 // inventory to it; the map stays nil when no directory has changes.
 func collectPatchInventories(workspace string, dirs []string) map[string]string {
+	return collectPatchInventoriesContext(context.Background(), workspace, dirs)
+}
+
+func collectPatchInventoriesContext(ctx context.Context, workspace string, dirs []string) map[string]string {
 	var patches map[string]string
 	for _, dir := range dirs {
-		patch, err := gitwork.PatchInventory(filepath.Join(workspace, filepath.FromSlash(dir)))
+		patch, err := gitwork.PatchInventoryContext(ctx, filepath.Join(workspace, filepath.FromSlash(dir)))
 		if err != nil || len(patch) == 0 {
 			continue
 		}

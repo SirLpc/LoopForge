@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -42,10 +41,10 @@ func pushWorkBranch(ctx context.Context, workspace, branch, message string, requ
 			return "", err
 		}
 	}
-	if err := StageChanges(workspace); err != nil {
+	if err := stageChanges(ctx, workspace); err != nil {
 		return "", err
 	}
-	if exec.Command("git", "-C", workspace, "diff", "--cached", "--quiet").Run() != nil {
+	if _, err := LocalGit(ctx, workspace, nil, "diff", "--cached", "--quiet"); err != nil {
 		args := withFallbackIdentity(ctx, workspace, []string{"commit", "--no-verify", "-q", "-m", message})
 		if _, err := C(ctx, workspace, args...); err != nil {
 			return "", fmt.Errorf("commit work branch: %w", err)
@@ -151,10 +150,10 @@ func pullWorkBranch(ctx context.Context, workspace, branch string, requireExisti
 	if !ok || remote == head {
 		return "", nil
 	}
-	if exec.Command("git", "-C", workspace, "merge-base", "--is-ancestor", remote, head).Run() == nil {
+	if _, err := LocalGit(ctx, workspace, nil, "merge-base", "--is-ancestor", remote, head); err == nil {
 		return "", nil
 	}
-	if exec.Command("git", "-C", workspace, "merge-base", "--is-ancestor", head, remote).Run() == nil {
+	if _, err := LocalGit(ctx, workspace, nil, "merge-base", "--is-ancestor", head, remote); err == nil {
 		if _, err := C(ctx, workspace, "merge", "--ff-only", "-q", trackingRef); err != nil {
 			return "", fmt.Errorf("fast-forward work branch %s: %w", branch, err)
 		}
@@ -273,22 +272,26 @@ func RequireOnWorkBranch(ctx context.Context, workspace, branch string) error {
 // paths: secrets, AgentFlow control files, SOP deliverables and
 // dependency/cache trees.
 func StageChanges(workspace string) error {
-	if err := StageUntracked(workspace); err != nil {
+	return stageChanges(context.Background(), workspace)
+}
+
+func stageChanges(ctx context.Context, workspace string) error {
+	if err := stageUntracked(ctx, workspace); err != nil {
 		return err
 	}
 	// Git 2.55 rejects add -u with pathspecs that match no index entries.
 	// An empty checkout (or one containing only excluded files) has nothing
 	// eligible to update. Keep exclusions intact instead of ignoring add errors.
-	trackedArgs := append([]string{"-C", workspace, "ls-files", "--cached", "-z", "--", "."}, ExcludePathspecs...)
-	tracked, err := exec.Command("git", trackedArgs...).CombinedOutput()
+	trackedArgs := append([]string{"ls-files", "--cached", "-z", "--", "."}, ExcludePathspecs...)
+	tracked, err := LocalGit(ctx, workspace, nil, trackedArgs...)
 	if err != nil {
 		return fmt.Errorf("list work branch tracked files: %w: %s", err, strings.TrimSpace(string(tracked)))
 	}
 	if len(tracked) == 0 {
 		return nil
 	}
-	args := append([]string{"-C", workspace, "add", "-u", "--", "."}, ExcludePathspecs...)
-	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+	args := append([]string{"add", "-u", "--", "."}, ExcludePathspecs...)
+	if out, err := LocalGit(ctx, workspace, nil, args...); err != nil {
 		return fmt.Errorf("stage work branch changes: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

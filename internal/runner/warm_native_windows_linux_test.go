@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/runtime"
 )
 
 func windowsWarmGitFixture(t *testing.T) warmGitFixture {
@@ -389,6 +391,19 @@ done`)
 	if err := prepareNativeLeaseTest(t, p, g, lease, nil); err != nil {
 		t.Fatalf("prepare Windows lease: %v", err)
 	}
+	d := nativeReturnTestDaemon(p, lease)
+	d.cfg.DefaultWorkspaceRoot = p.workspaceRoot
+	workspace := filepath.Join(p.workspaceRoot, "runs", lease.OwnerRunID, "workspace")
+	task := domain.RunnerTask{RunID: lease.OwnerRunID, Workspace: workspace, WarmWorkspaceLease: &lease}
+	if targets := d.warmWindowsGitTargets(t.Context(), task, workspace); targets[filepath.Join(workspace, g.repo.Dir)].root == "" {
+		t.Fatal("leased bind mount did not select its registered Windows Git checkout")
+	}
+	stale := lease
+	stale.Generation++
+	task.WarmWorkspaceLease = &stale
+	if len(d.warmWindowsGitTargets(t.Context(), task, workspace)) != 0 {
+		t.Fatal("stale lease selected a Windows Git checkout")
+	}
 	refs := returnNativeLeaseTest(t, p, g, lease)
 	reopened := placeNativeLeaseTest(t, p, "windows-reopened", 2)
 	if err := prepareNativeLeaseTest(t, p, g, reopened, refs); err != nil {
@@ -396,5 +411,185 @@ done`)
 	}
 	if data, err := os.ReadFile(filepath.Join(g.checkout, "Library", "keep")); err != nil || string(data) != "persist across leases" {
 		t.Fatalf("ignored workspace file = %q, %v", data, err)
+	}
+}
+
+func TestWarmWindowsTaskGitUsesWindowsForOutputsReadsAndDelivery(t *testing.T) {
+	f := windowsWarmGitFixture(t)
+	root := filepath.Dir(f.checkout)
+	dir := filepath.Base(f.checkout)
+	windows, err := selectNativeWarmWindowsGit(t.Context(), f.checkout, t.TempDir(), f.checkout)
+	if err != nil || windows.root == "" {
+		t.Fatalf("Windows Git checkout unavailable: %v", err)
+	}
+	head := runGitT(t, f.checkout, "rev-parse", "HEAD")
+	original := runGitT(t, f.checkout, "show", "HEAD:README.md")
+	warmGitWrite(t, f.checkout, ".git/agentflow-baseline", head+"\n")
+	warmGitWrite(t, f.checkout, "README.md", "changed on Windows\n")
+	warmGitWrite(t, f.checkout, "new file.txt", "new on Windows\n")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]warmWindowsTree{f.checkout: windows}
+	if _, err := windows.runGit(t.Context(), windows.root+`\.git`, warmWindowsRequest{ManagedGit: true, PinConfig: true}, []string{"rev-parse", "HEAD"}); err != nil {
+		t.Fatalf("Windows Git guard failed: %v", err)
+	}
+	run := func(command warmGitCommand) domain.RunnerWorkspaceResponse {
+		t.Helper()
+		command.WindowsGit = true
+		ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+		defer cancel()
+		output, err := runtime.RunNativeWarmGitSession(ctx, root, executable, true, false, nil, warmWindowsGitExchange(ctx, command, targets))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result domain.RunnerWorkspaceResponse
+		if err := json.Unmarshal(output, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Error != "" {
+			t.Fatal(result.Error)
+		}
+		return result
+	}
+	remote := filepath.Join(root, "delivery.git")
+	runGitT(t, root, "clone", "-q", "--bare", f.repo.CloneURL, remote)
+	runGitT(t, f.checkout, "remote", "set-url", "origin", remote)
+	branch := runGitT(t, f.checkout, "branch", "--show-current")
+	linuxGit := filepath.Join(root, "linux-git-guard")
+	if err := os.Mkdir(linuxGit, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linuxGit, "git"), []byte(`#!/bin/sh
+for arg do
+    case "$arg" in
+        diff|status|log|diff-tree|show|add|commit) exit 91 ;;
+    esac
+done
+exec /usr/bin/git "$@"
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", linuxGit+string(os.PathListSeparator)+os.Getenv("PATH"))
+	report := run(warmGitCommand{Outputs: &domain.RunnerInvocation{
+		ReportOutputs: true, RecoverOutputs: true, Repositories: []domain.RunnerRepository{{Dir: dir}},
+	}})
+	var outputs domain.RunnerTaskOutputs
+	if err := json.Unmarshal(report.Payload, &outputs); err != nil {
+		t.Fatal(err)
+	}
+	patch := outputs.Patches[dir]
+	if !strings.Contains(patch, "README.md") || !strings.Contains(patch, "new file.txt") {
+		t.Fatalf("Windows Git lost a tracked or untracked change: %q", patch)
+	}
+	for _, op := range []string{domain.RunnerWorkspaceOperationInfo, domain.RunnerWorkspaceOperationDiff, domain.RunnerWorkspaceOperationLog, domain.RunnerWorkspaceOperationCommit, domain.RunnerWorkspaceOperationFile, domain.RunnerWorkspaceOperationCheckouts} {
+		request := domain.RunnerWorkspaceRequest{Operation: op, Repositories: []domain.RepositoryContext{{WorkspaceDir: dir}}}
+		if op == domain.RunnerWorkspaceOperationFile {
+			request.Path = dir + "/README.md"
+			request.Ref = head
+		}
+		if op == domain.RunnerWorkspaceOperationCommit {
+			request.Ref = head
+		}
+		want := map[string]string{
+			domain.RunnerWorkspaceOperationInfo:      "README.md",
+			domain.RunnerWorkspaceOperationDiff:      "changed on Windows",
+			domain.RunnerWorkspaceOperationLog:       head,
+			domain.RunnerWorkspaceOperationCommit:    "files/0000.meta",
+			domain.RunnerWorkspaceOperationFile:      original,
+			domain.RunnerWorkspaceOperationCheckouts: head,
+		}[op]
+		got := run(warmGitCommand{Read: &request})
+		if !strings.Contains(string(got.Payload), want) || strings.Contains(string(got.Payload), "exit status 91") {
+			t.Fatalf("invalid Windows workspace response for %s: %s", op, got.Payload)
+		}
+	}
+	delivery := run(warmGitCommand{Action: domain.RunnerTaskActionPushWorkBranch,
+		Invocation: &domain.RunnerInvocation{Repositories: []domain.RunnerRepository{{
+			Name: "delivery", Dir: dir, CloneURL: remote, Ref: branch, WorkBranch: branch, SyncWorkBranch: true,
+		}}},
+	})
+	var heads []domain.RunnerWorkBranchHead
+	if err := json.Unmarshal(delivery.Payload, &heads); err != nil || len(heads) != 1 || heads[0].Head == head {
+		t.Fatalf("local and remote delivery did not finish: %s (%v)", delivery.Payload, err)
+	}
+	t.Setenv("PATH", strings.TrimPrefix(os.Getenv("PATH"), linuxGit+string(os.PathListSeparator)))
+	if next := runGitT(t, remote, "rev-parse", "refs/heads/"+branch); next != heads[0].Head {
+		t.Fatalf("isolated transport did not push the Windows commit: %s", next)
+	}
+	runGitT(t, f.checkout, "checkout", "-b", "windows-merge")
+	warmGitWrite(t, f.checkout, "merge.txt", "fast-forward on Windows")
+	runGitT(t, f.checkout, "add", "merge.txt")
+	runGitT(t, f.checkout, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "merge target")
+	runGitT(t, f.checkout, "checkout", branch)
+	reply := runWarmWindowsHelperRequest(t.Context(), targets, warmGitCommand{Action: domain.RunnerTaskActionPullWorkBranch}, warmWindowsHelperRequest{
+		Dir: f.checkout, Args: []string{"merge", "--ff-only", "-q", "windows-merge"},
+	})
+	if !reply.Handled || reply.Error != "" {
+		t.Fatalf("Windows Git fast-forward failed: %+v", reply)
+	}
+	if _, err := os.Stat(filepath.Join(f.checkout, "merge.txt")); err != nil {
+		t.Fatalf("Windows merge did not update the worktree: %v", err)
+	}
+
+	commit := func(path, content string) {
+		t.Helper()
+		warmGitWrite(t, f.checkout, path, content)
+		runGitT(t, f.checkout, "add", path)
+		runGitT(t, f.checkout, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", path)
+	}
+	runGitT(t, f.checkout, "checkout", "-b", "rebase-target")
+	commit("upstream.txt", "change on upstream")
+	runGitT(t, f.checkout, "checkout", branch)
+	commit("local.txt", "local commit")
+	rebaseArgs := []string{"-c", "user.name=LoopForge", "-c", "user.email=loopforge@local", "rebase", "-q", "--autostash", "rebase-target"}
+	reply = runWarmWindowsHelperRequest(t.Context(), targets, warmGitCommand{Action: domain.RunnerTaskActionPullWorkBranch}, warmWindowsHelperRequest{Dir: f.checkout, Args: rebaseArgs})
+	if !reply.Handled || reply.Error != "" {
+		t.Fatalf("Windows Git clean rebase failed: %+v", reply)
+	}
+	if _, err := os.Stat(filepath.Join(f.checkout, "upstream.txt")); err != nil {
+		t.Fatalf("Windows rebase lost upstream content: %v", err)
+	}
+	runGitT(t, f.checkout, "lfs", "install", "--local")
+	runGitT(t, f.checkout, "lfs", "track", "*.bin")
+	warmGitWrite(t, f.checkout, "asset.bin", "original LFS data")
+	runGitT(t, f.checkout, "add", ".gitattributes", "asset.bin")
+	runGitT(t, f.checkout, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "register LFS asset")
+	asset := "replacement LFS data"
+	warmGitWrite(t, f.checkout, "asset.bin", asset)
+	reply = runWarmWindowsHelperRequest(t.Context(), targets, warmGitCommand{Action: domain.RunnerTaskActionPushWorkBranch}, warmWindowsHelperRequest{
+		Dir: f.checkout, Args: []string{"add", "-u", "--", "."},
+	})
+	if !reply.Handled || reply.Error != "" {
+		t.Fatalf("Windows Git LFS staging failed: %+v", reply)
+	}
+	oid := fmt.Sprintf("%x", sha256.Sum256([]byte(asset)))
+	staged := runGitT(t, f.checkout, "show", ":asset.bin")
+	if !strings.Contains(staged, "oid sha256:"+oid) {
+		t.Fatalf("staged LFS pointer = %q", staged)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.checkout, ".git", "lfs", "objects", oid[:2], oid[2:4], oid)); err != nil || string(data) != asset {
+		t.Fatalf("staged LFS object was not available for delivery: %v", err)
+	}
+	runGitT(t, f.checkout, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "keep staged LFS asset")
+	runGitT(t, f.checkout, "checkout", "-b", "lfs-code-change")
+	commit("non-lfs.txt", "code-only change in an LFS repository")
+	runGitT(t, f.checkout, "checkout", branch)
+	pull := warmGitCommand{Action: domain.RunnerTaskActionPullWorkBranch}
+	reply = runWarmWindowsHelperRequest(t.Context(), targets, pull, warmWindowsHelperRequest{
+		Dir: f.checkout, Args: []string{"merge", "--ff-only", "-q", "lfs-code-change"},
+	})
+	if !reply.Handled || reply.Error != "" {
+		t.Fatalf("Windows Git did not accelerate a code-only merge in an LFS checkout: %+v", reply)
+	}
+	runGitT(t, f.checkout, "checkout", "-b", "lfs-asset-change")
+	commit("asset.bin", "different LFS object on upstream")
+	runGitT(t, f.checkout, "checkout", branch)
+	reply = runWarmWindowsHelperRequest(t.Context(), targets, pull, warmWindowsHelperRequest{
+		Dir: f.checkout, Args: []string{"merge", "--ff-only", "-q", "lfs-asset-change"},
+	})
+	if reply.Handled {
+		t.Fatalf("offline Windows merge would replace a hydrated LFS asset: %+v", reply)
 	}
 }

@@ -91,18 +91,22 @@ func warmWindowsPath(ctx context.Context, path string) (string, error) {
 }
 
 type warmWindowsRequest struct {
-	Worktree      string                 `json:"worktree,omitempty"`
-	GitArgs       string                 `json:"gitArgs,omitempty"`
-	LFSScratch    string                 `json:"lfsScratch,omitempty"`
-	RemoveScratch string                 `json:"removeScratch,omitempty"`
-	Files         []warmWindowsProofFile `json:"files,omitempty"`
-	ManagedGit    bool                   `json:"managedGit,omitempty"`
-	RefreshIndex  bool                   `json:"refreshIndex,omitempty"`
-	JobSource     string                 `json:"jobSource,omitempty"`
-	IndexFile     string                 `json:"indexFile,omitempty"`
-	FinishWrite   bool                   `json:"finishWrite,omitempty"`
-	ChangedPaths  []string               `json:"changedPaths,omitempty"`
-	GitInput      []byte                 `json:"gitInput,omitempty"`
+	Worktree          string                 `json:"worktree,omitempty"`
+	GitArgs           string                 `json:"gitArgs,omitempty"`
+	LFSScratch        string                 `json:"lfsScratch,omitempty"`
+	RemoveScratch     string                 `json:"removeScratch,omitempty"`
+	Files             []warmWindowsProofFile `json:"files,omitempty"`
+	ManagedGit        bool                   `json:"managedGit,omitempty"`
+	RefreshIndex      bool                   `json:"refreshIndex,omitempty"`
+	JobSource         string                 `json:"jobSource,omitempty"`
+	IndexFile         string                 `json:"indexFile,omitempty"`
+	FinishWrite       bool                   `json:"finishWrite,omitempty"`
+	ChangedPaths      []string               `json:"changedPaths,omitempty"`
+	PinConfig         bool                   `json:"pinConfig,omitempty"`
+	PinChangedParents bool                   `json:"pinChangedParents,omitempty"`
+	Guard             func() error           `json:"-"`
+	StageLFS          string                 `json:"stageLfs,omitempty"`
+	GitInput          []byte                 `json:"gitInput,omitempty"`
 }
 
 var warmWindowsEncodedScript = func() string {
@@ -174,6 +178,14 @@ func (w warmWindowsTree) runManagedGit(ctx context.Context, request warmWindowsR
 	case <-stderr.ready:
 		if startup.Stop() {
 			guardErr = w.verifyPinnedPaths()
+			if guardErr == nil && request.PinConfig {
+				if err := verifyWarmWindowsDispatchConfig(ctx, w.checkout); err != nil {
+					guardErr = errors.Join(errWindowsWarmGitUnavailable, err)
+				}
+				if guardErr == nil && request.Guard != nil {
+					guardErr = request.Guard()
+				}
+			}
 		} else {
 			guardErr = errWindowsWarmGitUnavailable
 		}

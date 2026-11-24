@@ -8,6 +8,7 @@ using Microsoft.Win32.SafeHandles;
 public static class LoopForgeWarmGit
 {
     private static readonly List<SafeFileHandle> pins = new List<SafeFileHandle>();
+    private static readonly List<FileStream> configPins = new List<FileStream>();
     private static IntPtr job;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -73,29 +74,76 @@ public static class LoopForgeWarmGit
 
     public static void PinCheckout(string path)
     {
-        const uint listDirectory = 1, shareReadWrite = 3, openExisting = 3;
-        const uint backupSemantics = 0x02000000, openReparsePoint = 0x00200000;
         var parents = new Stack<string>();
         for (var dir = Path.Combine(Path.GetFullPath(path), ".git"); dir != null && dir != Path.GetPathRoot(dir); dir = Path.GetDirectoryName(dir))
             parents.Push(dir);
         foreach (var dir in parents)
         {
-            // Hold each parent open without FILE_SHARE_DELETE while Git runs.
-            var handle = CreateFile(dir, listDirectory, shareReadWrite, IntPtr.Zero, openExisting, backupSemantics | openReparsePoint, IntPtr.Zero);
-            FileInformation info;
-            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info))
+            PinDirectory(dir);
+        }
+    }
+
+    public static void PinDirectory(string dir)
+    {
+        const uint listDirectory = 1, shareReadWrite = 3, openExisting = 3;
+        const uint backupSemantics = 0x02000000, openReparsePoint = 0x00200000;
+        // Hold the directory open without FILE_SHARE_DELETE while Git runs.
+        var handle = CreateFile(dir, listDirectory, shareReadWrite, IntPtr.Zero, openExisting, backupSemantics | openReparsePoint, IntPtr.Zero);
+        FileInformation info;
+        if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info))
+        {
+            var error = new Win32Exception();
+            handle.Dispose();
+            throw error;
+        }
+        var attributes = (FileAttributes)info.Attributes;
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
+        {
+            handle.Dispose();
+            throw new IOException("Windows checkout path contains an indirect directory");
+        }
+        pins.Add(handle);
+    }
+
+    public static void PinConfig(string root)
+    {
+        foreach (var path in new[] { ".git/config", ".git/config.worktree", ".git/info/attributes", ".git/info/grafts" })
+        {
+            try
             {
-                var error = new Win32Exception();
-                handle.Dispose();
-                throw error;
+                var name = Path.Combine(root, path);
+                if ((File.GetAttributes(name) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                    throw new IOException("Windows Git configuration contains an indirect path");
+                var file = File.Open(name, FileMode.Open, FileAccess.Read, FileShare.Read);
+                configPins.Add(file);
             }
-            var attributes = (FileAttributes)info.Attributes;
-            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
+            catch (FileNotFoundException) { if (path == ".git/config") throw; }
+            catch (DirectoryNotFoundException) { if (path == ".git/config") throw; }
+        }
+    }
+
+    public static void PinChangedParents(string root, string[] paths)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+        {
+            var parent = root;
+            var parts = path.Split('/');
+            for (var i = 0; i < parts.Length - 1; i++)
             {
-                handle.Dispose();
-                throw new IOException("Windows checkout path contains an indirect directory");
+                parent = Path.Combine(parent, parts[i]);
+                if (seen.Contains(parent))
+                    continue;
+                try
+                {
+                    if ((File.GetAttributes(parent) & FileAttributes.Directory) == 0)
+                        throw new IOException("Windows Git transition replaces a file with a directory");
+                }
+                catch (FileNotFoundException) { break; }
+                catch (DirectoryNotFoundException) { break; }
+                PinDirectory(parent);
+                seen.Add(parent);
             }
-            pins.Add(handle);
         }
     }
 

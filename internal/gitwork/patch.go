@@ -2,6 +2,8 @@ package gitwork
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -116,6 +118,10 @@ func resolveCommitSHA(workspace, ref string) (string, error) {
 // and SOP deliverable markdown are excluded. Untracked source files are
 // intent-added so they appear in the list. No recorded baseline yields nil.
 func PatchInventory(workspace string) ([]byte, error) {
+	return PatchInventoryContext(context.Background(), workspace)
+}
+
+func PatchInventoryContext(ctx context.Context, workspace string) ([]byte, error) {
 	// Parallel branches finishing together inventory the same checkout;
 	// StageUntracked's git add -N would race on .git/index.lock.
 	unlock := lockPatchWorkspace(workspace)
@@ -132,14 +138,14 @@ func PatchInventory(workspace string) ([]byte, error) {
 		return nil, nil
 	}
 	sha = nearestPatchBaseline(workspace, sha)
-	if err := StageUntracked(workspace); err != nil {
+	if err := stageUntracked(ctx, workspace); err != nil {
 		return nil, err
 	}
-	nameStatus, err := diffAgainstBaseline(workspace, sha, "--name-status")
+	nameStatus, err := diffAgainstBaseline(ctx, workspace, sha, "--name-status")
 	if err != nil {
 		return nil, err
 	}
-	numstat, err := diffAgainstBaseline(workspace, sha, "--numstat")
+	numstat, err := diffAgainstBaseline(ctx, workspace, sha, "--numstat")
 	if err != nil {
 		return nil, err
 	}
@@ -156,13 +162,14 @@ func PatchInventory(workspace string) ([]byte, error) {
 	return summary, nil
 }
 
-func diffAgainstBaseline(workspace, sha string, extra ...string) ([]byte, error) {
-	args := append([]string{"-C", workspace, "diff"}, extra...)
+func diffAgainstBaseline(ctx context.Context, workspace, sha string, extra ...string) ([]byte, error) {
+	args := append([]string{"diff"}, extra...)
 	args = append(args, sha, "--", ".")
 	args = append(args, ExcludePathspecs...)
-	out, err := exec.Command("git", args...).CombinedOutput()
+	out, err := LocalGit(ctx, workspace, nil, args...)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() > 1 {
+		var exitErr interface{ ExitCode() int }
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 			return nil, fmt.Errorf("git diff baseline: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}

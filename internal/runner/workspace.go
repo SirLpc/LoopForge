@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -728,7 +727,7 @@ func runnerCollectWorkspaceChanges(ctx context.Context, root string, repositorie
 		if _, err := os.Stat(filepath.Join(repository.path, ".git")); err != nil {
 			continue
 		}
-		out, err := exec.CommandContext(ctx, "git", "--no-optional-locks", "-C", repository.path, "status", "--porcelain=v1", "-z", "--untracked-files=all").Output()
+		out, err := gitwork.LocalGit(ctx, repository.path, nil, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
 		if err != nil {
 			return changes, "Git 状态读取失败"
 		}
@@ -776,11 +775,11 @@ func runnerReadWorkspaceDiff(ctx context.Context, root string, repositories []do
 		}
 		// Browsing must never take .git/index.lock: a concurrent preparation
 		// or commit would otherwise fail with "index.lock: File exists".
-		args := []string{"--no-optional-locks", "-C", repository.path, "diff", "--no-ext-diff", "--no-color", "HEAD", "--"}
+		args := []string{"--no-optional-locks", "diff", "--no-ext-diff", "--no-color", "HEAD", "--"}
 		if rel != "" {
 			args = append(args, filepath.FromSlash(rel))
 		}
-		out, err := exec.CommandContext(ctx, "git", args...).Output()
+		out, err := gitwork.LocalGit(ctx, repository.path, nil, args...)
 		if err != nil {
 			return "", false, fmt.Errorf("read git diff: %w", err)
 		}
@@ -813,10 +812,10 @@ func runnerReadWorkspaceBaseFile(ctx context.Context, root string, repositories 
 		}
 		// The base is HEAD's blob. A path HEAD never had (untracked, or
 		// registered with `git add -N` by a node) has an empty base.
-		if err := exec.CommandContext(ctx, "git", "-C", repository.path, "cat-file", "-e", "HEAD:"+filepath.ToSlash(rel)).Run(); err != nil {
+		if _, err := gitwork.LocalGit(ctx, repository.path, nil, "cat-file", "-e", "HEAD:"+filepath.ToSlash(rel)); err != nil {
 			return "", false, nil
 		}
-		out, err := exec.CommandContext(ctx, "git", "-C", repository.path, "show", "HEAD:"+filepath.ToSlash(rel)).Output()
+		out, err := gitwork.LocalGit(ctx, repository.path, nil, "show", "HEAD:"+filepath.ToSlash(rel))
 		if err != nil {
 			return "", false, fmt.Errorf("read base file: %w", err)
 		}
@@ -892,9 +891,9 @@ func runnerCollectWorkspaceLog(ctx context.Context, root string, repositories []
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	branchOut, _ := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	headOut, _ := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "HEAD").Output()
-	out, err := exec.CommandContext(ctx, "git", "-C", path, "log", "-n", strconv.Itoa(runnerWorkspaceLogLimit), "--format=%H%x1f%P%x1f%s%x1f%an%x1f%at").Output()
+	branchOut, _ := gitwork.LocalGit(ctx, path, nil, "rev-parse", "--abbrev-ref", "HEAD")
+	headOut, _ := gitwork.LocalGit(ctx, path, nil, "rev-parse", "HEAD")
+	out, err := gitwork.LocalGit(ctx, path, nil, "log", "-n", strconv.Itoa(runnerWorkspaceLogLimit), "--format=%H%x1f%P%x1f%s%x1f%an%x1f%at")
 	if err != nil {
 		return map[string]any{"repository": label, "branch": strings.TrimSpace(string(branchOut)), "head": strings.TrimSpace(string(headOut)), "commits": []runnerWorkspaceCommit{}}, nil
 	}
@@ -935,7 +934,7 @@ func runnerCollectWorkspaceCommitFiles(ctx context.Context, root string, reposit
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", path, "diff-tree", "--no-commit-id", "--name-status", "-r", "--root", "--no-renames", "-z", commit).Output()
+	out, err := gitwork.LocalGit(ctx, path, nil, "diff-tree", "--no-commit-id", "--name-status", "-r", "--root", "--no-renames", "-z", commit)
 	if err != nil {
 		return nil, fmt.Errorf("read commit files: %w", err)
 	}
@@ -979,7 +978,7 @@ func runnerReadWorkspaceGitBlob(ctx context.Context, root string, repositories [
 		if _, err := os.Stat(filepath.Join(repository.path, ".git")); err != nil {
 			continue
 		}
-		out, err := exec.CommandContext(ctx, "git", "-C", repository.path, "show", object+":"+fileRel).Output()
+		out, err := gitwork.LocalGit(ctx, repository.path, nil, "show", object+":"+fileRel)
 		if err != nil {
 			return "", 0, nil
 		}
