@@ -1,0 +1,2 @@
+# Unified diff context lines start with a space before their original indentation.
+gitlab-http.patch whitespace=-space-before-tab
