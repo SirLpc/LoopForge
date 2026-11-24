@@ -205,6 +205,7 @@ func (r *DeliveryRepo) registerDeliveryMR(issueID string, mr domain.DeliveryMR, 
 		return "unknown"
 	}
 	_ = r.EnsureMRDeliveryState(project, iid, mr.URL, issueID)
+	_ = r.SetMRDeliveryRegisteredBy(project, iid, mr.RegisteredBy)
 	if st := strings.TrimSpace(mr.GongfengState); st != "" {
 		_ = r.recordMRState(project, iid, st, mr.TargetBranch, time.Time{}, at)
 	}
@@ -628,7 +629,8 @@ func (r *DeliveryRepo) branchContextForMRProject(project string) (defaultBranch,
 		return "", integrate
 	}
 	for _, repo := range r.catalog.Repositories() {
-		if strings.EqualFold(strings.TrimSpace(repo.GongfengProjectID), project) {
+		if strings.EqualFold(strings.TrimSpace(repo.GongfengProjectID), project) ||
+			(strings.HasPrefix(project, domain.MRProjectHTTPGitLab) && strings.EqualFold(domain.HTTPGitLabProject(repo.CloneURL), project)) {
 			return strings.TrimSpace(repo.DefaultBranch), strings.TrimSpace(repo.IntegrateBranch)
 		}
 	}

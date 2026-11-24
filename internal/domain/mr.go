@@ -39,6 +39,9 @@ var (
 // ExternalMRProject splits a ghe: or gitlab: MR project key into its
 // platform, host and repository path.
 func ExternalMRProject(project string) (platform, host, path string, ok bool) {
+	if strings.HasPrefix(project, MRProjectHTTPGitLab) {
+		return parseHTTPGitLabProject(project)
+	}
 	rest := ""
 	switch {
 	case strings.HasPrefix(project, MRProjectGHE):
@@ -52,16 +55,23 @@ func ExternalMRProject(project string) (platform, host, path string, ok bool) {
 	if !found || !externalMRHost.MatchString(host) || host == "github.com" {
 		return "", "", "", false
 	}
-	parts := strings.Split(path, "/")
-	if len(parts) < 2 || (platform == GitPlatformGitHub && len(parts) != 2) {
+	if !validExternalMRRepository(path, platform == GitPlatformGitHub) {
 		return "", "", "", false
+	}
+	return platform, host, path, true
+}
+
+func validExternalMRRepository(path string, exactPair bool) bool {
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || (exactPair && len(parts) != 2) {
+		return false
 	}
 	for _, part := range parts {
 		if !externalPathPart.MatchString(part) || part == "." || part == ".." {
-			return "", "", "", false
+			return false
 		}
 	}
-	return platform, host, path, true
+	return true
 }
 
 // ParseDeliveryMRURL reads one stored PR/MR link: a github.com PR or managed
@@ -75,6 +85,9 @@ func ParseDeliveryMRURL(text string) (project string, iid int, url string, ok bo
 		return project, iid, url, true
 	}
 	u, err := neturl.Parse(strings.TrimSpace(text))
+	if err == nil && u.Scheme == "http" {
+		return parseHTTPGitLabMRURL(u)
+	}
 	if err != nil || u.Scheme != "https" || u.User != nil || u.RawPath != "" {
 		return "", 0, "", false
 	}

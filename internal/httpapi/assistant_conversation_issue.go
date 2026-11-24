@@ -185,6 +185,9 @@ func (h *agentToolGateway) recordConversationMRs(issueID string, delivered []del
 func repositoryForMRProject(repos []domain.Repository, project string) (domain.Repository, bool) {
 	for _, r := range repos {
 		for _, raw := range []string{r.CloneURL, r.WebURL} {
+			if strings.HasPrefix(project, domain.MRProjectHTTPGitLab) && strings.EqualFold(domain.HTTPGitLabProject(raw), project) {
+				return r, true
+			}
 			if info, ok := domain.ParseRepositoryURL(raw); ok && strings.EqualFold(info.Project, project) {
 				return r, true
 			}

@@ -32,8 +32,8 @@ func TestHTTPSCredentialMatchesOnlyItsHostAndProtocol(t *testing.T) {
 			t.Fatal("token was put in argv")
 		}
 	}
-	credential, host, scoped := httpCredentialForCommand(ctx, []string{"ls-remote", "https://git.example.org:8443/owner/other"})
-	if !scoped || host != "git.example.org:8443" || credential.Token != "fake-other-token" {
+	credential, host, remote := httpCredentialForCommand(ctx, []string{"ls-remote", "https://git.example.org:8443/owner/other"})
+	if remote != "https://git.example.org:8443/owner/other" || host != "git.example.org:8443" || credential.Token != "fake-other-token" {
 		t.Fatal("explicit URL borrowed the bound repository credential")
 	}
 }

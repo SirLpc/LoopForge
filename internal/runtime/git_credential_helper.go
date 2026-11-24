@@ -68,7 +68,10 @@ func gitCredentialMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 2
 	}
 	attrs := readGitCredentialAttrs(in)
-	if args[0] != "get" || attrs["protocol"] != "https" || attrs["host"] == "" {
+	if args[0] != "get" {
+		return 0
+	}
+	if _, err := gitwork.HTTPHostScope(attrs["protocol"] + "://" + attrs["host"]); err != nil {
 		return 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -163,7 +166,11 @@ func cliShimMain(args []string) int {
 	env := os.Environ()
 	if host := cliShimHost(name, rest, os.Getenv, originRemote); host != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		reply, err := requestGitCredential(ctx, "https", host, name)
+		protocol, authority := "https", host
+		if httpHost, plain := strings.CutPrefix(host, gitwork.PlainHTTPPrefix); plain {
+			protocol, authority = "http", httpHost
+		}
+		reply, err := requestGitCredential(ctx, protocol, authority, name)
 		cancel()
 		switch {
 		case err != nil:
@@ -204,29 +211,30 @@ func cliShimHost(name string, args []string, getenv func(string) string, origin 
 		vars, fallback = []string{"GITLAB_HOST", "GL_HOST"}, "gitlab.com"
 	}
 	for _, key := range vars {
-		if host := cliHostScope(getenv(key)); host != "" {
+		if host := cliHostScope(name, getenv(key)); host != "" {
 			return host
 		}
 	}
 	if value := cliFlagValue(args, "--hostname", ""); value != "" {
-		return cliHostScope(value)
+		return cliHostScope(name, value)
 	}
 	if repo := cliFlagValue(args, "--repo", "-R"); repo != "" {
-		if host := cliRepoHost(repo); host != "" {
+		if host, explicit := cliRepoHost(name, repo); explicit {
 			return host
 		}
 	}
-	if host := remoteHost(origin()); host != "" {
+	if host := remoteHost(name, origin()); host != "" {
 		return host
 	}
 	return fallback
 }
 
-func cliHostScope(raw string) string {
-	host, err := gitwork.HTTPSHostScope(raw)
-	if err != nil {
-		return ""
+func cliHostScope(name, raw string) string {
+	if name == "glab" {
+		host, _ := gitwork.HTTPHostScope(raw)
+		return host
 	}
+	host, _ := gitwork.HTTPSHostScope(raw)
 	return host
 }
 
@@ -252,27 +260,29 @@ func cliFlagValue(args []string, long, short string) string {
 
 // cliRepoHost reads the host of "HOST/OWNER/REPO" or a repository URL; plain
 // "OWNER/REPO" names no host.
-func cliRepoHost(repo string) string {
+func cliRepoHost(name, repo string) (string, bool) {
 	if strings.Contains(repo, "://") {
 		if u, err := url.Parse(repo); err == nil {
-			return cliHostScope(u.Host)
+			if u.Scheme == "http" && name == "glab" {
+				return cliHostScope(name, gitwork.PlainHTTPPrefix+u.Host), true
+			}
+			return cliHostScope(name, u.Host), true
 		}
-		return ""
+		return "", true
 	}
 	if parts := strings.Split(repo, "/"); len(parts) >= 3 && strings.Contains(parts[0], ".") {
-		return cliHostScope(parts[0])
+		return cliHostScope(name, parts[0]), true
 	}
-	return ""
+	return "", false
 }
 
-// remoteHost is the API host of an HTTPS or SSH remote; gh and glab call the
-// HTTPS API whichever protocol Git uses.
-func remoteHost(remote string) string {
-	if host, ok := gitwork.HTTPSRemoteHost(remote); ok {
+// remoteHost is the API endpoint of a Git remote. SSH uses the HTTPS API.
+func remoteHost(name, remote string) string {
+	if host, ok := gitwork.HTTPRemoteScope(remote); ok && (name == "glab" || !strings.HasPrefix(host, gitwork.PlainHTTPPrefix)) {
 		return host
 	}
 	if parsed, err := gitwork.ParseSSHRemote(remote); err == nil {
-		return cliHostScope(parsed.Host)
+		return cliHostScope(name, parsed.Host)
 	}
 	return ""
 }
@@ -294,7 +304,7 @@ func cliShimEnv(name, host, token string, env []string) []string {
 	switch {
 	case name == "glab":
 		set["GITLAB_TOKEN"] = token
-		set["GITLAB_HOST"] = "https://" + host
+		configureGitLabCLI(set, host)
 	case host == "github.com":
 		set["GH_TOKEN"] = token
 	default:

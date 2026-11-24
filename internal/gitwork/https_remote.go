@@ -19,6 +19,10 @@ func HTTPSRepositoryURL(raw string) (remote, name string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	return normalizeGitHTTPRepository(u, host)
+}
+
+func normalizeGitHTTPRepository(u *url.URL, host string) (remote, name string, err error) {
 	path := strings.Trim(u.Path, "/")
 	if path == "" {
 		return "", "", fmt.Errorf("Git 地址缺少仓库路径")
@@ -31,6 +35,12 @@ func HTTPSRepositoryURL(raw string) (remote, name string, err error) {
 	u.Host, u.Path = host, "/"+path
 	if u.RawPath != "" {
 		u.RawPath = "/" + strings.Trim(u.RawPath, "/")
+	}
+	if u.Scheme == "http" && !strings.HasSuffix(path, ".git") {
+		u.Path += ".git"
+		if u.RawPath != "" {
+			u.RawPath += ".git"
+		}
 	}
 	name = strings.TrimSuffix(path[strings.LastIndex(path, "/")+1:], ".git")
 	if name == "" {

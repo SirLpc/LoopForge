@@ -132,7 +132,7 @@ func (s *Service) syncMRDeliveryStates(store MRDeliveryStore) {
 			}
 			continue
 		}
-		if strings.HasPrefix(row.MRProject, domain.MRProjectGHE) || strings.HasPrefix(row.MRProject, domain.MRProjectGitLab) {
+		if strings.HasPrefix(row.MRProject, domain.MRProjectGHE) || strings.HasPrefix(row.MRProject, domain.MRProjectGitLab) || strings.HasPrefix(row.MRProject, domain.MRProjectHTTPGitLab) {
 			if ok, err := s.refreshExternalDelivery(store, row); err != nil {
 				log.Printf("mr-delivery refresh %s!%d: %v", row.MRProject, row.MRIID, err)
 			} else if ok {

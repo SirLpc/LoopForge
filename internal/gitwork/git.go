@@ -113,8 +113,8 @@ func Watch(ctx context.Context, workspace string, opts procwatch.Options, args .
 
 func command(ctx context.Context, workspace string, sshEnv map[string]string, args []string) *exec.Cmd {
 	dir := CommandDir(workspace)
-	credential, host, _ := httpCredentialForCommand(ctx, args)
-	authArgs := scopedHTTPAuthArgs(credential)
+	credential, host, remote := httpCredentialForCommand(ctx, args)
+	authArgs := scopedHTTPAuthArgs(credential, host, remote)
 	cmd := exec.CommandContext(ctx, "git", append(authArgs, args...)...)
 	cmd.Dir = dir
 	cmd.Env = WithEnvValue(Env(""), "PWD", dir)

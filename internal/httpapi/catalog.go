@@ -147,11 +147,18 @@ func (h *catalogHandlers) repositories(c *gin.Context) {
 		return
 	}
 	// One pasted repository reference (web / SSH / clone / git clone / group/repo)
-	// An unknown HTTPS host is a Git transport, not an unknown hosting adapter.
+	// An unknown HTTP(S) host uses generic Git transport.
 	_, knownHost := domain.ParseRepositoryURL(sshReference)
-	if v.Provider == domain.RepositoryProviderHTTPS || !knownHost && strings.HasPrefix(strings.TrimPrefix(sshReference, "git clone "), "https://") {
-		remote, name, err := gitwork.HTTPSRepositoryURL(sshReference)
+	address := strings.TrimSpace(strings.TrimPrefix(sshReference, "git clone "))
+	isHTTP := strings.HasPrefix(address, "https://") || strings.HasPrefix(address, gitwork.PlainHTTPPrefix)
+	if v.Provider == domain.RepositoryProviderHTTPS || !knownHost && isHTTP {
+		remote, name, err := gitwork.HTTPRepositoryURL(sshReference)
 		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		scope, _ := gitwork.HTTPRemoteScope(remote)
+		if err := gitwork.CheckHTTPAccess(scope); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -159,7 +166,7 @@ func (h *catalogHandlers) repositories(c *gin.Context) {
 			if candidate == "" {
 				continue
 			}
-			other, _, err := gitwork.HTTPSRepositoryURL(candidate)
+			other, _, err := gitwork.HTTPRepositoryURL(candidate)
 			if err != nil || other != remote {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "仓库地址与 cloneUrl 不一致"})
 				return

@@ -210,7 +210,7 @@ func (d *Daemon) executeWarmGitDelivery(ctx context.Context, task domain.RunnerT
 			}
 			continue
 		}
-		if host, ok := gitwork.HTTPSRemoteHost(repo.CloneURL); ok {
+		if host, ok := gitwork.HTTPRemoteScope(repo.CloneURL); ok {
 			if cred, ok := inv.GitHTTPCredentials[host]; ok {
 				scoped.GitHTTPCredentials[host] = cred
 			}

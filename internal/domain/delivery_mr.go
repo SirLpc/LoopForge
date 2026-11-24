@@ -23,6 +23,8 @@ type DeliveryMR struct {
 	// HeadSHA is the source commit a live lookup reports; empty when the host
 	// response carries none.
 	HeadSHA string `json:"-"`
+	// RegisteredBy is the credential owner for MR status polling.
+	RegisteredBy int64 `json:"-"`
 }
 
 // BranchMRQuery asks the host for the MRs from one work branch into one target
@@ -51,6 +53,9 @@ func GongfengMRURL(project string, iid int) string {
 	if platform, host, path, ok := ExternalMRProject(project); ok {
 		if platform == GitPlatformGitHub {
 			return fmt.Sprintf("https://%s/%s/pull/%d", host, path, iid)
+		}
+		if strings.HasPrefix(project, MRProjectHTTPGitLab) {
+			return fmt.Sprintf("%s/%s/-/merge_requests/%d", host, path, iid)
 		}
 		return fmt.Sprintf("https://%s/%s/-/merge_requests/%d", host, path, iid)
 	}
@@ -189,16 +194,13 @@ func (i *Issue) SetDeliveryMRState(url, state string) bool {
 	return false
 }
 
-// ResolveRunDeliveryMRs picks the delivery MR of every Gongfeng repository in
-// the run. byBranch is the authoritative lookup (Gongfeng MR whose source is
-// the repository work branch); MR-bearing artifacts are only a fallback and
-// must belong to the same Gongfeng project. Runs without any Gongfeng
-// repository fall back to the best MR per project in artifacts, then telemetry URLs.
+// ResolveRunDeliveryMRs picks the delivery MR for each repository with a
+// hosting project key. The branch lookup takes precedence over artifacts.
 func ResolveRunDeliveryMRs(run Run, byBranch func(RepositoryContext) (DeliveryMR, bool)) []DeliveryMR {
 	candidates := runArtifactMRCandidates(run)
 	repos := []RepositoryContext{}
 	for _, rc := range run.RepositoryContexts() {
-		if strings.TrimSpace(rc.GongfengProjectID) != "" && !rc.AlignOnly {
+		if deliveryRepositoryProject(rc) != "" && !rc.AlignOnly {
 			repos = append(repos, rc)
 		}
 	}
@@ -207,15 +209,15 @@ func ResolveRunDeliveryMRs(run Run, byBranch func(RepositoryContext) (DeliveryMR
 		seen := map[string]bool{}
 		add := func(mr DeliveryMR) {
 			project := strings.ToLower(mr.Project)
-			if !seen[project] {
+			if !seen[project] && !strings.HasPrefix(project, MRProjectHTTPGitLab) {
 				seen[project] = true
 				out = append(out, mr)
 			}
 		}
-		if len(candidates) > 0 {
-			for _, candidate := range candidates {
-				add(candidate.mr)
-			}
+		for _, candidate := range candidates {
+			add(candidate.mr)
+		}
+		if len(out) > 0 {
 			return out
 		}
 		for _, obs := range run.Telemetry {
@@ -229,7 +231,7 @@ func ResolveRunDeliveryMRs(run Run, byBranch func(RepositoryContext) (DeliveryMR
 	}
 	out := []DeliveryMR{}
 	for _, rc := range repos {
-		project := strings.TrimSpace(rc.GongfengProjectID)
+		project := deliveryRepositoryProject(rc)
 		var picked DeliveryMR
 		found := false
 		if byBranch != nil && strings.TrimSpace(rc.WorkBranch) != "" {
@@ -254,6 +256,9 @@ func ResolveRunDeliveryMRs(run Run, byBranch func(RepositoryContext) (DeliveryMR
 		}
 		picked.RepositoryID = rc.RepositoryID
 		picked.Repository = rc.Name
+		if strings.HasPrefix(project, MRProjectHTTPGitLab) {
+			picked.RegisteredBy = run.ExecutionContext.ResponsibleUserID
+		}
 		out = append(out, picked)
 	}
 	return out
@@ -274,7 +279,7 @@ func runArtifactMRCandidates(run Run) []artifactMRCandidate {
 		if pri <= 0 {
 			continue
 		}
-		for _, ref := range ParseGongfengMRs(art.Content) {
+		for _, ref := range append(ParseGongfengMRs(art.Content), httpGitLabArtifactMRs(art.Content)...) {
 			key := fmt.Sprintf("%s#%d", strings.ToLower(ref.Project), ref.IID)
 			if cur, ok := best[key]; ok && cur.priority >= pri {
 				continue

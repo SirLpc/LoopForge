@@ -56,10 +56,7 @@ func (s *Service) refreshExternalDelivery(store MRDeliveryStore, row domain.MRDe
 		if err := s.gitHostGet(ctx, cred, "/projects/"+url.PathEscape(path)+"/merge_requests/"+strconv.Itoa(row.MRIID), &mr); err != nil {
 			return false, err
 		}
-		if mr.State == "locked" {
-			mr.State = "opened"
-		}
-		state, target = normalizeMRState(mr.State), mr.TargetBranch
+		state, target = gitLabMRState(mr.State), mr.TargetBranch
 		if mr.MergedAt != nil && state == "merged" {
 			mergedAt = mr.MergedAt.UTC()
 		}

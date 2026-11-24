@@ -59,6 +59,9 @@ func (e *Engine) verifyRunMRs(run domain.Run, gitToken string, pending func(doma
 			continue
 		}
 		project := strings.TrimSpace(rc.GongfengProjectID)
+		if project == "" {
+			project = domain.HTTPGitLabProject(rc.CloneURL)
+		}
 		if e.FindBranchMRsInto == nil || project == "" {
 			problems = append(problems, fmt.Sprintf("%s：托管平台不支持自动核验 MR，请人工确认已创建 %s → %s 的 MR", label, work, base))
 			unverifiable = true

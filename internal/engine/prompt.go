@@ -105,6 +105,9 @@ func promptRepositoryLine(run domain.Run) string {
 	}
 	if run.Repository.Provider == domain.RepositoryProviderHTTPS {
 		identity = "Git HTTPS"
+		if strings.HasPrefix(run.Repository.CloneURL, "http://") {
+			identity = "Git HTTP"
+		}
 	}
 	return fmt.Sprintf("%s (%s), 最新远端基线 %s, 本次工作分支 %s", run.Repository.Name, identity, run.Repository.BaseBranch, run.Repository.WorkBranch)
 }
@@ -134,7 +137,7 @@ func sshDeliveryHint(run domain.Run) string {
 	if len(sshRepos) == 0 {
 		return ""
 	}
-	return "Git 仓库（" + strings.Join(sshRepos, "、") + "）：只推本轮工作分支，并报告分支名和提交 SHA。SSH 密钥用于 Git 传输，HTTPS 凭据通过标准 credential helper 获取。需要 PR/MR 时，由负责交付的 Agent 自行查询托管平台官方 API，使用该主机访问令牌在内存中调用，不打印或保存令牌；也可使用已配置的托管平台 MCP。"
+	return "Git 仓库（" + strings.Join(sshRepos, "、") + "）：只推本轮工作分支，并报告分支名和提交 SHA。SSH 密钥用于 Git 传输，HTTPS 凭据通过标准 credential helper 获取。需要 PR/MR 时，由负责交付的 Agent 自行查询托管平台官方 API，使用该主机访问令牌在内存中调用，不打印或保存令牌；也可使用已配置的托管平台 MCP。" + httpGitLabDeliveryHint(run)
 }
 
 func existingMRBlurb(st *repo.Store, run domain.Run) string {

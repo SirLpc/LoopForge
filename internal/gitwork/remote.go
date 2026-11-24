@@ -115,6 +115,11 @@ func CanonicalRemote(raw string) string {
 		u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), ".git")
 		return u.String()
 	}
+	if strings.HasPrefix(raw, PlainHTTPPrefix) {
+		if remote, _, err := HTTPRepositoryURL(raw); err == nil {
+			return strings.TrimSuffix(remote, ".git")
+		}
+	}
 	return raw
 }
 

@@ -98,8 +98,11 @@ func respondGitHTTPCredentialError(c *gin.Context, err error) {
 // gitHTTPCredentialFromInput validates the form. The platform defaults to
 // GitHub for github.com and "other" elsewhere.
 func (h *usersHandlers) gitHTTPCredentialFromInput(ctx context.Context, userID int64, input gitHTTPCredentialInput) (domain.GitHTTPCredentialSecret, error) {
-	host, err := gitwork.HTTPSHostScope(input.Host)
+	host, err := gitwork.HTTPHostScope(input.Host)
 	if err != nil {
+		return domain.GitHTTPCredentialSecret{}, err
+	}
+	if err := gitwork.CheckHTTPAccess(host); err != nil {
 		return domain.GitHTTPCredentialSecret{}, err
 	}
 	name := strings.TrimSpace(input.Name)
@@ -115,6 +118,9 @@ func (h *usersHandlers) gitHTTPCredentialFromInput(ctx context.Context, userID i
 		if platform, ok = domain.NormalizeGitPlatform(input.Platform); !ok {
 			return domain.GitHTTPCredentialSecret{}, errors.New("平台只能是 github、gitlab 或 other")
 		}
+	}
+	if strings.HasPrefix(host, gitwork.PlainHTTPPrefix) && platform == domain.GitPlatformGitHub {
+		return domain.GitHTTPCredentialSecret{}, errors.New("GitHub 访问令牌须使用 HTTPS")
 	}
 	username := strings.TrimSpace(input.Username)
 	if len(username) > 128 || strings.ContainsRune(username, ':') || strings.IndexFunc(username, unicode.IsControl) >= 0 {
@@ -152,6 +158,9 @@ func (h *usersHandlers) verifyGitHTTPCredential(c *gin.Context) {
 func verifyGitHTTPToken(ctx context.Context, cred domain.GitHTTPCredentialSecret) gitTokenVerifyResult {
 	if cred.Managed {
 		return verifyGongfengToken(ctx, cred.Token)
+	}
+	if err := gitwork.CheckHTTPAccess(cred.Host); err != nil {
+		return gitTokenVerifyResult{Error: err.Error()}
 	}
 	base := cred.APIBase()
 	if base == "" {

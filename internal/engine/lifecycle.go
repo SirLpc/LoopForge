@@ -166,8 +166,14 @@ func orphanSettleStatus(reason string) string {
 // lookup by work branch first, MR-bearing artifacts of the same project next.
 func (e *Engine) deliveryMRsFromRun(run domain.Run) []domain.DeliveryMR {
 	var byBranch func(domain.RepositoryContext) (domain.DeliveryMR, bool)
-	if e.FindBranchMR != nil {
+	if e.FindBranchMR != nil || e.FindBranchMRsInto != nil {
 		byBranch = func(rc domain.RepositoryContext) (domain.DeliveryMR, bool) {
+			if project := domain.HTTPGitLabProject(rc.CloneURL); project != "" {
+				return e.findHTTPGitLabDelivery(run, rc, project)
+			}
+			if e.FindBranchMR == nil || rc.GongfengProjectID == "" {
+				return domain.DeliveryMR{}, false
+			}
 			mr, ok, err := e.FindBranchMR(rc.GongfengProjectID, rc.WorkBranch)
 			if err != nil {
 				log.Printf("resolve delivery MR run=%s project=%s branch=%s: %v", run.ID, rc.GongfengProjectID, rc.WorkBranch, err)

@@ -1,10 +1,11 @@
 const GIT_HTTP_PLATFORMS = [['github', 'GitHub / GitHub Enterprise'], ['gitlab', 'GitLab'], ['other', '其他平台']];
 
-// Mirrors gitwork.HTTPSHostScope closely enough to prefill the form; the server
+// Mirrors gitwork.HTTPHostScope closely enough to prefill the form; the server
 // remains the authority on what a host scope is.
 function gitHTTPHostScope(raw) {
   let host = String(raw || '').trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/$/, '');
-  if (host.endsWith(':443')) host = host.slice(0, -4);
+  const defaultPort = host.startsWith('http://') ? ':80' : ':443';
+  if (host.endsWith(defaultPort)) host = host.slice(0, -defaultPort.length);
   return host;
 }
 
@@ -34,13 +35,13 @@ function openGitHTTPCredentials() {
       <h2 id="gitHTTPCredentialTitle">Git 访问令牌（按主机）</h2>
       <button type="button" class="credential-btn ghost icon" data-http-cred-close aria-label="关闭">${credentialGlyph('close', 16)}</button>
     </header>
-    <p class="git-ssh-description">每个 HTTPS 主机配置一个个人访问令牌。平台与工作区访问该主机时，使用本轮责任人或发言人的凭据。</p>
+    <p class="git-ssh-description">平台与工作区使用本轮责任人或发言人为该 Git 地址配置的访问令牌。</p>
     <p class="git-ssh-status" role="status">正在读取凭据…</p>
     <div class="git-ssh-key-list"></div>
     <button type="button" class="credential-btn primary" data-http-cred-add disabled>添加令牌</button>
     <form class="git-ssh-key-form" hidden>
       <h3></h3>
-      ${credentialFieldHTML({label:'HTTPS 主机', name:'host', type:'text', placeholder:'github.com 或 gitlab.example.org:8443', hint:'只填主机名，可附带端口；令牌只提供给这台主机。'})}
+      ${credentialFieldHTML({label:'Git 主机', name:'host', type:'text', placeholder:'gitlab.example.org 或 http://192.168.50.10:8443', hint:'HTTPS 可只填主机名。内网 HTTP 须填写 http:// 和 IP，由管理员在服务端允许该 IP。HTTP 会明文传输令牌。'})}
       <label class="credential-field">
         <span>平台</span>
         <div class="credential-input is-plain">
@@ -186,7 +187,7 @@ function openGitHTTPCredentials() {
     if (editing) return;
     const scope = gitHTTPHostScope(host.value);
     if (scope === 'github.com') platform.value = 'github';
-    else if (/(^|\.)gitlab\./.test(scope)) platform.value = 'gitlab';
+    else if (scope.startsWith('http://') || /(^|\.)gitlab\./.test(scope)) platform.value = 'gitlab';
     username.placeholder = gitHTTPDefaultUsername(platform.value);
     if (!name.value.trim()) name.value = scope;
   });

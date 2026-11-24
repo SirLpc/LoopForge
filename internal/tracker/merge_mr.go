@@ -190,6 +190,9 @@ func (s *Service) FindBranchMRsInto(q domain.BranchMRQuery) ([]domain.DeliveryMR
 	if project == "" || src == "" || target == "" {
 		return nil, nil
 	}
+	if strings.HasPrefix(project, domain.MRProjectHTTPGitLab) {
+		return s.findHTTPGitLabBranchMRs(project, src, target, q.ResponsibleUserID)
+	}
 	if strings.HasPrefix(project, "github:") {
 		g, identity, err := s.githubClientForRun(project, q.ProjectID, q.GitToken)
 		if err != nil {

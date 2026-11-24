@@ -363,6 +363,7 @@ func bindWorkspaceGitEnvironment(sandbox Sandbox, workspace string, environment 
 	environment["GIT_CONFIG_VALUE_0"] = ""
 	environment["GIT_CONFIG_KEY_1"] = "credential.helper"
 	environment["GIT_CONFIG_VALUE_1"] = "!" + shellSingleQuote(helper) + " git-credential"
+	configurePrivateHTTPGit(environment, hosts)
 	environment[GitHostsEnv] = hosts
 	if sandboxDriver(sandbox) != "docker" {
 		base := environment["PATH"]
@@ -375,11 +376,11 @@ func bindWorkspaceGitEnvironment(sandbox Sandbox, workspace string, environment 
 }
 
 // workspaceGitHosts renders host→platform as the sorted "host=platform" list
-// of GitHostsEnv, skipping anything that is not a plain HTTPS host.
+// of GitHostsEnv, skipping anything that is not a canonical endpoint.
 func workspaceGitHosts(hosts map[string]string) string {
 	pairs := make([]string, 0, len(hosts))
 	for host, platform := range hosts {
-		scope, err := gitwork.HTTPSHostScope(host)
+		scope, err := gitwork.HTTPHostScope(host)
 		if err != nil || scope != host {
 			continue
 		}

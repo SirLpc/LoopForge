@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import "../../web/app/git-ssh.js";
+import "../../web/app/private-http-git.js";
 import HarnessIcon from "./HarnessIcon";
 import SlidingTabs from "./SlidingTabs";
 import { api, canChatInProject, canManageProjectRepos, write } from "./api";
@@ -581,8 +582,8 @@ function parseGitHubRepo(raw) {
 // SSH preview first (it leaves github.com to the GitHub parser, matching the
 // server); self-hosted legacy repositories keep the git.example.com form.
 export function parseGongfengRepo(raw) {
-  const httpsInfo = globalThis.LoopForgeGitHTTPS(raw);
-  if (httpsInfo) return httpsInfo;
+  const httpInfo = globalThis.LoopForgeGitPrivateHTTP(raw) || globalThis.LoopForgeGitHTTPS(raw);
+  if (httpInfo) return httpInfo;
   const sshInfo = globalThis.LoopForgeGitSSH(raw);
   if (sshInfo) return sshInfo;
   const github = parseGitHubRepo(raw);
@@ -1329,7 +1330,7 @@ export default function QuickAccessWizard({
       }
       if (bindRepoNow && repoUrl.trim() && !parsedRepo) {
         setError(
-          "请输入 Git HTTPS 仓库链接或 Git SSH 克隆地址。",
+          "请输入 Git HTTPS、内网 HTTP 或 SSH 克隆地址。",
         );
         return;
       }
@@ -2110,7 +2111,7 @@ export default function QuickAccessWizard({
                                   ? "旧项目可直接追加新仓库，复用已有流程与角色；留空则沿用现有仓库"
                                   : "沿用项目现有仓库与流程"
                                 : bindRepoNow
-                                  ? "粘贴 Git HTTPS 链接或 Git SSH 地址，自动设为项目默认仓库"
+                                  ? "粘贴 Git HTTPS、内网 HTTP 或 SSH 地址，自动设为项目默认仓库"
                                   : "已跳过，可在派发需求或项目配置中再绑定"}
                             </span>
                           </div>
@@ -2167,7 +2168,7 @@ export default function QuickAccessWizard({
                                     {projectMode === "existing" &&
                                     projectRepos.length
                                       ? "新增仓库地址（可选）"
-                                      : "Git HTTPS 链接或 Git SSH 地址"}
+                                      : "Git HTTPS、内网 HTTP 或 SSH 地址"}
                                   </span>
                                   <input
                                     className="qa-input qa-mono"
@@ -2214,7 +2215,7 @@ export default function QuickAccessWizard({
                                 </p>
                               ) : (
                                 <p key="help" className="qa-hint">
-                                  支持 Git HTTPS 链接或 Git SSH 地址，例如 <code>git@gitlab.com:group/repo.git</code>。
+                                  例如 <code>git@gitlab.com:group/repo.git</code> 或 <code>http://192.168.50.10:8443/group/repo.git</code>。
                                 </p>
                               )}
                               {selectedSSHRepo?.provider === "ssh" && sshKeysLoaded && !sshReady ? (

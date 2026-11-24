@@ -199,11 +199,10 @@ func (h *assistantHandlers) registerTurnDeliveries(ctx context.Context, s *Agent
 	return fmt.Sprintf("已把 %s 登记到需求 %s「%s」，合入后需求自动完成。", strings.Join(links, "、"), issue.ID, truncateRunes(issue.Title, 60))
 }
 
-// remoteRepository reads the HTTPS host and repository path of an HTTPS or
-// SSH remote; the host's API is HTTPS whichever protocol Git uses.
+// remoteRepository reads a remote's API credential endpoint and repository path.
 func remoteRepository(remote string) (host, path string, ok bool) {
 	remote = withoutURLUserinfo(remote)
-	if host, ok = gitwork.HTTPSRemoteHost(remote); ok {
+	if host, ok = gitwork.HTTPRemoteScope(remote); ok {
 		u, err := url.Parse(remote)
 		if err != nil {
 			return "", "", false
@@ -349,8 +348,8 @@ func sameDeliveryHost(link, host string) bool {
 	if _, _, _, ok := domain.ParseDeliveryMRURL(link); !ok {
 		return false
 	}
-	u, err := url.Parse(link)
-	return err == nil && strings.EqualFold(strings.TrimSuffix(u.Host, ":443"), host)
+	scope, ok := gitwork.HTTPRemoteScope(link)
+	return ok && scope == host
 }
 
 func gitHostGet(ctx context.Context, cred domain.GitHTTPCredentialSecret, path string, out any) error {
