@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
@@ -150,7 +151,7 @@ func (d *Daemon) runWarmGit(ctx context.Context, task domain.RunnerTask, command
 		return runnerWorkspaceError(errWarmSandboxDriver)
 	}
 	var indexErr error
-	if d.cfg.WarmNative && command.Outputs != nil {
+	if d.cfg.WarmNative && command.Outputs != nil && !command.SkipPatchInventory {
 		indexErr = waitForTaskOutputIndex(ctx, d.taskWorkspace(task), patchInventoryDirs(command.Outputs))
 		command.SkipPatchInventory = indexErr != nil
 	}
@@ -230,6 +231,8 @@ func (d *Daemon) executeWarmGitDelivery(ctx context.Context, task domain.RunnerT
 	return json.Unmarshal(reply.Payload, target)
 }
 
+const nativeWarmTaskOutputTimeout = 5 * time.Minute
+
 func (d *Daemon) withTaskOutputs(ctx context.Context, task domain.RunnerTask, result execResult) execResult {
 	inv := task.Invocation
 	if inv == nil || !inv.ReportOutputs {
@@ -245,7 +248,28 @@ func (d *Daemon) withTaskOutputs(ctx context.Context, task domain.RunnerTask, re
 	for _, repo := range invocationRepositories(inv) {
 		report.Repositories = append(report.Repositories, domain.RunnerRepository{Dir: repo.Dir})
 	}
-	response := d.runWarmGit(ctx, task, warmGitCommand{Outputs: report})
+	command := warmGitCommand{Outputs: report}
+	var response domain.RunnerWorkspaceResponse
+	if d.cfg.WarmNative {
+		collectionCtx, cancel := context.WithTimeout(ctx, nativeWarmTaskOutputTimeout)
+		response = d.runWarmGit(collectionCtx, task, command)
+		timedOut := errors.Is(collectionCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if timedOut {
+			// Keep completed outputs available when Git failed to return a patch list.
+			filesCtx, stop := context.WithTimeout(ctx, 15*time.Second)
+			command.SkipPatchInventory = true
+			response = d.runWarmGit(filesCtx, task, command)
+			stop()
+			message := fmt.Sprintf("原生工作区变更清单收集超时（%s），请重试节点", nativeWarmTaskOutputTimeout)
+			if response.Error != "" {
+				message += "; " + response.Error
+			}
+			response.Error = message
+		}
+	} else {
+		response = d.runWarmGit(ctx, task, command)
+	}
 	var err error
 	if response.Error == "" || len(response.Payload) != 0 {
 		err = json.Unmarshal(response.Payload, &result.outputs)

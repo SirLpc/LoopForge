@@ -281,6 +281,11 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	if err := gitwork.ValidateRemoteURL(repo.CloneURL, true); err != nil {
 		return ref, err
 	}
+	if slot.Path != "" && warmWindowsDriveWithoutMetadata(slot.Path) {
+		if err := prepareWarmWindowsWorktreeConfig(local, checkout); err != nil {
+			return ref, fmt.Errorf("prepare Windows Git worktree configuration: %w", err)
+		}
+	}
 	current, err := warmCheckoutRef(checkout, repo.RepositoryID)
 	if err != nil {
 		return ref, err

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func RunNativeWarmGit(ctx context.Context, workspace, executable string, input []byte, writable, network bool, isolation *NativeWarmIsolation) ([]byte, error) {
@@ -51,6 +52,7 @@ func runNativeWarmGit(ctx context.Context, workspace, executable string, input [
 	helper := "/tmp/loopforge-warm-git"
 	args = append(args, "--ro-bind", executable, helper, "--", helper, "warm-git-helper-native", workspace)
 	cmd := exec.CommandContext(ctx, bwrap, args...)
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = workspace
 	env := controlledBaseEnvironment(os.Environ())
 	for _, key := range []string{"HOME", "TMPDIR", "TMP", "TEMP", "PWD"} {
@@ -78,14 +80,27 @@ func runNativeWarmGit(ctx context.Context, workspace, executable string, input [
 		if err := cmd.Start(); err != nil {
 			return nil, err
 		}
+		// A Git descendant can still hold the pipes after bwrap is killed.
+		stop := context.AfterFunc(ctx, func() {
+			_ = stdout.Close()
+			_ = stdin.Close()
+		})
+		defer stop()
 		out, err := exchange(stdout, stdin)
 		_ = stdin.Close()
 		if err != nil {
 			_ = cmd.Process.Kill()
 		}
-		return out, errors.Join(err, cmd.Wait())
+		waitErr := cmd.Wait()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return out, errors.Join(err, waitErr)
 	}
 	cmd.Stdin = bytes.NewReader(input)
 	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return []byte(strings.TrimSpace(string(out))), err
 }

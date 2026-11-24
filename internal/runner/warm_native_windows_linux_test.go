@@ -416,6 +416,11 @@ done`)
 
 func TestWarmWindowsTaskGitUsesWindowsForOutputsReadsAndDelivery(t *testing.T) {
 	f := windowsWarmGitFixture(t)
+	runGitT(t, f.checkout, "config", "extensions.worktreeConfig", "true")
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache,
+		warmWorkspaceSlot{Path: f.checkout, UnityProjectPath: "."}, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 	root := filepath.Dir(f.checkout)
 	dir := filepath.Base(f.checkout)
 	windows, err := selectNativeWarmWindowsGit(t.Context(), f.checkout, t.TempDir(), f.checkout)

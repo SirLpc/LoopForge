@@ -17,6 +17,7 @@ import (
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
+	"golang.org/x/sys/unix"
 )
 
 const warmGitMessageLimit = 20 << 20
@@ -363,6 +364,41 @@ func warmWindowsGitOptions(args []string, flags ...string) bool {
 
 const maxWarmGitSessionBytes = 128 << 20
 
+func warmWorktreeConfigMissing(ctx context.Context, checkout string) (bool, error) {
+	meta := filepath.Join(checkout, ".git")
+	if _, err := os.Lstat(filepath.Join(meta, "config.worktree")); !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	value, err := gitwork.C(ctx, os.TempDir(), "config", "--no-includes", "--file", filepath.Join(meta, "config"), "--type=bool", "--get", "extensions.worktreeConfig")
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return value == "true", err
+}
+
+func prepareWarmWindowsWorktreeConfig(ctx context.Context, checkout string) error {
+	missing, err := warmWorktreeConfigMissing(ctx, checkout)
+	if err != nil || !missing {
+		return err
+	}
+	meta, err := openWarmWorkspaceDir(filepath.Join(checkout, ".git"), false)
+	if err != nil {
+		return err
+	}
+	defer meta.Close()
+	// The Windows helper must pin this file before it can use the worktree.
+	// Git treats an empty file the same as the absent optional config.
+	fd, err := unix.Openat(int(meta.Fd()), "config.worktree", unix.O_WRONLY|unix.O_CLOEXEC|unix.O_CREAT|unix.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
+}
+
 func verifyWarmWindowsDispatchConfig(ctx context.Context, checkout string) error {
 	if err := verifyNativeWarmConfig(ctx, checkout, os.TempDir()); err != nil {
 		return err
@@ -375,11 +411,9 @@ func verifyWarmWindowsDispatchConfig(ctx context.Context, checkout string) error
 			return errors.New("Windows Git requires a self-contained object store")
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(meta, "config.worktree")); errors.Is(err, os.ErrNotExist) {
-		value, _ := gitwork.C(ctx, os.TempDir(), "config", "--no-includes", "--file", filepath.Join(meta, "config"), "--type=bool", "--get", "extensions.worktreeConfig")
-		if value == "true" {
-			return errors.New("Windows Git requires an existing worktree configuration file")
-		}
+	missing, err := warmWorktreeConfigMissing(ctx, checkout)
+	if missing {
+		return errors.New("Windows Git requires an existing worktree configuration file")
 	}
-	return nil
+	return err
 }
