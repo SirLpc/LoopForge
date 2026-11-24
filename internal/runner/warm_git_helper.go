@@ -17,6 +17,7 @@ import (
 type warmGitCommand struct {
 	WindowsGit             bool
 	Outputs                *domain.RunnerInvocation
+	SkipPatchInventory     bool `json:",omitempty"`
 	Read                   *domain.RunnerWorkspaceRequest
 	Action, Message, Label string
 	Invocation             *domain.RunnerInvocation
@@ -60,7 +61,28 @@ func RunWarmGitHelperCLI(args []string) bool {
 
 func (op warmGitCommand) executeAt(ctx context.Context, root string, native bool) domain.RunnerWorkspaceResponse {
 	if op.Outputs != nil {
-		return runnerWorkspacePayload(collectTaskOutputsContext(ctx, root, op.Outputs))
+		if op.SkipPatchInventory {
+			return runnerWorkspacePayload(collectTaskOutputFiles(root, op.Outputs))
+		}
+		if native {
+			// Recheck after selecting the Git backend, in case a writer started
+			// after the Runner's preflight.
+			lock, err := taskOutputIndexLock(root, patchInventoryDirs(op.Outputs))
+			if err == nil && lock != "" {
+				err = outputIndexLocked(lock)
+			}
+			if err != nil {
+				reply := runnerWorkspacePayload(collectTaskOutputFiles(root, op.Outputs))
+				reply.Error = err.Error()
+				return reply
+			}
+		}
+		out, err := collectTaskOutputsContext(ctx, root, op.Outputs)
+		reply := runnerWorkspacePayload(out)
+		if native && err != nil {
+			reply.Error = err.Error()
+		}
+		return reply
 	}
 	if op.Read != nil {
 		if !domain.IsWorkspaceGitRead(op.Read.Operation, op.Read.Ref) {
@@ -116,6 +138,11 @@ func (d *Daemon) runWarmGit(ctx context.Context, task domain.RunnerTask, command
 	if !d.matchesWarmSandbox(task.Sandbox) {
 		return runnerWorkspaceError(errWarmSandboxDriver)
 	}
+	var indexErr error
+	if d.cfg.WarmNative && command.Outputs != nil {
+		indexErr = waitForTaskOutputIndex(ctx, d.taskWorkspace(task), patchInventoryDirs(command.Outputs))
+		command.SkipPatchInventory = indexErr != nil
+	}
 	data, err := json.Marshal(command)
 	if err != nil {
 		return runnerWorkspaceError(err)
@@ -141,6 +168,9 @@ func (d *Daemon) runWarmGit(ctx context.Context, task domain.RunnerTask, command
 	var reply domain.RunnerWorkspaceResponse
 	if err = json.Unmarshal(out, &reply); err != nil {
 		return runnerWorkspaceError(err)
+	}
+	if indexErr != nil && reply.Error == "" {
+		reply.Error = indexErr.Error()
 	}
 	return reply
 }
@@ -206,13 +236,16 @@ func (d *Daemon) withTaskOutputs(ctx context.Context, task domain.RunnerTask, re
 	}
 	response := d.runWarmGit(ctx, task, warmGitCommand{Outputs: report})
 	var err error
-	if response.Error != "" {
-		err = errors.New(response.Error)
-	} else {
+	if response.Error == "" || len(response.Payload) != 0 {
 		err = json.Unmarshal(response.Payload, &result.outputs)
 	}
+	if response.Error != "" {
+		err = errors.Join(errors.New(response.Error), err)
+	}
 	if err != nil {
-		result.status = domain.RunnerTaskFailed
+		if result.status != domain.RunnerTaskCanceled {
+			result.status = domain.RunnerTaskFailed
+		}
 		msg := fmt.Sprintf("warm task output collection failed: %v", err)
 		if result.errMsg != "" {
 			msg = result.errMsg + "\n" + msg

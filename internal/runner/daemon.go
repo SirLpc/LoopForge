@@ -1018,6 +1018,9 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 		}
 		argv = runtime.BindMCPCallArgv(sandbox, argv)
 	}
+	if d.cfg.WarmNative && task.WarmWorkspaceLease != nil {
+		gitwork.DisableOptionalIndexWrites(commandEnv)
+	}
 	var result execResult
 	if sandbox != nil {
 		command := prepared.Command

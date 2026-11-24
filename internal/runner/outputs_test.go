@@ -1,13 +1,111 @@
 package runner
 
 import (
+	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agentflow/internal/domain"
+	"agentflow/internal/gitwork"
 )
+
+func TestNativeWarmOutputWaitsForIndexLockRelease(t *testing.T) {
+	workspace := t.TempDir()
+	meta := filepath.Join(workspace, "repo", ".git")
+	if err := os.MkdirAll(meta, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(meta, "index.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- waitForTaskOutputIndex(t.Context(), workspace, []string{"repo"}) }()
+	select {
+	case err := <-done:
+		t.Fatalf("returned while the lock was still held: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("did not resume after the index lock was released")
+	}
+}
+
+func TestNativeWarmOutputHelperPreservesArtifactsWhenIndexIsLocked(t *testing.T) {
+	workspace := t.TempDir()
+	checkout := filepath.Join(workspace, "repo")
+	runGitT(t, workspace, "init", checkout)
+	lock := filepath.Join(checkout, ".git", "index.lock")
+	if err := os.WriteFile(lock, []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "requirement.md"), []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := warmGitCommand{Outputs: &domain.RunnerInvocation{
+		ReportOutputs: true,
+		OutputFiles:   []string{"requirement.md"},
+		Repositories:  []domain.RunnerRepository{{Dir: "repo"}},
+	}}
+	reply := command.executeAt(t.Context(), workspace, true)
+	if !strings.Contains(reply.Error, "Git 索引锁未释放") {
+		t.Fatalf("expected actionable lock error, got %q", reply.Error)
+	}
+	var outputs domain.RunnerTaskOutputs
+	if err := json.Unmarshal(reply.Payload, &outputs); err != nil || outputs.Files["requirement.md"] != "ready" {
+		t.Fatalf("available artifacts were lost: %+v, %v", outputs, err)
+	}
+	if len(outputs.Patches) != 0 {
+		t.Fatalf("unexpected patch inventory: %v", outputs.Patches)
+	}
+	if content, err := os.ReadFile(lock); err != nil || string(content) != "held" {
+		t.Fatalf("index lock was changed: %q, %v", content, err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if retry := command.executeAt(t.Context(), workspace, true); retry.Error != "" {
+		t.Fatalf("retry after releasing lock failed: %s", retry.Error)
+	}
+
+	runGitT(t, checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "fixture")
+	if err := gitwork.RecordBaseline(checkout, ""); err != nil {
+		t.Fatal(err)
+	}
+	lateLock := gitwork.WithLocalGit(t.Context(), func(_ context.Context, dir string, _ io.Reader, args []string) ([]byte, error, bool) {
+		if dir == checkout && len(args) != 0 && args[0] == "ls-files" {
+			if err := os.WriteFile(lock, []byte("held"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return []byte("new.txt\x00"), nil, true
+		}
+		return nil, nil, false
+	})
+	if err := os.WriteFile(filepath.Join(checkout, "new.txt"), []byte("untracked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reply = command.executeAt(lateLock, workspace, true)
+	if !strings.Contains(reply.Error, "Git 索引锁未释放") {
+		t.Fatalf("lock created during inventory was ignored: %q", reply.Error)
+	}
+	outputs = domain.RunnerTaskOutputs{}
+	if err := json.Unmarshal(reply.Payload, &outputs); err != nil || outputs.Files["requirement.md"] != "ready" {
+		t.Fatalf("available artifacts were lost after late lock: %+v, %v", outputs, err)
+	}
+}
 
 func TestPrepareInvocationWorkspaceWritesInputsAndClearsGateResult(t *testing.T) {
 	workspace := t.TempDir()

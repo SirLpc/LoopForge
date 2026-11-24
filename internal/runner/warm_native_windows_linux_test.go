@@ -427,6 +427,11 @@ func TestWarmWindowsTaskGitUsesWindowsForOutputsReadsAndDelivery(t *testing.T) {
 	warmGitWrite(t, f.checkout, ".git/agentflow-baseline", head+"\n")
 	warmGitWrite(t, f.checkout, "README.md", "changed on Windows\n")
 	warmGitWrite(t, f.checkout, "new file.txt", "new on Windows\n")
+	statOnly := filepath.Join(f.checkout, "files", "0000.meta")
+	touched := time.Unix(1420070400, 0)
+	if err := os.Chtimes(statOnly, touched, touched); err != nil {
+		t.Fatal(err)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -482,6 +487,9 @@ exec /usr/bin/git "$@"
 	patch := outputs.Patches[dir]
 	if !strings.Contains(patch, "README.md") || !strings.Contains(patch, "new file.txt") {
 		t.Fatalf("Windows Git lost a tracked or untracked change: %q", patch)
+	}
+	if strings.Contains(patch, "0000.meta") {
+		t.Fatalf("Windows Git reported a stat-only change: %q", patch)
 	}
 	for _, op := range []string{domain.RunnerWorkspaceOperationInfo, domain.RunnerWorkspaceOperationDiff, domain.RunnerWorkspaceOperationLog, domain.RunnerWorkspaceOperationCommit, domain.RunnerWorkspaceOperationFile, domain.RunnerWorkspaceOperationCheckouts} {
 		request := domain.RunnerWorkspaceRequest{Operation: op, Repositories: []domain.RepositoryContext{{WorkspaceDir: dir}}}

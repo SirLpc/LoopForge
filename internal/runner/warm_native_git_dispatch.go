@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -33,10 +34,11 @@ type warmWindowsHelperRequest struct {
 }
 
 type warmWindowsHelperReply struct {
-	Handled bool
-	Output  []byte
-	Error   string
-	Code    int
+	Handled     bool
+	Output      []byte
+	Error       string
+	Code        int
+	IndexLocked bool `json:",omitempty"`
 }
 
 type warmWindowsGitExit struct {
@@ -74,7 +76,13 @@ func warmWindowsHelperContext(ctx context.Context, decoder *json.Decoder, encode
 		if err := decoder.Decode(&reply); err != nil {
 			return nil, err, true
 		}
+		if reply.IndexLocked {
+			return nil, errWarmIndexLocked, true
+		}
 		if reply.Error != "" {
+			if strings.Contains(reply.Error, "loopforge-windows-git-index-copy-failed") {
+				return nil, fmt.Errorf("%w: %s", gitwork.ErrDiffIndexSnapshot, reply.Error), true
+			}
 			return reply.Output, warmWindowsGitExit{message: reply.Error, code: reply.Code}, true
 		}
 		if !reply.Handled && input != nil {
@@ -212,6 +220,7 @@ func runWarmWindowsHelperRequest(ctx context.Context, targets map[string]warmWin
 	if verb == "diff" || verb == "status" || verb == "add" {
 		spec.LFSScratch = rand.Text()
 	}
+	spec.CopyIndex = verb == "diff"
 	if verb == "add" && !slices.Contains(request.Args, "-N") {
 		return stageWarmWindowsGit(ctx, w, args, spec, verb)
 	}
@@ -231,6 +240,9 @@ func executeWarmWindowsDispatch(ctx context.Context, w warmWindowsTree, args []s
 	start := time.Now()
 	output, err := w.runGit(ctx, w.root+`\.git`, spec, args)
 	recordWarmGitDuration(ctx, verb, "windows", start, err)
+	if errors.Is(err, errWarmIndexLocked) {
+		return warmWindowsHelperReply{Handled: true, IndexLocked: true}
+	}
 	if errors.Is(err, errWindowsWarmGitUnavailable) {
 		return warmWindowsHelperReply{}
 	}
@@ -255,6 +267,9 @@ func warmWindowsGitArgs(input []string) []string {
 	if len(args) > 0 && args[0] == "--no-optional-locks" {
 		args = args[1:]
 	}
+	if len(args) >= 3 && args[0] == "-c" && args[1] == "diff.autoRefreshIndex=true" && args[2] == "diff" {
+		args = args[2:]
+	}
 	identity := []string{"-c", "user.name=LoopForge", "-c", "user.email=loopforge@local"}
 	var prefix []string
 	if len(args) >= len(identity) && slices.Equal(args[:len(identity)], identity) {
@@ -269,7 +284,7 @@ func warmWindowsGitArgs(input []string) []string {
 	case "diff":
 		allowed = warmWindowsGitOptions(operands, "--name-status", "--numstat", "--name-only", "--diff-filter=U", "--cached", "--quiet", "--no-ext-diff", "--no-color")
 		if allowed {
-			args = append([]string{"diff", "--no-ext-diff", "--no-textconv"}, operands...)
+			args = append([]string{"-c", "diff.autoRefreshIndex=true", "diff", "--no-ext-diff", "--no-textconv"}, operands...)
 		}
 	case "status":
 		allowed = warmWindowsGitOptions(operands, "--porcelain", "--porcelain=v1", "-z", "--untracked-files=all")

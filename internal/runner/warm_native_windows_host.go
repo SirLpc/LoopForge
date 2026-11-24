@@ -100,6 +100,7 @@ type warmWindowsRequest struct {
 	RefreshIndex      bool                   `json:"refreshIndex,omitempty"`
 	JobSource         string                 `json:"jobSource,omitempty"`
 	IndexFile         string                 `json:"indexFile,omitempty"`
+	CopyIndex         bool                   `json:"copyIndex,omitempty"`
 	FinishWrite       bool                   `json:"finishWrite,omitempty"`
 	ChangedPaths      []string               `json:"changedPaths,omitempty"`
 	PinConfig         bool                   `json:"pinConfig,omitempty"`

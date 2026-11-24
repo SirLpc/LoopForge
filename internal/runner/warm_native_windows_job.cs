@@ -122,6 +122,26 @@ public static class LoopForgeWarmGit
         }
     }
 
+    public static void CopyIndex(string root, string destination)
+    {
+        const uint genericRead = 0x80000000, shareAll = 7, openExisting = 3, openReparsePoint = 0x00200000;
+        var path = Path.Combine(root, ".git", "index");
+        using (var handle = CreateFile(path, genericRead, shareAll, IntPtr.Zero, openExisting, openReparsePoint, IntPtr.Zero))
+        {
+            FileInformation info;
+            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info))
+                throw new Win32Exception();
+            var invalid = FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device;
+            if (((FileAttributes)info.Attributes & invalid) != 0)
+                throw new IOException("Windows Git index is not a regular file");
+            using (var input = new FileStream(handle, FileAccess.Read))
+            using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write))
+                input.CopyTo(output);
+            var lastWrite = ((long)info.WriteHigh << 32) | info.WriteLow;
+            File.SetLastWriteTimeUtc(destination, DateTime.FromFileTimeUtc(lastWrite));
+        }
+    }
+
     public static void PinChangedParents(string root, string[] paths)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

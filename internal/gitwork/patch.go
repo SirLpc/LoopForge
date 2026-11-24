@@ -3,7 +3,6 @@ package gitwork
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -163,15 +162,12 @@ func PatchInventoryContext(ctx context.Context, workspace string) ([]byte, error
 }
 
 func diffAgainstBaseline(ctx context.Context, workspace, sha string, extra ...string) ([]byte, error) {
-	args := append([]string{"diff"}, extra...)
+	args := append([]string(nil), extra...)
 	args = append(args, sha, "--", ".")
 	args = append(args, ExcludePathspecs...)
-	out, err := LocalGit(ctx, workspace, nil, args...)
+	out, err := LocalDiff(ctx, workspace, args...)
 	if err != nil {
-		var exitErr interface{ ExitCode() int }
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			return nil, fmt.Errorf("git diff baseline: %w: %s", err, strings.TrimSpace(string(out)))
-		}
+		return nil, fmt.Errorf("git diff baseline: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
 }

@@ -95,6 +95,17 @@ if ($request.gitArgs) {
         if ($scratch) {
             $null = [IO.Directory]::CreateDirectory($scratch)
         }
+        if ($request.copyIndex) {
+            # Let diff refresh stat data in a private index.
+            $copy = Join-Path $scratch 'index'
+            try {
+                [LoopForgeWarmGit]::CopyIndex($request.worktree, $copy)
+            } catch {
+                [Console]::Error.WriteLine('loopforge-windows-git-index-copy-failed')
+                throw
+            }
+            $start.EnvironmentVariables['GIT_INDEX_FILE'] = $copy
+        }
         $process = [Diagnostics.Process]::Start($start)
         $stderr = $process.StandardError.ReadToEndAsync()
         if ($start.RedirectStandardInput) {

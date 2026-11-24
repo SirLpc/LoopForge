@@ -775,11 +775,11 @@ func runnerReadWorkspaceDiff(ctx context.Context, root string, repositories []do
 		}
 		// Browsing must never take .git/index.lock: a concurrent preparation
 		// or commit would otherwise fail with "index.lock: File exists".
-		args := []string{"--no-optional-locks", "diff", "--no-ext-diff", "--no-color", "HEAD", "--"}
+		args := []string{"--no-ext-diff", "--no-color", "HEAD", "--"}
 		if rel != "" {
 			args = append(args, filepath.FromSlash(rel))
 		}
-		out, err := gitwork.LocalGit(ctx, repository.path, nil, args...)
+		out, err := gitwork.LocalDiff(ctx, repository.path, args...)
 		if err != nil {
 			return "", false, fmt.Errorf("read git diff: %w", err)
 		}

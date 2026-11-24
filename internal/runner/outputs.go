@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
@@ -86,10 +88,23 @@ func writeInputFile(workspace string, input domain.RunnerInputFile) error {
 // repository-patch inventory of every checkout, and workspace facts. It runs
 // after success and failure alike so a failed node keeps its diagnostics.
 func collectTaskOutputs(workspace string, inv *domain.RunnerInvocation) *domain.RunnerTaskOutputs {
-	return collectTaskOutputsContext(context.Background(), workspace, inv)
+	out, _ := collectTaskOutputsContext(context.Background(), workspace, inv)
+	return out
 }
 
-func collectTaskOutputsContext(ctx context.Context, workspace string, inv *domain.RunnerInvocation) *domain.RunnerTaskOutputs {
+func collectTaskOutputsContext(ctx context.Context, workspace string, inv *domain.RunnerInvocation) (*domain.RunnerTaskOutputs, error) {
+	out := collectTaskOutputFiles(workspace, inv)
+	if out == nil {
+		return nil, nil
+	}
+	var err error
+	out.Patches, err = collectPatchInventoriesContext(ctx, workspace, patchInventoryDirs(inv))
+	frontend, evidence := domain.DetectFrontendProject(workspace)
+	out.Facts = &domain.RunnerWorkspaceFacts{Frontend: frontend, FrontendEvidence: evidence}
+	return out, err
+}
+
+func collectTaskOutputFiles(workspace string, inv *domain.RunnerInvocation) *domain.RunnerTaskOutputs {
 	if inv == nil || !inv.ReportOutputs {
 		return nil
 	}
@@ -98,10 +113,50 @@ func collectTaskOutputsContext(ctx context.Context, workspace string, inv *domai
 		out.Recovered = recoverOutputFiles(workspace, inv.OutputFiles)
 	}
 	out.Files, out.TooLarge = readOutputFiles(workspace, inv.OutputFiles)
-	out.Patches = collectPatchInventoriesContext(ctx, workspace, patchInventoryDirs(inv))
-	frontend, evidence := domain.DetectFrontendProject(workspace)
-	out.Facts = &domain.RunnerWorkspaceFacts{Frontend: frontend, FrontendEvidence: evidence}
 	return out
+}
+
+func taskOutputIndexLock(root string, dirs []string) (string, error) {
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		return "", err
+	}
+	defer workspace.Close()
+	for _, dir := range dirs {
+		lock := filepath.Join(dir, ".git", "index.lock")
+		if _, err := workspace.Lstat(lock); err == nil {
+			return lock, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+	}
+	return "", nil
+}
+
+var errWarmIndexLocked = errors.New("Git 索引锁未释放")
+
+func outputIndexLocked(lock string) error {
+	return fmt.Errorf("%w（%s），请在 Git 操作结束后重试节点", errWarmIndexLocked, filepath.ToSlash(lock))
+}
+
+func waitForTaskOutputIndex(ctx context.Context, root string, dirs []string) error {
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	poll := time.NewTicker(100 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		lock, err := taskOutputIndexLock(root, dirs)
+		if err != nil || lock == "" {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout.C:
+			return outputIndexLocked(lock)
+		case <-poll.C:
+		}
+	}
 }
 
 // readOutputFiles reads every safe, regular output file within the upload
@@ -151,14 +206,26 @@ func patchInventoryDirs(inv *domain.RunnerInvocation) []string {
 // collectPatchInventories maps each directory with a non-empty patch
 // inventory to it; the map stays nil when no directory has changes.
 func collectPatchInventories(workspace string, dirs []string) map[string]string {
-	return collectPatchInventoriesContext(context.Background(), workspace, dirs)
+	patches, _ := collectPatchInventoriesContext(context.Background(), workspace, dirs)
+	return patches
 }
 
-func collectPatchInventoriesContext(ctx context.Context, workspace string, dirs []string) map[string]string {
+func collectPatchInventoriesContext(ctx context.Context, workspace string, dirs []string) (map[string]string, error) {
 	var patches map[string]string
+	var inventoryErr error
 	for _, dir := range dirs {
 		patch, err := gitwork.PatchInventoryContext(ctx, filepath.Join(workspace, filepath.FromSlash(dir)))
-		if err != nil || len(patch) == 0 {
+		if err != nil {
+			lock, _ := taskOutputIndexLock(workspace, []string{dir})
+			if lock != "" || errors.Is(err, errWarmIndexLocked) || strings.Contains(err.Error(), ".git/index.lock") ||
+				strings.Contains(err.Error(), `.git\index.lock`) {
+				inventoryErr = outputIndexLocked(filepath.Join(dir, ".git", "index.lock"))
+			} else if inventoryErr == nil && errors.Is(err, gitwork.ErrDiffIndexSnapshot) {
+				inventoryErr = fmt.Errorf("无法创建 Git 变更清单的临时索引：%w", err)
+			}
+			continue
+		}
+		if len(patch) == 0 {
 			continue
 		}
 		if patches == nil {
@@ -166,7 +233,7 @@ func collectPatchInventoriesContext(ctx context.Context, workspace string, dirs 
 		}
 		patches[dir] = string(patch)
 	}
-	return patches
+	return patches, inventoryErr
 }
 
 // recoverOutputFiles moves a missing root-level output into place when the

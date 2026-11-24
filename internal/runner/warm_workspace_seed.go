@@ -29,6 +29,9 @@ func checkWarmPendingGitState(meta string) error {
 			if err != nil {
 				return err
 			}
+			if name == "index.lock" {
+				return fmt.Errorf("warm seed has pending Git state at %s: %w", name, errWarmIndexLocked)
+			}
 			return fmt.Errorf("warm seed has pending Git state at %s", name)
 		}
 	}

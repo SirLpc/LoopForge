@@ -113,7 +113,11 @@ func (d *Daemon) runNativeWarmGit(ctx context.Context, task domain.RunnerTask, c
 	}
 	requirements, _ := d.localTaskSandboxSpec(task)
 	writable := command.Action != "" || command.Outputs != nil && command.Outputs.RecoverOutputs
-	if targets := d.warmWindowsGitTargets(ctx, task, workspace); len(targets) > 0 {
+	var targets map[string]warmWindowsTree
+	if !command.SkipPatchInventory {
+		targets = d.warmWindowsGitTargets(ctx, task, workspace)
+	}
+	if len(targets) > 0 {
 		if writable {
 			unlock := lockInvocationWorkspace(workspace)
 			defer unlock()

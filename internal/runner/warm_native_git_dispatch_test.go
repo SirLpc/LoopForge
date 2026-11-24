@@ -11,7 +11,7 @@ func TestWarmWindowsGitDispatch(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{"inventory", []string{"diff", "--name-status", "HEAD", "--", "."}, []string{"--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--name-status", "HEAD", "--", "."}},
+		{"inventory", []string{"--no-optional-locks", "-c", "diff.autoRefreshIndex=true", "diff", "--name-status", "HEAD", "--", "."}, []string{"--no-pager", "-c", "diff.autoRefreshIndex=true", "diff", "--no-ext-diff", "--no-textconv", "--name-status", "HEAD", "--", "."}},
 		{"stage", []string{"add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"}, []string{"--no-pager", "add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"}},
 		{"history", []string{"log", "-n", "20", "--format=%H"}, []string{"--no-pager", "log", "-n", "20", "--format=%H"}},
 		{"fetch", []string{"fetch", "origin"}, nil},
