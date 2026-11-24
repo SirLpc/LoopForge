@@ -43,6 +43,10 @@ unshare --user --map-root-user --mount --propagation private -- \
 
 跟踪路径达到 512 个的 Windows 工作区可以使用 Windows Git 做检出前后的状态检查，并由 Windows PowerShell 批量读取重开、恢复和归还时需要校验的文件。Runner 通过 WSL 互操作自动使用 Windows PATH 上的 `git.exe`，LFS 临时数据保存在 Windows 临时目录。较小的工作区、带有 `metadata` 选项的 WSL 挂载和 Windows 工具不可用的环境继续使用 WSL 检查。特殊文件和需要 Git 内容转换的文件也会交由 WSL 校验。
 
+符合条件的 Windows 槽位用 Windows Git 切换提交、更新任务分支和挂接 HEAD。Runner 在执行前确认 Windows 路径与租约挂载指向同一个检出，并在命令执行期间锁定路径。Windows Git 在临时索引上验证工作区和刷新文件状态，确认暂存条目及真实索引都符合预期后发布。LFS 仍按变更验证并落盘，索引刷新只处理本次替换的资产和中断恢复涉及的变更。文本换行沿用工作区原有规则。
+
+远端认证、Git 对象缓存和 LFS 下载仍由 WSL Runner 执行。页面和 SOP 交付的 Git 操作沿用隔离的 Git helper。Runner 日志以运行 ID 记录拉取、本地对象导入、切换前检查、提交切换、LFS 落盘、索引刷新、就绪和归还耗时。若 Windows helper 无法启动，且本地检出写入尚未开始，Runner 可以使用 WSL 路径。写入受系统中断时，可按现有检出意图和内容证明检查槽位，再决定是否恢复。
+
 归还先确认远端提交、索引、归档文件和 LFS 缓存，收到归还回执后再于卸载前完整核对原目录。确认阶段复用同一回执已经验证的 LFS 清单及未发生变化的缓存对象。Runner 重启后会重新验证清单和缓存。若本地源码或索引发生变化，原租约继续持有槽位。处理改动后，可以重新发起归还。暂时的编辑器占用会等待下一次确认。
 
 升级时先更新 API 和 Worker，再更新原生 Runner。升级期间暂停该槽位调度并结束已有工作区用量，待相关进程使用同版协议后恢复。新版 Runner 可以读取先前的租约日志。需要回退时，先用新版 Runner 处理存量租约，再按独立 Runner 状态流程切换。

@@ -53,7 +53,7 @@ func copyWarmGitExclude(checkout, stage string) error {
 	return os.WriteFile(filepath.Join(stageInfo, "exclude"), contents, 0600)
 }
 
-func warmCheckIgnore(ctx context.Context, stage, checkout string, paths []string) (map[string]bool, error) {
+func warmCheckIgnore(ctx context.Context, stage, checkout string, paths []string, windows warmWindowsTree) (map[string]bool, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -62,7 +62,34 @@ func warmCheckIgnore(ctx context.Context, stage, checkout string, paths []string
 		// Prefix real paths with ./ so Git treats a leading colon as a name.
 		input.WriteString("./" + path + "\x00")
 	}
-	out, err := gitwork.CStdoutRaw(ctx, stage, strings.NewReader(input.String()), "--work-tree="+checkout, "check-ignore", "--stdin", "-z")
+	var out string
+	var err error
+	if windows.root != "" && len(input.String()) <= 1<<20 {
+		runWindows := true
+		for _, path := range paths {
+			if !warmWindowsProofPath(path) {
+				runWindows = false
+				break
+			}
+		}
+		if runWindows {
+			args := []string{"check-ignore", "--stdin", "-z"}
+			if stage == checkout {
+				request := warmWindowsRequest{ManagedGit: true, GitInput: []byte(input.String())}
+				out, err = windows.runCheckoutGit(ctx, request, args)
+			} else {
+				out, err = windows.stageGit(ctx, stage, false, []byte(input.String()), args...)
+			}
+			var exit *exec.ExitError
+			if err == nil || errors.As(err, &exit) && exit.ExitCode() == 1 {
+				return warmIgnoredPaths(out), nil
+			}
+			if ctx.Err() != nil || stage == checkout {
+				return nil, err
+			}
+		}
+	}
+	out, err = gitwork.CStdoutRaw(ctx, stage, strings.NewReader(input.String()), "--work-tree="+checkout, "check-ignore", "--stdin", "-z")
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return nil, nil // No path matched an ignore rule.
@@ -70,11 +97,17 @@ func warmCheckIgnore(ctx context.Context, stage, checkout string, paths []string
 	if err != nil {
 		return nil, err
 	}
+	return warmIgnoredPaths(out), nil
+}
+
+func warmIgnoredPaths(out string) map[string]bool {
 	ignored := make(map[string]bool)
 	for path := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
-		ignored[strings.TrimPrefix(path, "./")] = true
+		if path != "" {
+			ignored[strings.TrimPrefix(path, "./")] = true
+		}
 	}
-	return ignored, nil
+	return ignored
 }
 
 func warmIgnoredDirectories(ctx context.Context, stage, checkout string) (map[string]bool, error) {
@@ -95,7 +128,7 @@ func warmIgnoredDirectoryEntries(entries string) map[string]bool {
 	return ignored
 }
 
-func checkWarmIgnoredCollisions(ctx context.Context, stage, checkout, cache, head, target string) error {
+func checkWarmIgnoredCollisions(ctx context.Context, stage, checkout, cache, head, target string, windows warmWindowsTree) error {
 	added, err := gitwork.CStdoutRaw(ctx, cache, nil, "diff-tree", "-r", "--no-renames", "--name-only", "--diff-filter=A", "-z", head, target)
 	if err != nil || added == "" {
 		return err
@@ -141,7 +174,7 @@ func checkWarmIgnoredCollisions(ctx context.Context, stage, checkout, cache, hea
 			}
 		}
 	}
-	ignored, err := warmCheckIgnore(ctx, stage, checkout, candidates)
+	ignored, err := warmCheckIgnore(ctx, stage, checkout, candidates, windows)
 	if err != nil {
 		return err
 	}
@@ -157,7 +190,7 @@ func checkWarmIgnoredCollisions(ctx context.Context, stage, checkout, cache, hea
 // actual ignore rules before doing any cleanup from a persisted proof.
 func (p *warmWorkspacePool) warmReturnIgnores(ctx context.Context, root string, a warmWorkspaceAllocation) (map[string]bool, error) {
 	ignored := make(map[string]bool)
-	for _, checkout := range a.Targets {
+	for slotID, checkout := range a.Targets {
 		var paths []string
 		for _, rel := range a.ReturnRemove {
 			if !validWarmWorkspaceRelativePath(rel) {
@@ -182,12 +215,14 @@ func (p *warmWorkspacePool) warmReturnIgnores(ctx context.Context, root string, 
 		if err := copyWarmGitExclude(checkout, stage); err != nil {
 			return nil, err
 		}
+		var windows warmWindowsTree
 		if p.native {
 			if _, err := nativeWarmProofConfig(ctx, checkout, stage); err != nil {
 				return nil, err
 			}
+			windows, _ = openWarmWindowsTree(ctx, checkout, p.slots[slotID].Path)
 		}
-		matches, err := warmCheckIgnore(ctx, stage, checkout, paths)
+		matches, err := warmCheckIgnore(ctx, stage, checkout, paths, windows)
 		if err != nil {
 			return nil, err
 		}

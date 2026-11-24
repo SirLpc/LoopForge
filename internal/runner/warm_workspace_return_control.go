@@ -7,9 +7,20 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"time"
 )
 
-func (d *Daemon) warmReturnControl(ctx context.Context, req domain.RunnerWorkspaceRequest) domain.RunnerWorkspaceResponse {
+func (d *Daemon) warmReturnControl(ctx context.Context, req domain.RunnerWorkspaceRequest) (response domain.RunnerWorkspaceResponse) {
+	if d.cfg.WarmNative {
+		start := time.Now()
+		defer func() {
+			var err error
+			if response.Error != "" {
+				err = errors.New(response.Error)
+			}
+			recordWarmGitDuration(ctx, req.Operation, "native", start, err)
+		}()
+	}
 	return d.warmReturnWithProcessInventory(ctx, req, runtime.CheckWarmWorkspaceProcesses)
 }
 func (d *Daemon) warmReturnWithProcessInventory(ctx context.Context, req domain.RunnerWorkspaceRequest, checkProcesses func(context.Context, string) error) domain.RunnerWorkspaceResponse {

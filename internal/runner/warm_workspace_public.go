@@ -52,7 +52,7 @@ func (d *Daemon) warmWorkspaceInventory(dockerReady func() bool) []domain.WarmWo
 	return d.warmWorkspacePool.inventory()
 }
 
-var warmAbsolutePath = regexp.MustCompile(`(^|[[:space:]="'(:])/[^/]`)
+var warmAbsolutePath = regexp.MustCompile(`(^|[[:space:]="'(:])(/[^/]|[a-zA-Z]:[\\/]|\\\\[^\\])`)
 
 // Git and the filesystem can include runner paths in diagnostics. Keep those
 // in runner logs while preserving user-actionable relative file blockers.

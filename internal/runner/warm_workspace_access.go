@@ -39,6 +39,10 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 		return errors.New("incomplete warm checkout request")
 	}
 	verifyNativeContents := a.NativeCheckout != nil || len(a.PreparedRefs) > 0 || len(inv.WarmWorkspaceRefs) > 0
+	var windowsBySlot map[string]warmWindowsTree
+	if p.native {
+		windowsBySlot = make(map[string]warmWindowsTree, len(l.Slots))
+	}
 	ctx = gitwork.WithSSHKeys(ctx, inv.GitSSHKeys)
 	ctx = invocationGitHTTPContext(ctx, inv)
 	dirs := map[string]string{}
@@ -108,12 +112,14 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 				if a.NativeCheckout != nil && a.NativeCheckout.SlotID == slotID {
 					pending = a.NativeCheckout
 				}
-				prepared, preparationErr = prepareNativeWarmCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID], repo, restore, pending, func(intent nativeWarmCheckoutIntent) error {
+				result, err := prepareNativeWarmCheckout(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID], repo, restore, pending, func(intent nativeWarmCheckoutIntent) error {
 					p.mu.Lock()
 					defer p.mu.Unlock()
 					a.NativeCheckout, a.PreparingGit = &intent, true
 					return p.saveAllocation(a)
 				})
+				prepared, preparationErr = result.WarmWorkspaceRef, err
+				windowsBySlot[slotID] = result.windows
 			} else {
 				preparationErr = prepareWarmCheckoutWithProof(ctx, targets[slotID], p.gitCache(slotID), p.slots[slotID].UnityProjectPath, p.slots[slotID].ProjectID, repo, restore, previous, beforeWrite)
 			}
@@ -125,8 +131,14 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 					return err
 				}
 			}
-			if err := configureRepositoryGitIdentity(ctx, targets[slotID], inv.GitUserName, inv.GitUserEmail); err != nil {
-				return err
+			if windows := windowsBySlot[slotID]; windows.root != "" {
+				if err := windows.configureIdentity(ctx, inv.GitUserName, inv.GitUserEmail); err != nil {
+					return err
+				}
+			} else {
+				if err := configureRepositoryGitIdentity(ctx, targets[slotID], inv.GitUserName, inv.GitUserEmail); err != nil {
+					return err
+				}
 			}
 			p.mu.Lock()
 			a.PreparedRefs = maps.Clone(a.PreparedRefs)
@@ -151,7 +163,7 @@ func (p *warmWorkspacePool) prepareLeaseCheckout(ctx context.Context, l domain.W
 	}
 	root := filepath.Join(p.workspaceRoot, "runs", l.OwnerRunID, "workspace")
 	if p.native {
-		if err := p.checkNativeLeaseBeforeReady(ctx, a, root, inv, verifyNativeContents); err != nil {
+		if err := p.checkNativeLeaseBeforeReady(ctx, a, root, inv, verifyNativeContents, windowsBySlot); err != nil {
 			return err
 		}
 	}

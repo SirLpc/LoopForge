@@ -1,12 +1,15 @@
 package runner
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agentflow/internal/domain"
 )
@@ -90,13 +93,186 @@ done`)
 	}
 }
 
+func TestWarmWindowsCheckoutSwitchesCommitWithoutLinuxCheckout(t *testing.T) {
+	f := windowsWarmGitFixture(t)
+	runGitT(t, f.source, "lfs", "install", "--local")
+	runGitT(t, f.source, "lfs", "track", "*.bin")
+	runGitT(t, f.checkout, "config", "core.eol", "native")
+	warmGitWrite(t, f.source, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n*.txt text\n")
+	warmGitWrite(t, f.source, "new text.txt", "one\ntwo\n")
+	asset := strings.Repeat("new real asset", 100)
+	warmGitWrite(t, f.source, "asset 光.bin", asset)
+	warmGitWrite(t, f.source, "README.md", "updated on the remote")
+	want := f.publish(t)
+	testNativeGitWrapper(t, `for arg do
+	if [ "$arg" = checkout ] || [ "$arg" = symbolic-ref ]; then
+		echo "Linux Git attempted to change the Windows checkout" >&2
+		exit 42
+	fi
+done`)
+	slot := warmWorkspaceSlot{Path: f.checkout, UnityProjectPath: "."}
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, f.checkout, "rev-parse", "HEAD"); got != want {
+		t.Fatalf("checked out %s, want %s", got, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(f.checkout, "README.md")); err != nil || string(b) != "updated on the remote" {
+		t.Fatalf("unexpected worktree after checkout: %q, %v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(f.checkout, "asset 光.bin")); err != nil || string(b) != asset {
+		t.Fatalf("Windows checkout did not materialize the changed LFS asset: %v", err)
+	}
+	indexStat := runGitT(t, f.checkout, "ls-files", "--debug", "--", "asset 光.bin")
+	if !strings.Contains(indexStat, fmt.Sprintf("size: %d\t", len(asset))) {
+		t.Fatalf("index did not record the hydrated asset's size: %s", indexStat)
+	}
+	if b, err := os.ReadFile(filepath.Join(f.checkout, "new text.txt")); err != nil || string(b) != "one\ntwo\n" {
+		t.Fatalf("Windows checkout changed the existing text EOL policy: %q, %v", b, err)
+	}
+}
+
+func TestWarmWindowsCheckoutCanSwitchToFewerTrackedFiles(t *testing.T) {
+	f := windowsWarmGitFixture(t)
+	if err := os.RemoveAll(filepath.Join(f.source, "files")); err != nil {
+		t.Fatal(err)
+	}
+	want := f.publish(t)
+	slot := warmWorkspaceSlot{Path: f.checkout, UnityProjectPath: "."}
+	if err := prepareNativeWarmCheckoutForTest(t.Context(), f.checkout, f.cache, slot, f.repo, nil, func(domain.WarmWorkspaceRef) error { return nil }); err != nil {
+		t.Fatalf("Windows checkout of smaller target: %v", err)
+	}
+	if got := runGitT(t, f.checkout, "rev-parse", "HEAD"); got != want {
+		t.Fatalf("checked out %s, want %s", got, want)
+	}
+}
+
+func TestWarmWindowsRecoveryRefreshesAlreadyHydratedIndex(t *testing.T) {
+	f := windowsWarmGitFixture(t)
+	runGitT(t, f.source, "lfs", "install", "--local")
+	runGitT(t, f.source, "lfs", "track", "*.bin")
+	runGitT(t, f.checkout, "lfs", "install", "--local")
+	asset := strings.Repeat("materialized data", 100)
+	warmGitWrite(t, f.source, "asset.bin", asset)
+	target := f.publish(t)
+	slot := warmWorkspaceSlot{Path: f.checkout, UnityProjectPath: "."}
+	interrupted := errors.New("simulate interruption after materialization")
+	var intent nativeWarmCheckoutIntent
+	_, err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, nil, func(pending nativeWarmCheckoutIntent) error {
+		intent = pending
+		return interrupted
+	})
+	if !errors.Is(err, interrupted) {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_LFS_SKIP_SMUDGE", "1")
+	runGitT(t, f.checkout, "checkout", "--detach", target)
+	runGitT(t, f.checkout, "update-ref", "refs/heads/"+intent.Target.Branch, target)
+	runGitT(t, f.checkout, "symbolic-ref", "HEAD", "refs/heads/"+intent.Target.Branch)
+	warmGitWrite(t, f.checkout, "asset.bin", asset)
+
+	if _, err := prepareNativeWarmCheckout(t.Context(), f.checkout, f.cache, slot, f.repo, nil, &intent, nil); err != nil {
+		t.Fatalf("resume after LFS is already materialized: %v", err)
+	}
+	indexStat := runGitT(t, f.checkout, "ls-files", "--debug", "--", "asset.bin")
+	if !strings.Contains(indexStat, fmt.Sprintf("size: %d\t", len(asset))) {
+		t.Fatalf("resumed Windows checkout did not refresh the asset's cached size: %s", indexStat)
+	}
+}
+
+func TestWarmWindowsManagedGitStopsOnCancellation(t *testing.T) {
+	f := windowsWarmGitFixtureWithFiles(t, 0)
+	windows, ok := openWarmWindowsTree(t.Context(), f.checkout, f.checkout)
+	if !ok {
+		t.Fatal("fixture is not on a Windows drive")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	dir := strings.ReplaceAll(windows.root, `\`, "/")
+	go func() {
+		_, err := windows.checkoutGit(ctx, false, "-c", "alias.test-wait=!cd '"+dir+"' && for i in $(seq 1 300); do echo alive >> running; sleep 0.1; done", "test-wait")
+		done <- err
+	}()
+	marker := filepath.Join(f.checkout, "running")
+	deadline := time.After(8 * time.Second)
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Windows Git exited before the test command started: %v", err)
+		case <-deadline:
+			t.Fatal("Windows Git did not start the test command")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("expected cancellation, got %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Windows Git was still running after cancellation")
+	}
+	before := warmGitStat(t, marker).Size()
+	time.Sleep(350 * time.Millisecond)
+	if got := warmGitStat(t, marker).Size(); got != before {
+		t.Fatalf("Windows Git descendant is still writing after cancellation: %d → %d", before, got)
+	}
+}
+
+func TestWarmWindowsGitRejectsReplacedCheckoutPath(t *testing.T) {
+	f := windowsWarmGitFixtureWithFiles(t, 0)
+	windows, ok := openWarmWindowsTree(t.Context(), f.checkout, f.checkout)
+	if !ok {
+		t.Fatal("fixture is not on a Windows drive")
+	}
+	moved := f.checkout + "-moved"
+	if err := os.Rename(f.checkout, moved); err != nil {
+		t.Fatal(err)
+	}
+	runGitT(t, f.source, "clone", "-q", f.repo.CloneURL, f.checkout)
+	if _, err := windows.changeCheckout(t.Context(), "symbolic-ref", "HEAD", "refs/heads/unexpected"); err == nil {
+		t.Fatal("Windows Git accepted a replacement at the registered path")
+	}
+	for _, dir := range []string{f.checkout, moved} {
+		if head := runGitT(t, dir, "symbolic-ref", "HEAD"); head == "refs/heads/unexpected" {
+			t.Fatalf("Windows Git modified a checkout after its path changed")
+		}
+	}
+}
+
+func TestWarmWindowsIndexPublicationKeepsConcurrentChanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index")
+	warmGitWrite(t, filepath.Dir(path), "index", "concurrent staged entries")
+	if err := publishWarmWindowsIndex(path, []byte("before"), []byte("refreshed")); err == nil {
+		t.Fatal("replaced a concurrently updated index")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "concurrent staged entries" {
+		t.Fatalf("concurrent index = %q, %v", got, err)
+	}
+	warmGitWrite(t, filepath.Dir(path), "index.lock", "another Git operation")
+	if err := publishWarmWindowsIndex(path, []byte("concurrent staged entries"), []byte("refreshed")); err == nil {
+		t.Fatal("published through another Git operation's index lock")
+	}
+	if got, err := os.ReadFile(path + ".lock"); err != nil || string(got) != "another Git operation" {
+		t.Fatalf("concurrent index lock = %q, %v", got, err)
+	}
+}
+
 func TestWarmWindowsFullProofUsesNativeInventory(t *testing.T) {
 	f := windowsWarmGitFixture(t)
-	warmGitWrite(t, f.checkout, ".git/info/exclude", "/Library/\n")
+	warmGitWrite(t, f.checkout, ".git/info/exclude", "/Library/\n/ignored 光.txt\n")
 	warmGitWrite(t, f.checkout, "Library/keep", "ignored content")
+	warmGitWrite(t, f.checkout, "ignored 光.txt", "ignored file")
 	commit := runGitT(t, f.checkout, "rev-parse", "HEAD")
 	testNativeGitWrapper(t, `for arg do
-	if [ "$arg" = --ignored ]; then
+	if [ "$arg" = --ignored ] || [ "$arg" = check-ignore ]; then
 		echo "unexpected Linux ignored-directory scan on Windows worktree" >&2
 		exit 42
 	fi

@@ -351,38 +351,40 @@ func warmLFSMatches(path string, item warmLFSFile, previous warmLFSObjectStamp) 
 
 // Materialize only pointer files. Never hardlink a user-writable asset into the
 // protected cache or expose its storage path through the checkout's Git config.
-func (m warmLFSManifest) hydrate(checkout, private string) error {
+func (m warmLFSManifest) hydrate(checkout, private string) ([]warmLFSFile, error) {
+	var materialized []warmLFSFile
 	for _, item := range m.Files {
 		path := filepath.Join(checkout, item.Name)
 		info, err := os.Lstat(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("expected regular Git LFS file %s", item.Name)
+			return nil, fmt.Errorf("expected regular Git LFS file %s", item.Name)
 		}
 		if info.Size() > 1024 {
 			if info.Size() != item.Size {
-				return fmt.Errorf("changed hydrated Git LFS asset %s", item.Name)
+				return nil, fmt.Errorf("changed hydrated Git LFS asset %s", item.Name)
 			}
 			continue
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		pointer := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d", item.OID, item.Size)
 		if strings.TrimSuffix(string(b), "\n") != pointer {
 			if int64(len(b)) != item.Size || fmt.Sprintf("%x", sha256.Sum256(b)) != item.OID {
-				return fmt.Errorf("invalid or changed Git LFS pointer %s", item.Name)
+				return nil, fmt.Errorf("invalid or changed Git LFS pointer %s", item.Name)
 			}
 			continue
 		}
 		if err := m.hydrateFile(path, private, info.Mode().Perm(), item); err != nil {
-			return err
+			return nil, err
 		}
+		materialized = append(materialized, item)
 	}
-	return nil
+	return materialized, nil
 }
 func (m warmLFSManifest) hydrateFile(path, private string, mode os.FileMode, item warmLFSFile) error {
 	source, err := os.Open(warmLFSObject(m.storage, item.OID))

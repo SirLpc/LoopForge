@@ -288,7 +288,7 @@ func (w *warmReturnTree) verifyLocal(ctx context.Context, slot warmWorkspaceSlot
 			return warmTreeChanged("tracked file %s is missing", path)
 		}
 	}
-	ignored, err := warmCheckIgnore(local, stage, w.checkout, untrackedPaths)
+	ignored, err := warmCheckIgnore(local, stage, w.checkout, untrackedPaths, windows)
 	if err != nil {
 		return err
 	}

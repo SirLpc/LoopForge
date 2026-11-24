@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
@@ -110,7 +111,7 @@ func inspectNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	return false, warmTreeChanged("interrupted warm checkout references differ from the journal")
 }
 
-func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWorkspaceSlot, intent nativeWarmCheckoutIntent, atTarget bool, lfs warmLFSManifest) error {
+func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWorkspaceSlot, intent nativeWarmCheckoutIntent, atTarget bool, lfs warmLFSManifest, windows warmWindowsTree) error {
 	if slot.Path != "" && nativeWarmEditorBusy(slot) {
 		return fmt.Errorf("%w: close Unity before changing the leased checkout", errNativeWarmCheckoutBusy)
 	}
@@ -120,12 +121,28 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 		}
 	}
 	ref := intent.Target
+	backend := "wsl"
+	if windows.root != "" {
+		backend = "windows"
+	}
+	git := func(args ...string) (string, error) {
+		start := time.Now()
+		var out string
+		var err error
+		if windows.root != "" {
+			out, err = windows.changeCheckout(ctx, args...)
+		} else {
+			out, err = nativeWarmGit(ctx, checkout, args...)
+		}
+		recordWarmGitDuration(ctx, args[0], backend, start, err)
+		return out, err
+	}
 	current, err := warmCheckoutRef(checkout, ref.RepositoryID)
 	if err != nil {
 		return err
 	}
 	if !atTarget && (current.Commit != ref.Commit || ref.Branch == "") {
-		if _, err := nativeWarmGit(ctx, checkout, "checkout", "--no-overwrite-ignore", "--no-recurse-submodules", "--detach", ref.Commit); err != nil {
+		if _, err := git("checkout", "--no-overwrite-ignore", "--no-recurse-submodules", "--detach", ref.Commit); err != nil {
 			return nativeWarmGitWriteError(ctx, err)
 		}
 	}
@@ -142,7 +159,7 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 			if tip == "" {
 				tip = strings.Repeat("0", len(ref.Commit))
 			}
-			if _, err := nativeWarmGit(ctx, checkout, "update-ref", "--create-reflog", "-m", "LoopForge warm checkout", name, ref.Commit, tip); err != nil {
+			if _, err := git("update-ref", "--create-reflog", "-m", "LoopForge warm checkout", name, ref.Commit, tip); err != nil {
 				return nativeWarmGitWriteError(ctx, err)
 			}
 		}
@@ -158,7 +175,7 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 			if from == "" {
 				from = current.Commit
 			}
-			if _, err := nativeWarmGit(ctx, checkout, "symbolic-ref", "-m", "checkout: moving from "+from+" to "+ref.Branch, "HEAD", name); err != nil {
+			if _, err := git("symbolic-ref", "-m", "checkout: moving from "+from+" to "+ref.Branch, "HEAD", name); err != nil {
 				return nativeWarmGitWriteError(ctx, err)
 			}
 		}
@@ -170,15 +187,42 @@ func applyNativeWarmCheckout(ctx context.Context, checkout string, slot warmWork
 	if current.Commit != ref.Commit || current.Branch != ref.Branch {
 		return warmTreeChanged("fixed warm checkout changed while attaching the branch")
 	}
-	if err := hydrateNativeWarmLFS(checkout, intent, lfs); err != nil {
+	start := time.Now()
+	materialized, err := hydrateNativeWarmLFS(checkout, intent, lfs)
+	recordWarmGitDuration(ctx, "lfs-materialize", "wsl", start, err)
+	if err != nil {
 		return fmt.Errorf("materialize fixed checkout Git LFS files: %w", err)
+	}
+	if windows.root != "" && atTarget && len(windows.changedPaths) != 0 {
+		// An interrupted checkout may already have published some assets
+		// without publishing their Windows index stat data.
+		seen := make(map[string]bool, len(materialized))
+		for _, file := range materialized {
+			seen[file.Name] = true
+		}
+		for _, path := range windows.changedPaths {
+			if file, ok := lfs.byPath[path]; ok && !seen[path] {
+				materialized = append(materialized, file)
+			}
+		}
+	}
+	if windows.root != "" && len(materialized) != 0 {
+		start := time.Now()
+		publish, err := windows.planIndexRefresh(ctx, materialized)
+		if err == nil {
+			err = publish()
+		}
+		recordWarmGitDuration(ctx, "post-checkout-index-refresh", backend, start, err)
+		if err != nil {
+			return nativeWarmGitWriteError(ctx, err)
+		}
 	}
 	return writeNativeWarmBaseline(checkout, intent.Baseline)
 }
 
 func nativeWarmGitWriteError(ctx context.Context, err error) error {
 	var exit *exec.ExitError
-	if ctx.Err() != nil || errors.As(err, &exit) && exit.ExitCode() < 0 {
+	if ctx.Err() != nil || errors.As(err, &exit) && (exit.ExitCode() < 0 || exit.ExitCode() == 124) {
 		return errors.Join(errNativeWarmCheckoutBusy, err)
 	}
 	return err
@@ -194,23 +238,23 @@ func nativeWarmLFSStage(meta, id string) string {
 	return filepath.Join(meta, "agentflow-warm-lfs-"+id)
 }
 
-func hydrateNativeWarmLFS(checkout string, intent nativeWarmCheckoutIntent, manifest warmLFSManifest) error {
+func hydrateNativeWarmLFS(checkout string, intent nativeWarmCheckoutIntent, manifest warmLFSManifest) ([]warmLFSFile, error) {
 	if len(manifest.Files) == 0 {
-		return nil
+		return nil, nil
 	}
 	meta, err := openWarmWorkspaceDir(filepath.Join(checkout, ".git"), false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer meta.Close()
 	stage := meta.Name()
 	if validNativeLFSStageID(intent.LFSStageID) {
 		stage = nativeWarmLFSStage(stage, intent.LFSStageID)
 		if err := os.RemoveAll(stage); err != nil {
-			return err
+			return nil, err
 		}
 		if err := os.Mkdir(stage, 0700); err != nil {
-			return err
+			return nil, err
 		}
 		defer os.RemoveAll(stage)
 	}
@@ -290,7 +334,7 @@ func (p *warmWorkspacePool) recoverNativeCheckoutForReturn(ctx context.Context, 
 			if a.PreparedRefs == nil {
 				a.PreparedRefs = make(map[string]domain.WarmWorkspaceRef)
 			}
-			a.PreparedRefs[slot.ID] = prepared
+			a.PreparedRefs[slot.ID] = prepared.WarmWorkspaceRef
 		}
 		a.PreparingGit, a.NativeCheckout = false, nil
 		p.mu.Lock()
@@ -301,7 +345,7 @@ func (p *warmWorkspacePool) recoverNativeCheckoutForReturn(ctx context.Context, 
 	return a, errors.New("missing repository for interrupted native checkout")
 }
 
-func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a warmWorkspaceAllocation, root string, inv *domain.RunnerInvocation, verifyContents bool) error {
+func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a warmWorkspaceAllocation, root string, inv *domain.RunnerInvocation, verifyContents bool, windowsBySlot map[string]warmWindowsTree) error {
 	if err := p.checkNativeWarmEditors(a); err != nil {
 		return errors.Join(errNativeWarmCheckoutBusy, err)
 	}
@@ -318,6 +362,7 @@ func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a w
 			return errors.New("missing prepared native warm workspace reference")
 		}
 		if !verifyContents {
+			start := time.Now()
 			current, err := warmCheckoutRef(checkout, repo.RepositoryID)
 			if err != nil {
 				return err
@@ -325,13 +370,23 @@ func (p *warmWorkspacePool) checkNativeLeaseBeforeReady(ctx context.Context, a w
 			if current.RepositoryID != ref.RepositoryID || current.Branch != ref.Branch || current.Commit != ref.Commit {
 				return warmTreeChanged("prepared native checkout %s changed", repo.Dir)
 			}
-			if err := checkNativeWarmClean(ctx, checkout, filepath.Dir(cache), p.slots[id].Path); err != nil {
+			windows := windowsBySlot[id]
+			err = checkNativeWarmCleanWithGit(ctx, checkout, filepath.Dir(cache), p.slots[id].Path, windows)
+			backend := "native"
+			if windows.root != "" {
+				backend = "windows"
+			}
+			recordWarmGitDuration(ctx, "workspace-ready-check", backend, start, err)
+			if err != nil {
 				return fmt.Errorf("%s: verify prepared native checkout: %w", repo.Dir, err)
 			}
 			continue
 		}
 		proof := warmReturnTree{root: root, checkout: checkout, native: true, archived: archived, collected: make(map[string]string)}
-		if err := proof.verifyLocal(ctx, p.slots[id], cache, repo, ref, warmProofLFSContent); err != nil {
+		start := time.Now()
+		err := proof.verifyLocal(ctx, p.slots[id], cache, repo, ref, warmProofLFSContent)
+		recordWarmGitDuration(ctx, "workspace-ready-content-proof", "native", start, err)
+		if err != nil {
 			return fmt.Errorf("%s: verify prepared native checkout: %w", repo.Dir, err)
 		}
 	}

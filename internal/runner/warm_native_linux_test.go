@@ -738,7 +738,7 @@ func TestWarmNativeLFSStagingSurvivesCrash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Fatal(applyNativeWarmCheckout(t.Context(), checkout, warmWorkspaceSlot{}, nativeWarmCheckoutIntent{Target: ref, LFSStageID: strings.Repeat("A", 26)}, true, manifest))
+		t.Fatal(applyNativeWarmCheckout(t.Context(), checkout, warmWorkspaceSlot{}, nativeWarmCheckoutIntent{Target: ref, LFSStageID: strings.Repeat("A", 26)}, true, manifest, warmWindowsTree{}))
 	}
 	g := nativeWarmTestClone(t, newWarmGitFixture(t))
 	pointer := "version https://git-lfs.github.com/spec/v1\noid sha256:" + oid + "\nsize 4096\n"

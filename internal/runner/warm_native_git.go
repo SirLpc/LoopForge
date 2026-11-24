@@ -5,14 +5,24 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
 )
+
+type warmGitRunIDKey struct{}
+
+func recordWarmGitDuration(ctx context.Context, phase, backend string, since time.Time, err error) {
+	if runID, _ := ctx.Value(warmGitRunIDKey{}).(string); runID != "" {
+		log.Printf("warm Git run=%q phase=%s backend=%s elapsed=%s ok=%t", runID, phase, backend, time.Since(since).Round(time.Millisecond), err == nil)
+	}
+}
 
 func nativeWarmGit(ctx context.Context, checkout string, args ...string) (string, error) {
 	return gitwork.CStdout(ctx, checkout, nativeWarmGitArgs(args...)...)
@@ -86,56 +96,24 @@ func nativeWarmConfigEntry(key, value string) bool {
 }
 
 func checkNativeWarmClean(ctx context.Context, checkout, scratch, original string) error {
-	if err := verifyNativeWarmConfig(ctx, checkout, scratch); err != nil {
-		return err
-	}
-	// Git status must compare the published tree using the repository's indexed
-	// attributes and ancestry. A local override could hide a worktree edit.
-	for _, name := range []string{"attributes", "grafts"} {
-		info, err := os.Lstat(filepath.Join(checkout, ".git", "info", name))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() || info.Size() != 0 {
-			return fmt.Errorf("fixed warm checkout has unsupported local Git info/%s", name)
-		}
-	}
-	if err := warmRegular(filepath.Join(checkout, ".git", "index")); err != nil {
-		return err
-	}
-	entries, err := gitwork.CStdoutRaw(ctx, checkout, nil, "ls-files", "-v", "--stage", "-z")
+	return checkNativeWarmCleanWithGit(ctx, checkout, scratch, original, warmWindowsTree{})
+}
+
+func checkNativeWarmCleanWithGit(ctx context.Context, checkout, scratch, original string, windows warmWindowsTree) error {
+	windowsCompatible, count, err := inspectNativeWarmIndex(ctx, checkout, scratch)
 	if err != nil {
 		return err
 	}
-	windowsCompatible := strings.Count(entries, "\x00") >= warmWindowsMinTracked
-	for entry := range strings.SplitSeq(strings.TrimSuffix(entries, "\x00"), "\x00") {
-		if entry == "" {
-			continue
+	if windows.root != "" {
+		if !windowsCompatible {
+			return warmTreeChanged("native checkout index changed before Windows Git verification")
 		}
-		flags, path, ok := strings.Cut(entry, "\t")
-		if !ok || !strings.HasPrefix(flags, "H ") {
-			return fmt.Errorf("fixed warm checkout has hidden or unmerged index entries: %q", path)
-		}
-		if !strings.HasPrefix(flags, "H 100644 ") && !strings.HasPrefix(flags, "H 100755 ") {
-			windowsCompatible = false
-		}
-		if strings.HasPrefix(flags, "H 160000 ") {
-			if !validWarmWorkspaceRelativePath(path) {
-				return errors.New("invalid fixed warm submodule path")
-			}
-			children, err := os.ReadDir(filepath.Join(checkout, path))
-			if err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			if len(children) > 0 {
-				return warmTreeChanged("populated submodule %s needs inspection", path)
-			}
-		}
+		return nativeWarmStatus(func(args ...string) (string, error) {
+			out, err := windows.checkoutGit(ctx, false, args...)
+			return out, nativeWarmGitWriteError(ctx, err)
+		})
 	}
-	if windowsCompatible {
+	if windowsCompatible && count >= warmWindowsMinTracked {
 		if w, ok := openWarmWindowsTree(ctx, checkout, original); ok {
 			if err := w.clean(ctx, checkout, scratch); err == nil || errors.Is(err, errNativeWarmDirty) || ctx.Err() != nil {
 				return err
@@ -145,6 +123,100 @@ func checkNativeWarmClean(ctx context.Context, checkout, scratch, original strin
 	return nativeWarmStatus(func(args ...string) (string, error) {
 		return gitwork.CStdoutRaw(ctx, checkout, nil, nativeWarmGitArgs(args...)...)
 	})
+}
+
+func inspectNativeWarmIndex(ctx context.Context, checkout, scratch string) (bool, int, error) {
+	if err := verifyNativeWarmConfig(ctx, checkout, scratch); err != nil {
+		return false, 0, err
+	}
+	// Git status must compare the published tree using the repository's indexed
+	// attributes and ancestry. A local override could hide a worktree edit.
+	for _, name := range []string{"attributes", "grafts"} {
+		info, err := os.Lstat(filepath.Join(checkout, ".git", "info", name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, 0, err
+		}
+		if !info.Mode().IsRegular() || info.Size() != 0 {
+			return false, 0, fmt.Errorf("fixed warm checkout has unsupported local Git info/%s", name)
+		}
+	}
+	if err := warmRegular(filepath.Join(checkout, ".git", "index")); err != nil {
+		return false, 0, err
+	}
+	entries, err := gitwork.CStdoutRaw(ctx, checkout, nil, "ls-files", "-v", "--stage", "-z")
+	if err != nil {
+		return false, 0, err
+	}
+	windowsCompatible := true
+	for entry := range strings.SplitSeq(strings.TrimSuffix(entries, "\x00"), "\x00") {
+		if entry == "" {
+			continue
+		}
+		flags, path, ok := strings.Cut(entry, "\t")
+		if !ok || !strings.HasPrefix(flags, "H ") {
+			return false, 0, fmt.Errorf("fixed warm checkout has hidden or unmerged index entries: %q", path)
+		}
+		if !strings.HasPrefix(flags, "H 100644 ") && !strings.HasPrefix(flags, "H 100755 ") {
+			windowsCompatible = false
+		}
+		if strings.HasPrefix(flags, "H 160000 ") {
+			if !validWarmWorkspaceRelativePath(path) {
+				return false, 0, errors.New("invalid fixed warm submodule path")
+			}
+			children, err := os.ReadDir(filepath.Join(checkout, path))
+			if err != nil && !os.IsNotExist(err) {
+				return false, 0, err
+			}
+			if len(children) > 0 {
+				return false, 0, warmTreeChanged("populated submodule %s needs inspection", path)
+			}
+		}
+	}
+	return windowsCompatible, strings.Count(entries, "\x00"), nil
+}
+
+func selectNativeWarmWindowsGit(ctx context.Context, checkout, scratch, original string) (warmWindowsTree, error) {
+	start := time.Now()
+	w, ok := openWarmWindowsTree(ctx, checkout, original)
+	if !ok {
+		recordWarmGitDuration(ctx, "windows-path-ineligible", "wsl", start, ctx.Err())
+		return warmWindowsTree{}, ctx.Err()
+	}
+	compatible, count, err := inspectNativeWarmIndex(ctx, checkout, scratch)
+	if err != nil || !compatible || count < warmWindowsMinTracked {
+		recordWarmGitDuration(ctx, "windows-index-ineligible", "wsl", start, err)
+		return warmWindowsTree{}, err
+	}
+	info, err := openWarmWorkspaceDir(filepath.Join(checkout, ".git", "info"), false)
+	if err == nil {
+		info.Close()
+		if err := warmRegular(filepath.Join(info.Name(), "exclude")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return warmWindowsTree{}, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return warmWindowsTree{}, err
+	}
+	mode, err := nativeWarmGit(ctx, checkout, "config", "--type=bool", "--get", "core.filemode")
+	if err != nil || mode != "false" {
+		recordWarmGitDuration(ctx, "windows-filemode-ineligible", "wsl", start, err)
+		return warmWindowsTree{}, ctx.Err()
+	}
+	eol, err := nativeWarmGit(ctx, checkout, "config", "--get", "core.eol")
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
+		return warmWindowsTree{}, err
+	}
+	if eol == "" || eol == "native" {
+		eol = "lf"
+	}
+	if eol != "lf" && eol != "crlf" {
+		return warmWindowsTree{}, errors.New("unsupported Git line endings in fixed warm checkout")
+	}
+	w.eol = eol
+	return w, nil
 }
 
 var errNativeWarmDirty = errors.New("fixed warm checkout is not clean")
@@ -174,12 +246,18 @@ func nativeWarmStatus(git func(...string) (string, error)) error {
 	return nil
 }
 
-func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot warmWorkspaceSlot, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef, pending *nativeWarmCheckoutIntent, beforeWrite func(nativeWarmCheckoutIntent) error) (domain.WarmWorkspaceRef, error) {
-	var ref domain.WarmWorkspaceRef
+type nativeWarmCheckoutResult struct {
+	domain.WarmWorkspaceRef
+	windows warmWindowsTree
+}
+
+func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot warmWorkspaceSlot, repo domain.RunnerRepository, restore *domain.WarmWorkspaceRef, pending *nativeWarmCheckoutIntent, beforeWrite func(nativeWarmCheckoutIntent) error) (result nativeWarmCheckoutResult, resultErr error) {
+	var ref nativeWarmCheckoutResult
 	if slot.Path != "" && nativeWarmEditorBusy(slot) {
 		return ref, errors.Join(errNativeWarmCheckoutBusy, errors.New("close Unity before changing the leased checkout"))
 	}
-	local, cancel := context.WithCancel(context.Background())
+	runID, _ := ctx.Value(warmGitRunIDKey{}).(string)
+	local, cancel := context.WithCancel(context.WithValue(context.Background(), warmGitRunIDKey{}, runID))
 	defer cancel()
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
@@ -209,7 +287,10 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	}
 	head := current.Commit
 	auth := repositoryGitContext(ctx, repo)
-	if err := fetchNativeWarmCache(local, auth, cache, scratch, slot, checkout, head, repo); err != nil {
+	start := time.Now()
+	err = fetchNativeWarmCache(local, auth, cache, scratch, slot, checkout, head, repo)
+	recordWarmGitDuration(ctx, "remote-fetch", "wsl", start, err)
+	if err != nil {
 		return ref, err
 	}
 	var intent nativeWarmCheckoutIntent
@@ -255,6 +336,59 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		}
 	}
 	target := intent.Target.Commit
+	start = time.Now()
+	verifyRecovery := pending != nil || restore != nil
+	var windows warmWindowsTree
+	if verifyRecovery || head != target || current.Branch != intent.Target.Branch {
+		windows, err = selectNativeWarmWindowsGit(local, checkout, scratch, slot.Path)
+		if err != nil {
+			return ref, err
+		}
+	}
+	if windows.root != "" && intent.Before.Commit != target {
+		entries, err := gitwork.CStdoutRaw(local, cache, nil, "ls-tree", "-rz", target)
+		if err != nil {
+			return ref, err
+		}
+		for entry := range strings.SplitSeq(entries, "\x00") {
+			if strings.HasPrefix(entry, "120000 ") || strings.HasPrefix(entry, "160000 ") {
+				windows = warmWindowsTree{}
+				break
+			}
+		}
+		if windows.root != "" {
+			paths, err := gitwork.CStdoutRaw(local, cache, nil, "diff-tree", "-r", "--no-renames", "--name-only", "-z", intent.Before.Commit, target)
+			if err != nil {
+				return ref, err
+			}
+			for path := range strings.SplitSeq(strings.TrimSuffix(paths, "\x00"), "\x00") {
+				if path == "" {
+					continue
+				}
+				if !warmWindowsProofPath(path) {
+					windows = warmWindowsTree{}
+					break
+				}
+				windows.changedPaths = append(windows.changedPaths, path)
+			}
+		}
+	}
+	if windows.root != "" && intent.Target.Branch != "" {
+		ref := "refs/heads/" + intent.Target.Branch
+		if !warmWindowsProofPath(ref) {
+			windows = warmWindowsTree{}
+		} else {
+			windows.refPaths = []string{".git/" + ref, ".git/logs/" + ref}
+		}
+	}
+	backend := "wsl"
+	if windows.root != "" {
+		backend = "windows"
+	}
+	if slot.Path != "" {
+		recordWarmGitDuration(ctx, "select-checkout-git", backend, start, nil)
+	}
+	defer func(since time.Time) { recordWarmGitDuration(ctx, "local-preparation", backend, since, resultErr) }(time.Now())
 	if pending == nil && current.Branch == "" && head != target {
 		if err := authorizeWarmRestore(local, auth, scratch, cache, repo, head); err != nil {
 			return ref, fmt.Errorf("fixed warm checkout is detached at a commit unavailable from the remote: %w", err)
@@ -263,9 +397,9 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 	if err := validateWarmLFSConfig(local, cache, target, repo.CloneURL); err != nil {
 		return ref, err
 	}
-	verifyRecovery := pending != nil || restore != nil
 	var lfs warmLFSManifest
 	if verifyRecovery || head != target {
+		start := time.Now()
 		stage := filepath.Join(scratch, "check")
 		if _, err := gitwork.C(local, scratch, "init", "--template=", warmObjectFormat(head), stage); err != nil {
 			return ref, err
@@ -279,6 +413,7 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		} else {
 			lfs, err = prepareNativeWarmChangedLFS(local, auth, stage, scope, head, target, repo)
 		}
+		recordWarmGitDuration(ctx, "lfs-prepare", "wsl", start, err)
 		if err != nil {
 			return ref, err
 		}
@@ -294,14 +429,31 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 			objects = append(objects, intent.Baseline)
 		}
 		fetch := append([]string{"-c", "protocol.file.allow=always", "fetch", "--no-auto-gc", "--no-tags", "--no-write-fetch-head", cache}, objects...)
-		if _, err := nativeWarmGit(local, checkout, fetch...); err != nil {
+		start := time.Now()
+		_, err := nativeWarmGit(local, checkout, fetch...)
+		recordWarmGitDuration(ctx, "local-object-import", "wsl", start, err)
+		if err != nil {
 			return ref, err
 		}
 	}
 	var atTarget bool
+	var publishIndex func() error
+	start = time.Now()
 	if verifyRecovery {
+		if windows.root != "" && (pending != nil || current.Commit != target || current.Branch != intent.Target.Branch) {
+			winHead, err := windows.checkoutGit(local, false, "rev-parse", "--verify", "HEAD^{commit}")
+			if errors.Is(err, errWindowsWarmGitUnavailable) {
+				windows, backend = warmWindowsTree{}, "wsl"
+				recordWarmGitDuration(ctx, "windows-git-unavailable", backend, start, err)
+			} else if err != nil {
+				return ref, err
+			} else if winHead != head {
+				return ref, warmTreeChanged("Windows Git resolved a different checkout")
+			}
+		}
 		atTarget, err = inspectNativeWarmCheckout(local, checkout, cache, slot, repo, intent)
 		if err != nil {
+			recordWarmGitDuration(ctx, "pre-checkout-verification", backend, start, err)
 			return ref, fmt.Errorf("verify fixed checkout before writing: %w", err)
 		}
 	} else {
@@ -312,13 +464,32 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 		if current.Commit != intent.Before.Commit || current.Branch != intent.Before.Branch {
 			return ref, warmTreeChanged("fixed warm checkout changed while fetching")
 		}
-		if err := checkNativeWarmClean(local, checkout, scratch, slot.Path); err != nil {
+		if windows.root != "" {
+			compatible, _, inspectErr := inspectNativeWarmIndex(local, checkout, scratch)
+			if inspectErr != nil {
+				return ref, inspectErr
+			}
+			if !compatible {
+				return ref, warmTreeChanged("native checkout index changed before Windows Git verification")
+			}
+			publishIndex, err = windows.planIndexRefresh(local, nil)
+		} else {
+			err = checkNativeWarmClean(local, checkout, scratch, slot.Path)
+		}
+		if errors.Is(err, errWindowsWarmGitUnavailable) {
+			windows, backend = warmWindowsTree{}, "wsl"
+			recordWarmGitDuration(ctx, "windows-git-unavailable", backend, start, err)
+			err = checkNativeWarmClean(local, checkout, scratch, "")
+		}
+		if err != nil {
+			recordWarmGitDuration(ctx, "pre-checkout-verification", backend, start, err)
 			return ref, err
 		}
 		atTarget = current.Commit == intent.Target.Commit && current.Branch == intent.Target.Branch
 	}
+	recordWarmGitDuration(ctx, "pre-checkout-verification", backend, start, nil)
 	if !atTarget {
-		if err := checkWarmIgnoredCollisions(local, checkout, checkout, cache, head, target); err != nil {
+		if err := checkWarmIgnoredCollisions(local, checkout, checkout, cache, head, target, windows); err != nil {
 			return ref, err
 		}
 	}
@@ -327,10 +498,15 @@ func prepareNativeWarmCheckout(ctx context.Context, checkout, cache string, slot
 			return ref, err
 		}
 	}
-	if err := applyNativeWarmCheckout(local, checkout, slot, intent, atTarget, lfs); err != nil {
+	if publishIndex != nil {
+		if err := publishIndex(); err != nil {
+			return ref, err
+		}
+	}
+	if err := applyNativeWarmCheckout(local, checkout, slot, intent, atTarget, lfs, windows); err != nil {
 		return ref, err
 	}
-	return intent.Target, nil
+	return nativeWarmCheckoutResult{WarmWorkspaceRef: intent.Target, windows: windows}, nil
 }
 
 func fetchNativeWarmCache(local, auth context.Context, cache, scratch string, slot warmWorkspaceSlot, checkout, head string, repo domain.RunnerRepository) error {

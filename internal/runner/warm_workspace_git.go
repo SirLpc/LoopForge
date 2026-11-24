@@ -189,7 +189,7 @@ func prepareWarmCheckoutWithProof(ctx context.Context, checkout, cache, project,
 	if err := verifyWarmWorktree(local, checkout, stage, head, target, library, work); err != nil {
 		return err
 	}
-	if err := checkWarmIgnoredCollisions(local, stage, checkout, db, head, target); err != nil {
+	if err := checkWarmIgnoredCollisions(local, stage, checkout, db, head, target, warmWindowsTree{}); err != nil {
 		return err
 	}
 	if _, err := gitwork.C(local, stage, "update-ref", "--no-deref", "HEAD", target); err != nil {
@@ -231,7 +231,8 @@ func prepareWarmCheckoutWithProof(ctx context.Context, checkout, cache, project,
 	if err := exchangeWarmGitDirs(old, meta); err != nil {
 		return err
 	}
-	return lfs.hydrate(checkout, private)
+	_, err = lfs.hydrate(checkout, private)
+	return err
 }
 
 // A new cache can borrow the admin seed during its first fetch. Promotion

@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$request = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
+$request = ConvertFrom-Json -InputObject ([Console]::In.ReadLine())
 
 function Get-LFSScratch([string]$id) {
     if ($id -cnotmatch '^[A-Z2-7]{26}$') {
@@ -45,9 +45,13 @@ if ($request.gitArgs) {
             }
         }
     }
+    if ($request.managedGit -and $request.lfsScratch -and -not $scratch) {
+        throw 'Windows Git LFS is unavailable'
+    }
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    $start.RedirectStandardInput = [bool]($request.managedGit -or $request.gitInput)
     foreach ($key in @($start.EnvironmentVariables.Keys)) {
         if ($key -like 'GIT_*') {
             $start.EnvironmentVariables.Remove($key)
@@ -57,21 +61,60 @@ if ($request.gitArgs) {
     $start.EnvironmentVariables['GIT_CONFIG_GLOBAL'] = 'NUL'
     $start.EnvironmentVariables['GIT_ATTR_NOSYSTEM'] = '1'
     $start.EnvironmentVariables['GIT_LFS_SKIP_SMUDGE'] = '1'
-    $start.EnvironmentVariables['GIT_OPTIONAL_LOCKS'] = '0'
+    $start.EnvironmentVariables['GIT_OPTIONAL_LOCKS'] = if ($request.refreshIndex) { '1' } else { '0' }
     $start.EnvironmentVariables['GIT_TERMINAL_PROMPT'] = '0'
     $start.EnvironmentVariables['GIT_ALLOW_PROTOCOL'] = ''
+    if ($request.indexFile) { $start.EnvironmentVariables['GIT_INDEX_FILE'] = $request.indexFile }
     $process = $null
+    $buffer = $null
     try {
+        if ($request.managedGit) {
+            Add-Type -TypeDefinition $request.jobSource
+            [LoopForgeWarmGit]::FenceProcessTree()
+            [LoopForgeWarmGit]::PinCheckout($request.worktree)
+            [LoopForgeWarmGit]::CheckCheckoutPaths($request.worktree, [string[]]$request.changedPaths)
+            [Console]::Error.WriteLine('loopforge-windows-git-ready')
+            if ([Console]::In.ReadLine() -cne 'run') { exit 124 }
+            $inputPipe = [Console]::OpenStandardInput()
+            $cancelled = $inputPipe.ReadAsync([byte[]]::new(1), 0, 1)
+            if ($cancelled.IsCompleted) { exit 124 }
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+        }
         if ($scratch) {
             $null = [IO.Directory]::CreateDirectory($scratch)
         }
         $process = [Diagnostics.Process]::Start($start)
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.StandardOutput.BaseStream.CopyTo([Console]::OpenStandardOutput())
-        $process.WaitForExit()
+        if ($start.RedirectStandardInput) {
+            $buffer = [IO.MemoryStream]::new()
+            $stdout = $process.StandardOutput.BaseStream.CopyToAsync($buffer)
+            if ($request.gitInput) {
+                $stdinBytes = [Convert]::FromBase64String($request.gitInput)
+                $process.StandardInput.BaseStream.Write($stdinBytes, 0, $stdinBytes.Length)
+            }
+            $process.StandardInput.Close()
+            while (-not $process.WaitForExit(100) -or -not $stdout.IsCompleted -or -not $stderr.IsCompleted) {
+                if ($request.managedGit -and (($cancelled.IsCompleted -and -not $request.finishWrite) -or $clock.Elapsed.TotalMinutes -ge 30)) {
+                    if (-not $process.HasExited) {
+                        & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $process.Id /T /F 2>$null | Out-Null
+                        if (-not $process.HasExited) { $process.Kill() }
+                        $process.WaitForExit()
+                    }
+                    exit 124
+                }
+                if ($process.HasExited) { Start-Sleep -Milliseconds 25 }
+            }
+            [void]$stdout.GetAwaiter().GetResult()
+            $buffer.Position = 0
+            $buffer.CopyTo([Console]::OpenStandardOutput())
+        } else {
+            $process.StandardOutput.BaseStream.CopyTo([Console]::OpenStandardOutput())
+            $process.WaitForExit()
+        }
         [Console]::Error.Write($stderr.GetAwaiter().GetResult())
         exit $process.ExitCode
     } finally {
+        if ($buffer) { $buffer.Dispose() }
         if ($process) {
             $process.Dispose()
         }

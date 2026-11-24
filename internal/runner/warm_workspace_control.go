@@ -77,6 +77,7 @@ func (d *Daemon) warmWorkspaceControl(ctx context.Context, req domain.RunnerWork
 	if p == nil || l == nil || l.RunnerID != d.runnerID() || l.OwnerRunID != req.RunID || req.WorkspaceRunID != "" && req.WorkspaceRunID != req.RunID {
 		return runnerWorkspaceError(errors.New("invalid warm workspace owner or runner"))
 	}
+	ctx = context.WithValue(ctx, warmGitRunIDKey{}, req.RunID)
 	// Git preparation and release proofs have their own lifetimes. A short
 	// control call may report placement, never readiness from placement alone.
 	if d.cfg.WarmNative && !d.warmHostVisible.Load() && (req.Operation == domain.RunnerWorkspaceOperationWarmPrepare || req.Operation == domain.RunnerWorkspaceOperationWarmCheckout) {
