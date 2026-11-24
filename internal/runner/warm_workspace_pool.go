@@ -22,12 +22,14 @@ type warmWorkspaceSlot struct {
 	RepositoryID     string   `json:"repositoryId"`
 	Path             string   `json:"path"`
 	UnityProjectPath string   `json:"unityProjectPath"`
+	UnityEditorPath  string   `json:"unityEditorPath,omitempty"`
 	DiscardGenerated []string `json:"discardGenerated,omitempty"` // Accepted in legacy configs. Ignored files remain in the slot.
 }
 
 type warmWorkspacePool struct {
 	nativeSlots        []*os.File
 	native             bool
+	unityTests         sync.Map // slot ID -> active Windows Unity invocation
 	mu                 sync.Mutex
 	idleOrigins        map[string]string
 	slots              map[string]warmWorkspaceSlot
@@ -144,6 +146,9 @@ func readWarmWorkspaceSlots(configPath, workspaceRoot, stateDir string) (map[str
 		}
 		if slot.UnityProjectPath != "." && !validWarmWorkspaceRelativePath(slot.UnityProjectPath) {
 			return nil, fmt.Errorf("invalid Unity project path for warm workspace slot %q", slot.ID)
+		}
+		if slot.UnityEditorPath != "" && !validUnityEditorPath(slot.UnityEditorPath) {
+			return nil, fmt.Errorf("unityEditorPath must be an absolute Windows path to Unity.exe for slot %q", slot.ID)
 		}
 		for _, dir := range slot.DiscardGenerated {
 			if dir != "Temp" && dir != "Logs" && dir != "obj" {

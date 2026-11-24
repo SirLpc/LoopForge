@@ -162,6 +162,7 @@ func (s *processSandbox) command(ctx context.Context, command CommandSpec, base 
 			return nil, err
 		}
 		args = bwrapPrivateBinds(args, command.privateBinds)
+		args = command.nativeWarmTool.bind(args, s.requirements.NativeWarm)
 		if command.runnerLogin != nil {
 			// Hide host sources and the private journal after all other binds.
 			// The managed CLI uses only its own private HOME and host callback.

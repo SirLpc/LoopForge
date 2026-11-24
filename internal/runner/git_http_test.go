@@ -13,6 +13,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if code, handled := RunUnityTestCLI(os.Args); handled {
+		os.Exit(code)
+	}
 	if RunWarmGitHelperCLI(os.Args[1:]) || runtime.RunMCPCallCLI(os.Args[1:]) || runtime.RunGitHelperCLI(os.Args[1:]) {
 		return
 	}

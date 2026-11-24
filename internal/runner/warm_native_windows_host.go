@@ -110,13 +110,15 @@ type warmWindowsRequest struct {
 	GitInput          []byte                 `json:"gitInput,omitempty"`
 }
 
-var warmWindowsEncodedScript = func() string {
+var warmWindowsEncodedScript = encodeWarmWindowsScript(warmWindowsScript)
+
+func encodeWarmWindowsScript(script string) string {
 	var b []byte
-	for _, unit := range utf16.Encode([]rune(warmWindowsScript)) {
+	for _, unit := range utf16.Encode([]rune(script)) {
 		b = binary.LittleEndian.AppendUint16(b, unit)
 	}
 	return base64.StdEncoding.EncodeToString(b)
-}()
+}
 
 func runWarmWindows(ctx context.Context, request warmWindowsRequest) ([]byte, error) {
 	input, err := json.Marshal(request)

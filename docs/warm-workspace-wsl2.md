@@ -15,7 +15,8 @@
       "projectId": "example-project",
       "repositoryId": "example-client",
       "path": "/mnt/d/UnityProjects/example",
-      "unityProjectPath": "client"
+      "unityProjectPath": "client",
+      "unityEditorPath": "C:\\UnityVersions\\2022.3.62f3\\Editor\\Unity.exe"
     }
   ]
 }
@@ -32,6 +33,21 @@ unshare --user --map-root-user --mount --propagation private -- \
 ```
 
 平台地址和绑定凭据沿用 Runner 现有配置方式。也可使用 `AGENTFLOW_RUNNER_WARM_NATIVE=1`。新建 SOP 或对话选择 native 沙箱，并绑定有对应登记的个人执行机器。项目使用「预热工作区池」。运行环境在创建工作区时冻结。
+
+## SOP 节点运行 Unity 测试
+
+`unityEditorPath` 是可选的槽位配置。配置后重启 Runner，使用该槽位的 Agent、脚本和验证命令可以在各自的任务中调用：
+
+```bash
+"$AGENTFLOW_UNITY_TEST" --mode EditMode --test-filter InteractionSequenceSceneTests
+"$AGENTFLOW_UNITY_TEST" --mode PlayMode
+```
+
+租约中有多个已配置的 Unity 仓库时，用 `--repository` 指定仓库 ID。Runner 使用原始 Windows 项目路径和已安装的对应版本。Unity 在 Windows 用户会话下运行并使用该用户的许可证。只对信任的项目槽位启用此配置，因为编辑器会在该会话中执行项目代码。
+
+命令等待运行结束并输出 JSON，包含本次状态、Git 提交、可取得的工作树状态，以及 `xmlPath` 和 `logPath`。这些路径相对于运行工作区根目录。节点可以将报告复制到现有制品契约声明的路径。通过需要有效的 NUnit XML、至少一个执行通过的用例和正常的编辑器退出。一个项目同时运行一项测试，编辑器占用时会报告 `busy`。每次调用最多 30 分钟，任务取消时 Runner 会结束本次测试进程树。
+
+NUnit XML 上限为 8 MiB，超过时返回基础设施错误。超过 4 MiB 的编辑器日志保留末尾，并在结果中标记 `logTruncated`。
 
 ## Windows Unity 验收
 

@@ -19,6 +19,7 @@ type warmGitCommand struct {
 	Outputs                *domain.RunnerInvocation
 	SkipPatchInventory     bool `json:",omitempty"`
 	Read                   *domain.RunnerWorkspaceRequest
+	UnityCheckout          *unityCheckoutRequest
 	Action, Message, Label string
 	Invocation             *domain.RunnerInvocation
 	KnownHosts             []byte
@@ -60,6 +61,16 @@ func RunWarmGitHelperCLI(args []string) bool {
 }
 
 func (op warmGitCommand) executeAt(ctx context.Context, root string, native bool) domain.RunnerWorkspaceResponse {
+	if req := op.UnityCheckout; req != nil {
+		if !native || !validWarmWorkspaceRelativePath(req.RepositoryDir) {
+			return runnerWorkspaceError(errors.New("invalid Unity checkout request"))
+		}
+		info, err := readUnityCheckout(ctx, filepath.Join(root, req.RepositoryDir), req.CommitOnly)
+		if err != nil {
+			return runnerWorkspaceError(err)
+		}
+		return runnerWorkspacePayload(info)
+	}
 	if op.Outputs != nil {
 		if op.SkipPatchInventory {
 			return runnerWorkspacePayload(collectTaskOutputFiles(root, op.Outputs))

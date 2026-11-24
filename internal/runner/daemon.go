@@ -887,6 +887,7 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 		}
 		defer release()
 	}
+	prompt, driver := d.unityTestInvocation(task, driver)
 	target := d.mcpTarget(true, inv.GitHTTPCredentials)
 	sshRepoCount := len(inv.GitSSHRemotes())
 	target.SSHRepositoriesOnly = sshRepoCount > 0 && sshRepoCount == max(len(inv.Repositories), 1)
@@ -907,7 +908,7 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 		Executor:     executor,
 		Agent:        inv.Agent,
 		Assets:       boundAssets,
-		Prompt:       task.Prompt,
+		Prompt:       prompt,
 		Options:      runtime.InvocationOptions{RunID: inv.RunID, NodeID: inv.NodeID, ResumeSessionID: inv.ResumeSessionID, GateResultPath: inv.GateResultPath, Repositories: invocationRepositoryContexts(inv), BrowserMCP: browserMCP},
 		Driver:       driver,
 	})

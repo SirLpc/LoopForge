@@ -21,6 +21,9 @@ import (
 // HTTPS only, and executes Agent CLI tasks on that machine. Agent CLI
 // credentials stay on this machine.
 func main() {
+	if code, handled := runner.RunUnityTestCLI(os.Args); handled {
+		os.Exit(code)
+	}
 	if runtime.RunMCPCallCLI(os.Args[1:]) {
 		return
 	}

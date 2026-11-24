@@ -54,6 +54,11 @@ func (d *Daemon) executeSandboxProcess(ctx context.Context, task domain.RunnerTa
 	}
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	command, closeUnity, err := d.bindUnityTest(execCtx, task, command)
+	if err != nil {
+		return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("prepare Unity test bridge: %v", err)}
+	}
+	defer closeUnity()
 	type outcome struct {
 		output string
 		err    error
